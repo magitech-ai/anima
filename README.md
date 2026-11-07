@@ -1,6 +1,6 @@
-# Kernel
+# Anima
 
-The standalone, zero-dependency composable micro-kernel powering **Something From Nothing**.
+The standalone, zero-dependency composable micro-kernel powering **Magitech**.
 
 Built around the core philosophy: **"Everything is a Plugin"**.
 
@@ -24,7 +24,7 @@ Built around the core philosophy: **"Everything is a Plugin"**.
 ## Quickstart
 
 ```bash
-cd /mnt/storage/projects/AI/kernel
+cd /mnt/storage/projects/AI/anima
 
 # Run the test suite
 uv run pytest -v

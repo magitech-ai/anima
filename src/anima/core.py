@@ -1,5 +1,5 @@
 """
-Core Kernel primitives in Python:
+Anima: The Composable Micro-Kernel by Magitech.
 - Context: Container of services, events, effects, and child contexts
 - Service: Base class for pluggable capabilities
 - Fiber: Runtime state machine and lifecycle handle for plugin instances
@@ -13,7 +13,7 @@ from contextvars import ContextVar
 from enum import Enum
 from typing import Any, Awaitable, Callable, Union
 
-from kernel.events import Disposer, EventBus, EventMode
+from anima.events import Disposer, EventBus, EventMode
 
 _current_fiber: ContextVar[Fiber | None] = ContextVar("_current_fiber", default=None)
 
@@ -123,7 +123,7 @@ class Fiber:
                     await res
             except Exception as e:
                 import logging
-                logging.getLogger("kernel.fiber").exception("Error during fiber disposal: %s", e)
+                logging.getLogger("anima.fiber").exception("Error during fiber disposal: %s", e)
 
         self.effects.clear()
         self.state = FiberState.DISPOSED

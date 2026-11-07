@@ -87,7 +87,7 @@ class EventBus:
             except Exception as e:
                 # Observers do not crash the emitter
                 import logging
-                logging.getLogger("kernel.events").exception("Error in emit listener: %s", e)
+                logging.getLogger("anima.events").exception("Error in emit listener: %s", e)
 
     async def parallel(self, event: str, *args: Any, **kwargs: Any) -> list[Any]:
         """All listeners run concurrently and are awaited together."""

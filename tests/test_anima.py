@@ -1,7 +1,7 @@
 import asyncio
 import pytest
 
-from kernel import Context, EventMode, FiberState, Service
+from anima import Context, EventMode, FiberState, Service
 
 
 class MockGreeter(Service):

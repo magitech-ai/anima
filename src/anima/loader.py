@@ -9,7 +9,7 @@ import importlib
 from pathlib import Path
 from typing import Any
 import yaml
-from kernel.core import Context
+from anima.core import Context
 
 
 def resolve_plugin_target(target_str: str) -> Any:
