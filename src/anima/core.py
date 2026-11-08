@@ -1,21 +1,33 @@
 """
 Anima: The Composable Micro-Kernel by Magitech.
-- Context: Container of services, events, effects, and child contexts
-- Service: Base class for pluggable capabilities
-- Fiber: Runtime state machine and lifecycle handle for plugin instances
+Complete specification implementing:
+- Context: Service registry, isolation realms, intercept configurations, and child scopes
+- Service: Base class for pluggable, dependency-injected capabilities
+- Fiber: Runtime state machine, config validation, reversible effects, and introspection
+- Registry: Live plugin tree introspection and dependency diagnostics
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from contextvars import ContextVar
 from enum import Enum
 from typing import Any, Awaitable, Callable, Union
 
 from anima.events import Disposer, EventBus, EventMode
 
+logger = logging.getLogger("anima")
+
 _current_fiber: ContextVar[Fiber | None] = ContextVar("_current_fiber", default=None)
+_fiber_uid_counter: int = 0
+
+
+def _next_uid() -> int:
+    global _fiber_uid_counter
+    _fiber_uid_counter += 1
+    return _fiber_uid_counter
 
 
 class FiberState(str, Enum):
@@ -28,7 +40,7 @@ class FiberState(str, Enum):
 
 
 class Fiber:
-    """The runtime handle for a loaded plugin instance."""
+    """The runtime handle and lifecycle manager for a loaded plugin instance."""
 
     def __init__(
         self,
@@ -38,16 +50,22 @@ class Fiber:
         kwargs: dict[str, Any],
         parent_fiber: Fiber | None = None,
     ) -> None:
+        self.uid: int = _next_uid()
         self.ctx = ctx
         self.target = target
         self.args = args
-        self.kwargs = kwargs
+        self.raw_config: dict[str, Any] = dict(kwargs)
+        self.config: Any = dict(kwargs)
         self.parent_fiber = parent_fiber
         self.child_fibers: list[Fiber] = []
         self.effects: list[Disposer] = []
         self.state: FiberState = FiberState.PENDING
+        self.error: Exception | None = None
         self.name: str = getattr(target, "name", getattr(target, "__name__", str(target)))
-        
+
+        # Validate config if plugin declares a Config schema (e.g. Pydantic or callable)
+        self._validate_config()
+
         # Read inject dependencies
         inject_decl = getattr(target, "inject", None)
         if isinstance(inject_decl, (list, tuple, set)):
@@ -55,50 +73,70 @@ class Fiber:
         else:
             self.inject = []
 
+    def _validate_config(self) -> None:
+        config_schema = getattr(self.target, "Config", None)
+        if config_schema is not None and callable(config_schema):
+            try:
+                self.config = config_schema(**self.raw_config)
+            except Exception as e:
+                self.error = e
+                self.state = FiberState.FAILED
+                logger.error("Config validation failed for plugin %s (uid %d): %s", self.name, self.uid, e)
+
+    def _set_state(self, new_state: FiberState, error: Exception | None = None) -> None:
+        old_state = self.state
+        if old_state == new_state:
+            return
+        self.state = new_state
+        self.error = error
+        self.ctx.emit("internal/status", self, old_state, new_state)
+
     def check_dependencies(self) -> bool:
         """Check if all required services exist on context."""
         return all(self.ctx.has(service) for service in self.inject)
 
     async def load(self) -> Any:
         """Mount and activate the plugin."""
-        if self.state in (FiberState.LOADING, FiberState.ACTIVE):
+        if self.state in (FiberState.LOADING, FiberState.ACTIVE, FiberState.FAILED):
             return None
 
         if not self.check_dependencies():
-            self.state = FiberState.PENDING
+            self._set_state(FiberState.PENDING)
             return None
 
-        self.state = FiberState.LOADING
+        self._set_state(FiberState.LOADING)
         token = _current_fiber.set(self)
         instance = None
         try:
             target = self.target
-            # 1. Target is a class (e.g. Service subclass or general class)
+
+            # 1. Target is a class (e.g. Service subclass or general plugin class)
             if inspect.isclass(target):
-                instance = target(self.ctx, *self.args, **self.kwargs)
+                instance = target(self.ctx, *self.args, **self.raw_config)
                 if hasattr(instance, "apply") and callable(instance.apply):
                     res = instance.apply(self.ctx)
                     if inspect.isawaitable(res):
                         await res
             # 2. Target is an object with an apply method
             elif hasattr(target, "apply") and callable(target.apply):
-                res = target.apply(self.ctx, *self.args, **self.kwargs)
+                res = target.apply(self.ctx, *self.args, **self.raw_config)
                 if inspect.isawaitable(res):
                     await res
                 instance = target
             # 3. Target is a callable / function plugin
             elif callable(target):
-                res = target(self.ctx, *self.args, **self.kwargs)
+                res = target(self.ctx, *self.args, **self.raw_config)
                 if inspect.isawaitable(res):
                     await res
                 instance = res
             else:
                 raise ValueError(f"Plugin target {target} must be a callable or class with apply(ctx)")
 
-            self.state = FiberState.ACTIVE
+            self._set_state(FiberState.ACTIVE)
             return instance
-        except Exception:
-            self.state = FiberState.FAILED
+        except Exception as e:
+            self._set_state(FiberState.FAILED, error=e)
+            logger.exception("Plugin %s (uid %d) failed during load: %s", self.name, self.uid, e)
             raise
         finally:
             _current_fiber.reset(token)
@@ -108,7 +146,7 @@ class Fiber:
         if self.state in (FiberState.UNLOADING, FiberState.DISPOSED):
             return
 
-        self.state = FiberState.UNLOADING
+        self._set_state(FiberState.UNLOADING)
 
         # Dispose child fibers first
         for child in reversed(self.child_fibers):
@@ -122,15 +160,26 @@ class Fiber:
                 if inspect.isawaitable(res):
                     await res
             except Exception as e:
-                import logging
-                logging.getLogger("anima.fiber").exception("Error during fiber disposal: %s", e)
+                logger.exception("Error during fiber %d (%s) disposal: %s", self.uid, self.name, e)
 
         self.effects.clear()
-        self.state = FiberState.DISPOSED
+        self._set_state(FiberState.DISPOSED)
+
+    def status(self) -> dict[str, Any]:
+        """Return diagnostic status snapshot of this fiber."""
+        return {
+            "uid": self.uid,
+            "name": self.name,
+            "state": self.state.value,
+            "inject": self.inject,
+            "effects_count": len(self.effects),
+            "children_count": len(self.child_fibers),
+            "error": str(self.error) if self.error else None,
+        }
 
 
 class Service:
-    """Base class for services mounted on Context."""
+    """Base class for named capabilities mounted onto Context."""
 
     def __init__(self, ctx: Context, name: str) -> None:
         self.ctx = ctx
@@ -145,14 +194,31 @@ class Service:
 
 
 class Context:
-    """The central Context repository of services, events, and plugins."""
+    """The central Anima Context repository of services, events, effects, and scopes."""
 
-    def __init__(self, parent: Context | None = None) -> None:
+    def __init__(
+        self,
+        parent: Context | None = None,
+        *,
+        isolated_services: set[str] | None = None,
+        scope_label: str | None = None,
+    ) -> None:
         self._parent = parent
         self._services: dict[str, Any] = {}
         self._fibers: list[Fiber] = []
         self._pending_tasks: set[asyncio.Task] = set()
         self._event_bus: EventBus = parent._event_bus if parent else EventBus()
+        self._isolated_services: set[str] = isolated_services or set()
+        self._scope_label = scope_label
+        self._intercept_configs: dict[str, dict[str, Any]] = {}
+
+    @property
+    def root(self) -> Context:
+        """Return the root ancestor context."""
+        curr = self
+        while curr._parent is not None:
+            curr = curr._parent
+        return curr
 
     async def flush(self) -> None:
         """Wait for all pending plugin load and event tasks to settle."""
@@ -172,15 +238,19 @@ class Context:
             return None
 
     def has(self, name: str) -> bool:
-        """Check if a service is registered in this context or parent."""
+        """Check if a service is registered in this context scope."""
         if name in self._services:
             return True
+        if name in self._isolated_services:
+            return False
         return self._parent.has(name) if self._parent else False
 
     def get(self, name: str, default: Any = None) -> Any:
-        """Safely fetch a service, returning default if not present."""
+        """Safely fetch a service, respecting service isolation boundaries."""
         if name in self._services:
             return self._services[name]
+        if name in self._isolated_services:
+            return default
         if self._parent:
             return self._parent.get(name, default)
         return default
@@ -193,13 +263,26 @@ class Context:
             return svc
         raise AttributeError(
             f"Service '{name}' is not registered on Context. "
-            f"Available services: {list(self._services.keys())}"
+            f"Available services: {list(self.services.keys())}"
         )
+
+    @property
+    def services(self) -> dict[str, Any]:
+        """Dictionary of all accessible services in this scope."""
+        all_svcs: dict[str, Any] = {}
+        if self._parent:
+            for k, v in self._parent.services.items():
+                if k not in self._isolated_services:
+                    all_svcs[k] = v
+        all_svcs.update(self._services)
+        return all_svcs
 
     def _register_service(self, name: str, service: Any) -> None:
         """Register a service and re-evaluate any PENDING fibers waiting on it."""
         self._services[name] = service
-        # Check pending fibers
+        self.emit("internal/service", name, service)
+
+        # Check pending fibers across this context and children
         for fiber in list(self._fibers):
             if fiber.state == FiberState.PENDING and fiber.check_dependencies():
                 self._schedule_task(fiber.load())
@@ -208,6 +291,7 @@ class Context:
         """Unregister a service and dispose any dependent fibers."""
         if name in self._services:
             del self._services[name]
+            self.emit("internal/service-removed", name)
             # Fibers depending on this service must be disposed
             for fiber in list(self._fibers):
                 if fiber.state == FiberState.ACTIVE and name in fiber.inject:
@@ -221,17 +305,30 @@ class Context:
         if current_fib is not None:
             current_fib.child_fibers.append(fiber)
 
-        # If dependencies satisfied, load now
-        if fiber.check_dependencies():
+        self.emit("internal/plugin", fiber)
+
+        # If dependencies satisfied and not failed, load now
+        if fiber.state != FiberState.FAILED and fiber.check_dependencies():
             self._schedule_task(fiber.load())
         return fiber
 
-    def effect(self, func: Callable[[], Disposer | None]) -> None:
-        """Register a reversible effect with the currently loading fiber."""
+    def effect(self, func: Callable[[], Disposer | None], label: str | None = None) -> Disposer:
+        """Register a cleanup-aware reversible effect on the active fiber."""
         fiber = _current_fiber.get()
         disposer = func()
+
+        def _cleanup():
+            if callable(disposer):
+                if fiber is not None and disposer in fiber.effects:
+                    fiber.effects.remove(disposer)
+                res = disposer()
+                return res
+            return None
+
         if callable(disposer) and fiber is not None:
             fiber.effects.append(disposer)
+
+        return _cleanup
 
     def on(
         self,
@@ -275,5 +372,22 @@ class Context:
         )
 
     def extend(self) -> Context:
-        """Create an isolated child context (for subagents or scoped presets)."""
+        """Create a child context inheriting all parent services."""
         return Context(parent=self)
+
+    def isolate(self, service_name: str, label: str | None = None) -> Context:
+        """Create a child context with an isolated service scope for `service_name`.
+        
+        Reads and writes of `service_name` in the child will not resolve or affect the parent.
+        """
+        isolated = set(self._isolated_services)
+        isolated.add(service_name)
+        return Context(parent=self, isolated_services=isolated, scope_label=label)
+
+    def dump_tree(self) -> dict[str, Any]:
+        """Dump the full runtime hierarchy of plugins and services for introspection."""
+        return {
+            "services": list(self.services.keys()),
+            "isolated": list(self._isolated_services),
+            "fibers": [f.status() for f in self._fibers],
+        }

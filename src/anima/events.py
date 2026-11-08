@@ -161,15 +161,20 @@ class EventBus:
                 return await dispatch(index + 1, *call_args, **merged_kwargs)
 
             cb = current_listener.callback
-            # Inspect callback signature to pass next_fn appropriately
             sig = inspect.signature(cb)
             params = list(sig.parameters.values())
+            has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+            param_names = [p.name for p in params]
 
-            # If last parameter is 'next' or named accordingly, pass next_fn
-            if len(params) > len(current_args):
+            if has_varargs or len(params) > len(current_args):
                 res = cb(*current_args, next_fn, **current_kwargs)
+            elif "next" in param_names or "next_fn" in param_names:
+                next_param_name = "next" if "next" in param_names else "next_fn"
+                merged = dict(current_kwargs)
+                merged[next_param_name] = next_fn
+                res = cb(*current_args, **merged)
             else:
-                res = cb(*current_args, next=next_fn, **current_kwargs)
+                res = cb(*current_args, next_fn, **current_kwargs)
 
             if inspect.isawaitable(res):
                 return await res
