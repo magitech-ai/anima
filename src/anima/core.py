@@ -15,7 +15,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from anima.events import Disposer, EventBus, EventMode
 
@@ -120,7 +120,8 @@ class Fiber:
 
             # 1. Target is a class (e.g. Service subclass or general plugin class)
             if inspect.isclass(target):
-                instance = target(self.ctx, *self.args, **self.raw_config)
+                target_cls = cast(type[Any], target)
+                instance = target_cls(self.ctx, *self.args, **self.raw_config)
                 if hasattr(instance, "apply") and callable(instance.apply):
                     res = instance.apply(self.ctx)
                     if inspect.isawaitable(res):
@@ -201,7 +202,7 @@ class Service:
         ctx._register_service(name, self)
 
         # Register unregister disposer effect
-        def _unregister():
+        def _unregister() -> None:
             ctx._unregister_service(name)
 
         ctx.effect(lambda: _unregister)
@@ -220,7 +221,7 @@ class Context:
         self._parent = parent
         self._services: dict[str, Any] = {}
         self._fibers: list[Fiber] = []
-        self._pending_tasks: set[asyncio.Task] = set()
+        self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._event_bus: EventBus = parent._event_bus if parent else EventBus()
         self._isolated_services: set[str] = isolated_services or set()
         self._scope_label = scope_label
@@ -242,15 +243,18 @@ class Context:
             for t in tasks:
                 self._pending_tasks.discard(t)
 
-    def _schedule_task(self, coro: Awaitable[Any]) -> asyncio.Task | None:
+    def _schedule_task(self, coro: Awaitable[Any]) -> asyncio.Task[Any] | None:
+        async def _run() -> Any:
+            return await coro
+
         try:
             loop = asyncio.get_running_loop()
-            task = loop.create_task(coro)
+            task: asyncio.Task[Any] = loop.create_task(_run())
             self._pending_tasks.add(task)
             task.add_done_callback(self._pending_tasks.discard)
             return task
         except RuntimeError:
-            asyncio.run(coro)
+            asyncio.run(_run())
             return None
 
     def has(self, name: str) -> bool:
@@ -335,7 +339,7 @@ class Context:
         fiber = _current_fiber.get()
         disposer = func()
 
-        def _cleanup():
+        def _cleanup() -> Any:
             if callable(disposer):
                 if fiber is not None and disposer in fiber.effects:
                     fiber.effects.remove(disposer)

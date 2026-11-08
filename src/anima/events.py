@@ -45,6 +45,10 @@ class Listener:
         )
 
 
+async def _await_res(aw: Awaitable[Any]) -> Any:
+    return await aw
+
+
 class EventBus:
     """Event bus adhering to the event dispatch specification."""
 
@@ -84,9 +88,9 @@ class EventBus:
                 if inspect.isawaitable(res):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(res)
+                        loop.create_task(_await_res(res))
                     except RuntimeError:
-                        asyncio.run(res)
+                        asyncio.run(_await_res(res))
             except Exception:
                 # Observers do not crash the emitter
                 import logging
@@ -130,7 +134,7 @@ class EventBus:
             res = listener.callback(*args, **kwargs)
             if inspect.isawaitable(res):
                 # Cannot block safely in synchronous bail if awaitable returned
-                res = asyncio.run(res)
+                res = asyncio.run(_await_res(res))
             if res is not None:
                 return res
         return None
