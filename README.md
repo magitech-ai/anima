@@ -32,6 +32,7 @@ Built around the core philosophy: **"Everything is a Plugin"**.
 import asyncio
 from anima import Context, Service, EventMode
 
+
 class GreeterService(Service):
     def __init__(self, ctx: Context):
         super().__init__(ctx, "greeter")
@@ -39,12 +40,14 @@ class GreeterService(Service):
     def greet(self, name: str) -> str:
         return f"Greetings, {name}!"
 
+
 async def main():
     ctx = Context()
     ctx.plugin(GreeterService)
     await ctx.flush()
 
     print(ctx.greeter.greet("Magitech"))
+
 
 asyncio.run(main())
 ```
