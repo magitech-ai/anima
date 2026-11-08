@@ -10,9 +10,17 @@ The lightweight asynchronous micro-kernel and event pipeline engine providing co
 An execution scope holding service instances, event bindings, and lifecycle hooks with hierarchical inheritance.
 _Avoid_: Container, scope, environment
 
+**Child Context**:
+A scoped execution context spawned from a parent context that inherits parent services without mutating them.
+_Avoid_: Sub-scope, local environment, child container
+
 **Service**:
 A reusable singleton instance mounted onto a context accessible by name.
 _Avoid_: Component, manager, module
+
+**Plugin Entrypoint**:
+The standard `apply(ctx)` callable exported by an Anima plugin module to mount services and event bindings onto a context.
+_Avoid_: Setup hook, loader, init function
 
 ### Event Pipelines
 
