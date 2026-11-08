@@ -225,6 +225,8 @@ class Context:
         while self._pending_tasks:
             tasks = list(self._pending_tasks)
             await asyncio.gather(*tasks, return_exceptions=True)
+            for t in tasks:
+                self._pending_tasks.discard(t)
 
     def _schedule_task(self, coro: Awaitable[Any]) -> asyncio.Task | None:
         try:
