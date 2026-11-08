@@ -59,9 +59,10 @@ asyncio.run(main())
 uv run pytest
 ```
 
-* `tests/unit/test_core.py`: IoC container, Fiber lifecycle, Reversible Effects, Isolation Realms, Tree dumps.
-* `tests/unit/test_events.py`: All 5 Event Modes (Emit, Parallel, Serial, Bail, Waterfall with Next/Varargs/Kwonly).
-* `tests/unit/test_loader.py`: Module and YAML declarative profile loader.
+* `tests/unit/anima/test_init.py`: Top-level package namespace and symbol exports.
+* `tests/unit/anima/test_core.py`: IoC container, Fiber lifecycle, Reversible Effects, Isolation Realms, Tree dumps.
+* `tests/unit/anima/test_events.py`: All 5 Event Modes (Emit, Parallel, Serial, Bail, Waterfall with Next/Varargs/Kwonly).
+* `tests/unit/anima/test_loader.py`: Module and YAML declarative profile loader.
 * `tests/integration/test_pipeline.py`: Full end-to-end multi-plugin agent pipeline, cascade disposal, and subagent isolation.
 
 ---
