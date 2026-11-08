@@ -1,4 +1,5 @@
 import asyncio
+
 import pytest
 from pydantic import BaseModel, ValidationError
 
@@ -328,7 +329,7 @@ async def test_async_object_and_callable_plugin_and_async_disposer():
 
         c.effect(lambda: async_cleanup)
 
-    f_obj = ctx.plugin(AsyncObj())
+    _f_obj = ctx.plugin(AsyncObj())
     f_func = ctx.plugin(async_func)
     await ctx.flush()
 
@@ -427,5 +428,3 @@ async def test_class_plugin_sync_apply_and_disposer_idempotent():
     disposer()
     disposer()  # second call when disposer not in fiber.effects
     assert ran == [1, 1]
-
-

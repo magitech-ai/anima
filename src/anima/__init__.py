@@ -8,12 +8,12 @@ from anima.loader import load_profile, resolve_plugin_target
 
 __all__ = [
     "Context",
-    "Service",
-    "Fiber",
-    "FiberState",
+    "Disposer",
     "EventBus",
     "EventMode",
-    "Disposer",
+    "Fiber",
+    "FiberState",
+    "Service",
     "load_profile",
     "resolve_plugin_target",
 ]

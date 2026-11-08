@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from enum import Enum
-from typing import Any, Awaitable, Callable, Union
+from typing import Any
 
 from anima.events import Disposer, EventBus, EventMode
 
@@ -61,7 +62,9 @@ class Fiber:
         self.effects: list[Disposer] = []
         self.state: FiberState = FiberState.PENDING
         self.error: Exception | None = None
-        self.name: str = getattr(target, "name", getattr(target, "__name__", str(target)))
+        self.name: str = getattr(
+            target, "name", getattr(target, "__name__", str(target))
+        )
 
         # Validate config if plugin declares a Config schema (e.g. Pydantic or callable)
         self._validate_config()
@@ -78,10 +81,15 @@ class Fiber:
         if config_schema is not None and callable(config_schema):
             try:
                 self.config = config_schema(**self.raw_config)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 self.error = e
                 self.state = FiberState.FAILED
-                logger.error("Config validation failed for plugin %s (uid %d): %s", self.name, self.uid, e)
+                logger.error(
+                    "Config validation failed for plugin %s (uid %d): %s",
+                    self.name,
+                    self.uid,
+                    e,
+                )
 
     def _set_state(self, new_state: FiberState, error: Exception | None = None) -> None:
         old_state = self.state
@@ -130,13 +138,17 @@ class Fiber:
                     await res
                 instance = res
             else:
-                raise ValueError(f"Plugin target {target} must be a callable or class with apply(ctx)")
+                raise ValueError(
+                    f"Plugin target {target} must be a callable or class with apply(ctx)"
+                )
 
             self._set_state(FiberState.ACTIVE)
             return instance
         except Exception as e:
             self._set_state(FiberState.FAILED, error=e)
-            logger.exception("Plugin %s (uid %d) failed during load: %s", self.name, self.uid, e)
+            logger.exception(
+                "Plugin %s (uid %d) failed during load", self.name, self.uid
+            )
             raise
         finally:
             _current_fiber.reset(token)
@@ -159,8 +171,10 @@ class Fiber:
                 res = disposer()
                 if inspect.isawaitable(res):
                     await res
-            except Exception as e:
-                logger.exception("Error during fiber %d (%s) disposal: %s", self.uid, self.name, e)
+            except Exception:
+                logger.exception(
+                    "Error during fiber %d (%s) disposal", self.uid, self.name
+                )
 
         self.effects.clear()
         self._set_state(FiberState.DISPOSED)
@@ -314,7 +328,9 @@ class Context:
             self._schedule_task(fiber.load())
         return fiber
 
-    def effect(self, func: Callable[[], Disposer | None], label: str | None = None) -> Disposer:
+    def effect(
+        self, func: Callable[[], Disposer | None], label: str | None = None
+    ) -> Disposer:
         """Register a cleanup-aware reversible effect on the active fiber."""
         fiber = _current_fiber.get()
         disposer = func()
@@ -379,7 +395,7 @@ class Context:
 
     def isolate(self, service_name: str, label: str | None = None) -> Context:
         """Create a child context with an isolated service scope for `service_name`.
-        
+
         Reads and writes of `service_name` in the child will not resolve or affect the parent.
         """
         isolated = set(self._isolated_services)

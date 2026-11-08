@@ -1,29 +1,34 @@
 import sys
-from pathlib import Path
 import types
+from pathlib import Path
+
 import pytest
 import yaml
 
-from anima.core import Context, FiberState
+from anima.core import Context
 from anima.loader import load_profile, resolve_plugin_target
 
 
 def test_resolve_plugin_target_colon_syntax():
     target = resolve_plugin_target("anima.events:EventBus")
     from anima.events import EventBus
+
     assert target is EventBus
 
 
 def test_resolve_plugin_target_dot_syntax():
     target = resolve_plugin_target("anima.core.Context")
     from anima.core import Context as CoreContext
+
     assert target is CoreContext
 
 
 def test_resolve_plugin_target_module_with_apply(monkeypatch):
     dummy_mod = types.ModuleType("dummy_plugin_mod")
+
     def apply_fn(ctx):
         return "applied"
+
     dummy_mod.apply = apply_fn
     monkeypatch.setitem(sys.modules, "dummy_plugin_mod", dummy_mod)
 
@@ -34,6 +39,7 @@ def test_resolve_plugin_target_module_with_apply(monkeypatch):
 def test_resolve_plugin_target_module_without_apply():
     target = resolve_plugin_target("anima")
     import anima
+
     assert target is anima
 
 
@@ -61,7 +67,10 @@ async def test_load_profile_from_list_and_dict_entries(monkeypatch):
         # Dict entry without config
         {"name": "custom_agent_plugin:SampleService"},
         # Dict entry with config
-        {"name": "custom_agent_plugin:SampleService", "config": {"token": "secret_xyz"}},
+        {
+            "name": "custom_agent_plugin:SampleService",
+            "config": {"token": "secret_xyz"},
+        },
         # Dict entry without name (skipped)
         {"config": {"ignored": True}},
     ]
@@ -80,6 +89,7 @@ async def test_load_profile_from_yaml_file(tmp_path: Path, monkeypatch):
     calls = []
 
     dummy_mod = types.ModuleType("profile_mod")
+
     def sample_plugin(c: Context, mode: str = "fast"):
         calls.append(mode)
 

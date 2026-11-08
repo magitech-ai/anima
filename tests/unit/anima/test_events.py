@@ -1,7 +1,8 @@
 import asyncio
+
 import pytest
 
-from anima.events import EventBus, EventMode
+from anima.events import EventBus
 
 
 @pytest.mark.asyncio
@@ -139,7 +140,10 @@ async def test_waterfall_default_handlers_and_empty():
     async def async_default(x):
         return f"async_{x}"
 
-    assert await bus.waterfall("empty", "val", default_handler=async_default) == "async_val"
+    assert (
+        await bus.waterfall("empty", "val", default_handler=async_default)
+        == "async_val"
+    )
 
 
 @pytest.mark.asyncio
@@ -165,7 +169,9 @@ async def test_waterfall_signature_variations():
     bus.on("sig_test", kw_middleware)
     bus.on("sig_test", kw_fn_middleware)
 
-    result = await bus.waterfall("sig_test", "start", default_handler=lambda s: f"end({s})")
+    result = await bus.waterfall(
+        "sig_test", "start", default_handler=lambda s: f"end({s})"
+    )
     assert result == "wrapped_end(kwfn_kw_varargs_start)"
 
 
@@ -199,6 +205,7 @@ async def test_waterfall_pure_sync_short_circuit():
         return next(val)
 
     bus.on("intercept", sync_interceptor)
-    res = await bus.waterfall("intercept", "bypass", default_handler=lambda s: "default")
+    res = await bus.waterfall(
+        "intercept", "bypass", default_handler=lambda s: "default"
+    )
     assert res == "immediate_sync_bypass"
-

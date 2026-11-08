@@ -8,7 +8,9 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 from typing import Any
+
 import yaml
+
 from anima.core import Context
 
 
@@ -27,23 +29,27 @@ def resolve_plugin_target(target_str: str) -> Any:
     if attr_name:
         return getattr(mod, attr_name)
     if hasattr(mod, "apply"):
-        return getattr(mod, "apply")
+        return mod.apply
     return mod
 
 
-def load_profile(ctx: Context, config_source: str | Path | list[dict[str, Any]]) -> None:
+def load_profile(
+    ctx: Context, config_source: str | Path | list[dict[str, Any]]
+) -> None:
     """Load a profile list of plugin configurations into a Context."""
     if isinstance(config_source, (str, Path)):
         path = Path(config_source)
         if not path.exists():
             raise FileNotFoundError(f"Profile config file not found: {path}")
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             entries = yaml.safe_load(f)
     else:
         entries = config_source
 
     if not isinstance(entries, list):
-        raise ValueError("Profile configuration must be a list of plugin entries")
+        raise ValueError(  # noqa: TRY004
+            "Profile configuration must be a list of plugin entries"
+        )
 
     for entry in entries:
         if isinstance(entry, str):

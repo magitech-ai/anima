@@ -1,6 +1,6 @@
-import asyncio
 from pathlib import Path
 from typing import Any
+
 import pytest
 import yaml
 
@@ -56,8 +56,8 @@ async def test_end_to_end_agent_pipeline():
     ctx = Context()
 
     # 1. Mount provider and tool registry
-    provider_fib = ctx.plugin(MockModelProvider, model_name="magitech-core-v1")
-    tools_fib = ctx.plugin(MockToolRegistry)
+    _provider_fib = ctx.plugin(MockModelProvider, model_name="magitech-core-v1")
+    _tools_fib = ctx.plugin(MockToolRegistry)
     agent_fib = ctx.plugin(MockAgent)
 
     await ctx.flush()
@@ -86,7 +86,10 @@ async def test_end_to_end_agent_pipeline():
 
     # 3. Execute agent
     reply = await ctx.agent.run("  hello magitech!  ")
-    assert reply == "[magitech-core-v1] response to: <system>Safe</system> hello magitech! [verified]"
+    assert (
+        reply
+        == "[magitech-core-v1] response to: <system>Safe</system> hello magitech! [verified]"
+    )
     assert ctx.provider.generation_count == 1
     assert len(ctx.agent.history) == 1
 
@@ -97,7 +100,7 @@ async def test_agent_cascade_disposal_and_recovery():
     ctx = Context()
 
     provider_fib = ctx.plugin(MockModelProvider)
-    tools_fib = ctx.plugin(MockToolRegistry)
+    _tools_fib = ctx.plugin(MockToolRegistry)
     agent_fib = ctx.plugin(MockAgent)
     await ctx.flush()
 
@@ -111,7 +114,7 @@ async def test_agent_cascade_disposal_and_recovery():
     assert agent_fib.state == FiberState.DISPOSED
 
     # Re-mount a new provider instance
-    new_provider_fib = ctx.plugin(MockModelProvider, model_name="magitech-v2")
+    _new_provider_fib = ctx.plugin(MockModelProvider, model_name="magitech-v2")
     # Re-mount agent
     new_agent_fib = ctx.plugin(MockAgent)
     await ctx.flush()

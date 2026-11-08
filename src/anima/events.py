@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Awaitable, Callable
 from enum import Enum
-from typing import Any, Awaitable, Callable, Union
+from typing import Any
 
-Disposer = Callable[[], Union[None, Awaitable[None]]]
+Disposer = Callable[[], None | Awaitable[None]]
 
 
 class EventMode(str, Enum):
@@ -39,7 +40,9 @@ class Listener:
         self.callback = callback
         self.mode = mode
         self.prepend = prepend
-        self.is_async = inspect.iscoroutinefunction(callback) or inspect.isawaitable(callback)
+        self.is_async = inspect.iscoroutinefunction(callback) or inspect.isawaitable(
+            callback
+        )
 
 
 class EventBus:
@@ -84,10 +87,11 @@ class EventBus:
                         loop.create_task(res)
                     except RuntimeError:
                         asyncio.run(res)
-            except Exception as e:
+            except Exception:
                 # Observers do not crash the emitter
                 import logging
-                logging.getLogger("anima.events").exception("Error in emit listener: %s", e)
+
+                logging.getLogger("anima.events").exception("Error in emit listener")
 
     async def parallel(self, event: str, *args: Any, **kwargs: Any) -> list[Any]:
         """All listeners run concurrently and are awaited together."""
@@ -98,8 +102,10 @@ class EventBus:
             if inspect.isawaitable(res):
                 tasks.append(res)
             else:
+
                 async def _sync_wrapper(val: Any) -> Any:
                     return val
+
                 tasks.append(_sync_wrapper(res))
 
         if not tasks:
@@ -137,14 +143,16 @@ class EventBus:
         **kwargs: Any,
     ) -> Any:
         """Around-middleware pipeline.
-        
+
         Each listener receives `(*args, next)`.
         Calling `await next(*args)` passes control down the chain.
         Returning without calling `next()` short-circuits.
         """
         listeners = list(self._listeners.get(event, []))
 
-        async def dispatch(index: int, *current_args: Any, **current_kwargs: Any) -> Any:
+        async def dispatch(
+            index: int, *current_args: Any, **current_kwargs: Any
+        ) -> Any:
             if index >= len(listeners):
                 if default_handler is not None:
                     res = default_handler(*current_args, **current_kwargs)
@@ -163,7 +171,9 @@ class EventBus:
             cb = current_listener.callback
             sig = inspect.signature(cb)
             params = list(sig.parameters.values())
-            has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+            has_varargs = any(
+                p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
+            )
             param_names = [p.name for p in params]
 
             if "next" in param_names or "next_fn" in param_names:
