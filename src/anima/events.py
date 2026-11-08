@@ -166,15 +166,19 @@ class EventBus:
             has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
             param_names = [p.name for p in params]
 
-            if has_varargs or len(params) > len(current_args):
+            if "next" in param_names or "next_fn" in param_names:
+                next_name = "next" if "next" in param_names else "next_fn"
+                param = sig.parameters[next_name]
+                if param.kind == inspect.Parameter.KEYWORD_ONLY:
+                    merged = dict(current_kwargs)
+                    merged[next_name] = next_fn
+                    res = cb(*current_args, **merged)
+                else:
+                    res = cb(*current_args, next_fn, **current_kwargs)
+            elif has_varargs or len(params) > len(current_args):
                 res = cb(*current_args, next_fn, **current_kwargs)
-            elif "next" in param_names or "next_fn" in param_names:
-                next_param_name = "next" if "next" in param_names else "next_fn"
-                merged = dict(current_kwargs)
-                merged[next_param_name] = next_fn
-                res = cb(*current_args, **merged)
             else:
-                res = cb(*current_args, next_fn, **current_kwargs)
+                res = cb(*current_args, **current_kwargs)
 
             if inspect.isawaitable(res):
                 return await res
