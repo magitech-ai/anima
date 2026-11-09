@@ -29,6 +29,28 @@ class SocksProxyHandler:
         is_https = target.scheme.lower() in ("https", "wss")
         dest_port = target.port or (443 if is_https else 80)
 
+        # Note: socks4/socks5 resolve the destination locally before
+        # handing it to the proxy; socks4a/socks/socks5h send the hostname to
+        # the proxy for remote resolution. Literal IP addresses are used as-is.
+        should_lookup = self.scheme in ("socks4", "socks5")
+        if should_lookup:
+            try:
+                socket.inet_aton(dest_host)
+            except OSError:
+                try:
+                    socket.inet_pton(socket.AF_INET6, dest_host)
+                except OSError:
+                    # Domain name: resolve locally to an IPv4 address.
+                    try:
+                        dest_host = str(
+                            socket.getaddrinfo(dest_host, None, socket.AF_INET)[0][4][0]
+                        )
+                    except OSError as exc:  # pragma: no cover
+                        raise HttpError(
+                            f"Failed to resolve destination {dest_host}: {exc}",
+                            code="PROXY_ERROR",
+                        ) from exc
+
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(self.proxy_host, self.proxy_port),

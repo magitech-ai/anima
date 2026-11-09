@@ -248,3 +248,15 @@ async def test_proxy_ws_https_and_exceptions():
     writer.close()
     await writer.wait_closed()
     await srv.close()
+
+
+def test_sanitize_close_code():
+    from anima.server_proxy import _sanitize_close_code
+
+    # Valid codes pass through unchanged.
+    assert _sanitize_close_code(1000) == 1000
+    assert _sanitize_close_code(3000) == 3000
+    assert _sanitize_close_code(4999) == 4999
+    # Invalid codes are normalized to 1000.
+    assert _sanitize_close_code(1011) == 1000
+    assert _sanitize_close_code(4000) == 4000

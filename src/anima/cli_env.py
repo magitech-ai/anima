@@ -126,13 +126,7 @@ def load_env_cascade(
 ) -> dict[str, str]:
     """Load cascading .env files in order: .env -> .env.local -> .env.{mode} -> .env.{mode}.local."""
     root = Path(base_dir).resolve() if base_dir else Path.cwd()
-    eff_mode = (
-        mode
-        or os.environ.get("NODE_ENV")
-        or os.environ.get("ANIMA_ENV")
-        or os.environ.get("APP_ENV")
-        or "development"
-    )
+    eff_mode = mode or os.environ.get("NODE_ENV") or "development"
 
     filenames = [
         ".env",

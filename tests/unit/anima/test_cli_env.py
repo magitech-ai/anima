@@ -123,3 +123,16 @@ async def test_cli_env_plugin(tmp_path: Path, monkeypatch):
     ctx2 = Context()
     cli_env_apply(ctx2, base_dir=tmp_path)
     assert ctx2.env["EXISTING_KEY"] == "original_value"
+
+
+def test_cli_env_node_env_mode(tmp_path: Path, monkeypatch):
+    # Note: mode resolution honors NODE_ENV only (not ANIMA_ENV/APP_ENV).
+    monkeypatch.setenv("NODE_ENV", "production")
+    monkeypatch.delenv("ANIMA_ENV", raising=False)
+    monkeypatch.delenv("APP_ENV", raising=False)
+    (tmp_path / ".env").write_text("BASE=1\n", encoding="utf-8")
+    (tmp_path / ".env.production").write_text("MODE=production\n", encoding="utf-8")
+
+    merged = load_env_cascade(base_dir=tmp_path)
+    assert merged["BASE"] == "1"
+    assert merged["MODE"] == "production"

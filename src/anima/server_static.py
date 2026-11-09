@@ -177,22 +177,27 @@ class ServerStatic:
                     if not self._is_excluded(rel):
                         return self._serve_file(cand, res)
 
-            # 404 fallthrough or error page
+            # Error page for the resolved status (any status, parity).
+            status = res.status
             if self.config.fallthrough:
                 await next_fn()
-                return res
+                status = res.status
+            else:
+                status = 404
 
-            if 404 in self.config.error_pages:
-                err_file = (self.base_dir / self.config.error_pages[404]).resolve()
+            error_page = self.config.error_pages.get(status)
+            if error_page:
+                err_file = (self.base_dir / error_page).resolve()
                 if err_file.is_file():
                     self._serve_file(err_file, res)
-                    res.status = 404
-                    res.reason = "Not Found"
+                    res.status = status
+                    res.reason = res._resolve_reason(status)
                     return res
 
-            res.status = 404
-            res.reason = "Not Found"
-            res.text("Not Found", status=404)
+            if not self.config.fallthrough:
+                res.status = 404
+                res.reason = "Not Found"
+                res.text("Not Found", status=404)
             return res
 
         ctx.server.get("{/*path}", _handle_static)
