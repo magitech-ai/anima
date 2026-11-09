@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -209,3 +210,72 @@ async def test_waterfall_pure_sync_short_circuit():
         "intercept", "bypass", default_handler=lambda s: "default"
     )
     assert res == "immediate_sync_bypass"
+
+
+@pytest.mark.asyncio
+async def test_once_listener_sync_and_async():
+    bus = EventBus()
+    sync_calls = []
+    async_calls = []
+
+    def sync_listener(val):
+        sync_calls.append(val)
+        return val
+
+    async def async_listener(val):
+        await asyncio.sleep(0.001)
+        async_calls.append(val)
+        return val
+
+    bus.once("ping", sync_listener)
+    bus.once("ping_async", async_listener)
+
+    # First emission triggers both
+    bus.emit("ping", 1)
+    await bus.parallel("ping_async", 10)
+    assert sync_calls == [1]
+    assert async_calls == [10]
+
+    # Second emission does not trigger
+    bus.emit("ping", 2)
+    await bus.parallel("ping_async", 20)
+    assert sync_calls == [1]
+    assert async_calls == [10]
+
+    # Manual disposal before execution
+    never_called = []
+    d = bus.once("cancel", lambda: never_called.append(True))
+    d()
+    d()  # Second call exercises if not disposed False branch
+    bus.emit("cancel")
+    assert never_called == []
+
+
+@pytest.mark.asyncio
+async def test_event_bus_filtering_and_global():
+    bus = EventBus()
+    calls = []
+
+    class DummyContext:
+        def __init__(self, name: str, allowed: set[str]):
+            self.name = name
+            self.allowed = allowed
+
+        def match(self, target: Any) -> bool:
+            return getattr(target, "name", None) in self.allowed
+
+    ctx1 = DummyContext("ctx1", {"ctx2"})
+    ctx2 = DummyContext("ctx2", {"ctx1"})
+    ctx3 = DummyContext("ctx3", set())
+
+    # Listener with global_=True
+    bus.on("msg", lambda m: calls.append(f"global:{m}"), global_=True, ctx=ctx3)
+    # Listener with ctx=None
+    bus.on("msg", lambda m: calls.append(f"no_ctx:{m}"))
+    # Listener matching ctx2
+    bus.on("msg", lambda m: calls.append(f"ctx2:{m}"), ctx=ctx2)
+    # Listener matching ctx3 (which ctx1 does not allow)
+    bus.on("msg", lambda m: calls.append(f"ctx3:{m}"), ctx=ctx3)
+
+    bus.emit("msg", "hello", this_arg=ctx1)
+    assert calls == ["global:hello", "no_ctx:hello", "ctx2:hello"]

@@ -35,11 +35,15 @@ class Listener:
         callback: Callable[..., Any],
         mode: EventMode = EventMode.EMIT,
         prepend: bool = False,
+        ctx: Any | None = None,
+        global_: bool = False,
     ):
         self.event = event
         self.callback = callback
         self.mode = mode
         self.prepend = prepend
+        self.ctx = ctx
+        self.global_ = global_
         self.is_async = inspect.iscoroutinefunction(callback) or inspect.isawaitable(
             callback
         )
@@ -55,6 +59,16 @@ class EventBus:
     def __init__(self) -> None:
         self._listeners: dict[str, list[Listener]] = {}
 
+    def _filter_listeners(self, event: str, this_arg: Any = None) -> list[Listener]:
+        listeners = list(self._listeners.get(event, []))
+        if this_arg is None or not hasattr(this_arg, "match"):
+            return listeners
+        filtered: list[Listener] = []
+        for listener in listeners:
+            if listener.global_ or listener.ctx is None or this_arg.match(listener.ctx):
+                filtered.append(listener)
+        return filtered
+
     def on(
         self,
         event: str,
@@ -62,9 +76,18 @@ class EventBus:
         *,
         mode: EventMode = EventMode.EMIT,
         prepend: bool = False,
+        ctx: Any | None = None,
+        global_: bool = False,
     ) -> Disposer:
         """Register an event listener. Returns a disposer function."""
-        listener = Listener(event=event, callback=callback, mode=mode, prepend=prepend)
+        listener = Listener(
+            event=event,
+            callback=callback,
+            mode=mode,
+            prepend=prepend,
+            ctx=ctx,
+            global_=global_,
+        )
         if event not in self._listeners:
             self._listeners[event] = []
 
@@ -76,12 +99,66 @@ class EventBus:
         def dispose() -> None:
             if event in self._listeners and listener in self._listeners[event]:
                 self._listeners[event].remove(listener)
+                if not self._listeners[event]:
+                    del self._listeners[event]
 
         return dispose
 
-    def emit(self, event: str, *args: Any, **kwargs: Any) -> None:
+    def once(
+        self,
+        event: str,
+        callback: Callable[..., Any],
+        *,
+        mode: EventMode = EventMode.EMIT,
+        prepend: bool = False,
+        ctx: Any | None = None,
+        global_: bool = False,
+    ) -> Disposer:
+        """Register a one-shot event listener that disposes itself after first execution."""
+        disposed = False
+        inner_disposer: Disposer | None = None
+
+        def dispose_self() -> None:
+            nonlocal disposed
+            if not disposed:
+                disposed = True
+                assert inner_disposer is not None
+                inner_disposer()
+
+        if inspect.iscoroutinefunction(callback):
+
+            async def _async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                dispose_self()
+                return await callback(*args, **kwargs)
+
+            inner_disposer = self.on(
+                event,
+                _async_wrapper,
+                mode=mode,
+                prepend=prepend,
+                ctx=ctx,
+                global_=global_,
+            )
+        else:
+
+            def _sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                dispose_self()
+                return callback(*args, **kwargs)
+
+            inner_disposer = self.on(
+                event,
+                _sync_wrapper,
+                mode=mode,
+                prepend=prepend,
+                ctx=ctx,
+                global_=global_,
+            )
+
+        return dispose_self
+
+    def emit(self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any) -> None:
         """Synchronous broadcast. Listeners observe in registration order without awaiting."""
-        listeners = list(self._listeners.get(event, []))
+        listeners = self._filter_listeners(event, this_arg)
         for listener in listeners:
             try:
                 res = listener.callback(*args, **kwargs)
@@ -97,9 +174,11 @@ class EventBus:
 
                 logging.getLogger("anima.events").exception("Error in emit listener")
 
-    async def parallel(self, event: str, *args: Any, **kwargs: Any) -> list[Any]:
+    async def parallel(
+        self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any
+    ) -> list[Any]:
         """All listeners run concurrently and are awaited together."""
-        listeners = list(self._listeners.get(event, []))
+        listeners = self._filter_listeners(event, this_arg)
         tasks = []
         for listener in listeners:
             res = listener.callback(*args, **kwargs)
@@ -116,9 +195,11 @@ class EventBus:
             return []
         return await asyncio.gather(*tasks)
 
-    async def serial(self, event: str, *args: Any, **kwargs: Any) -> Any:
+    async def serial(
+        self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any
+    ) -> Any:
         """Listeners run in order, awaited. The first non-None return value wins and stops the rest."""
-        listeners = list(self._listeners.get(event, []))
+        listeners = self._filter_listeners(event, this_arg)
         for listener in listeners:
             res = listener.callback(*args, **kwargs)
             if inspect.isawaitable(res):
@@ -127,9 +208,9 @@ class EventBus:
                 return res
         return None
 
-    def bail(self, event: str, *args: Any, **kwargs: Any) -> Any:
+    def bail(self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any) -> Any:
         """Synchronous version of serial. First non-None return value wins."""
-        listeners = list(self._listeners.get(event, []))
+        listeners = self._filter_listeners(event, this_arg)
         for listener in listeners:
             res = listener.callback(*args, **kwargs)
             if inspect.isawaitable(res):
@@ -143,6 +224,7 @@ class EventBus:
         self,
         event: str,
         *args: Any,
+        this_arg: Any = None,
         default_handler: Callable[..., Any] | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -152,7 +234,7 @@ class EventBus:
         Calling `await next(*args)` passes control down the chain.
         Returning without calling `next()` short-circuits.
         """
-        listeners = list(self._listeners.get(event, []))
+        listeners = self._filter_listeners(event, this_arg)
 
         async def dispatch(
             index: int, *current_args: Any, **current_kwargs: Any
