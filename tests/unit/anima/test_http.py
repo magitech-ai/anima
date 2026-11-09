@@ -6,7 +6,8 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from anima.core import Context
-from anima.http import HttpConfig, HttpError, HttpService
+from anima.http import HttpConfig, HttpError, HttpResponse, HttpService
+from anima.server import ServerService
 
 
 class MockServerHandler(BaseHTTPRequestHandler):
@@ -323,3 +324,68 @@ async def test_http_edge_cases_and_network_error(local_server: str):
     cfg = HttpConfig(base_url="http://test.com", timeout=5.0)
     assert cfg.base_url == "http://test.com"
     assert cfg.timeout == 5.0
+
+
+@pytest.mark.asyncio
+async def test_http_proxy_registry_and_intercept():
+    ctx = Context()
+    http_svc = HttpService(ctx)
+
+    seen: list[str] = []
+
+    async def connector(req):
+        seen.append(req.url)
+        return HttpResponse(
+            status=200, reason="OK", headers={}, data=b"via", url=req.url
+        )
+
+    dispose = http_svc.proxy("mock", lambda url: connector)
+
+    # proxy_agent resolved from intercept (both key spellings)
+    scoped = ctx.intercept("http", {"proxy_agent": "mock://p:1"})
+    assert await scoped.http.get("http://t.invalid/a", response_type="text") == "via"
+    aliased = ctx.intercept("http", {"proxy": "mock://p:1"})
+    assert await aliased.http.get("http://t.invalid/b", response_type="text") == "via"
+    assert seen == ["http://t.invalid/a", "http://t.invalid/b"]
+
+    # Disposing the registration makes the scheme fail loud
+    dispose()
+    dispose()  # idempotent
+    with pytest.raises(HttpError) as exc:
+        await ctx.http.get("http://t.invalid/c", proxy_agent="mock://p:1")
+    assert exc.value.code == "PROXY_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_http_ws_client_headers_and_rejection():
+
+    ctx = Context()
+    HttpService(ctx)
+    srv = ServerService(ctx)
+
+    received: list[str] = []
+
+    async def echo(req, ws):
+        received.append(req.headers.get("x-token", ""))
+        async for msg in ws:
+            await ws.send_text(f"echo:{msg}")
+            await ws.close()
+
+    srv.ws("/echo", echo)
+    await srv.listen(host="127.0.0.1", port=0)
+    try:
+        ws = await ctx.http.ws(
+            f"ws://127.0.0.1:{srv.port}/echo?x=1",
+            headers={"X-Token": "abc", "Upgrade": "ignored"},
+        )
+        await ws.send_text("hi")
+        replies = [m async for m in ws]
+        assert replies == ["echo:hi"]
+        assert received == ["abc"]
+        await ws.close()
+
+        with pytest.raises(HttpError) as exc:
+            await ctx.http.ws(f"ws://127.0.0.1:{srv.port}/missing")
+        assert exc.value.status == 400
+    finally:
+        await srv.close()
