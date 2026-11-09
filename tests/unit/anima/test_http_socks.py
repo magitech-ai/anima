@@ -425,3 +425,34 @@ async def test_socks_https_target_tls_failure() -> None:
     finally:
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_socks5_domain_resolves_locally():
+    # Note: socks5 resolves a domain destination locally to IPv4.
+    ctx_srv = Context()
+    srv = ServerService(ctx_srv)
+    srv.get("/local", lambda req, res: res.text("local-ok"))
+    await srv.listen(host="127.0.0.1", port=0)
+
+    socks_srv = await _scripted_proxy(
+        [
+            b"\x05\x00",  # greeting: no auth OK
+            b"\x05\x00\x00\x01\x7f\x00\x00\x01\x1f\x90",  # connect OK, bind 127.0.0.1:8080
+            HTTP_OK,
+        ]
+    )
+    try:
+        ctx_client = Context()
+        HttpService(ctx_client)
+        HttpSocks(ctx_client)
+        res = await ctx_client.http.get(
+            "http://localhost/local",
+            proxy_agent=f"socks5://127.0.0.1:{_port(socks_srv)}",
+            response_type="text",
+        )
+        assert res == "ok"
+    finally:
+        socks_srv.close()
+        await socks_srv.wait_closed()
+        await srv.close()

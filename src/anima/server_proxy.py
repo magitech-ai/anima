@@ -11,6 +11,17 @@ from anima.http import HttpError
 from anima.server import ServerRequest, ServerResponse, WebSocket
 
 
+def _sanitize_close_code(code: int) -> int:
+    """Sanitize a WebSocket close code per RFC 6455 (parity).
+
+    Only 1000 and codes in [3000, 5000) are valid for user code; anything
+    else is normalized to 1000.
+    """
+    if code == 1000 or 3000 <= code < 5000:
+        return code
+    return 1000
+
+
 class ProxyConfig:
     """Configuration options for ServerProxy."""
 
@@ -108,8 +119,10 @@ class ServerProxy:
 
             res.status = resp.status
             res.reason = resp.reason
+            # undici already decoded the body; these headers no longer match
+            # the forwarded bytes (parity).
             for hk, hv in resp.headers.items():
-                if hk.lower() not in hop_by_hop:
+                if hk.lower() not in {"content-encoding", "content-length"}:
                     res.headers[hk] = hv
             res.body = resp.data
             return res
@@ -165,14 +178,18 @@ class ServerProxy:
                     async for msg in downstream:
                         await upstream_ws.send_text(msg)
                 finally:
-                    await upstream_ws.close()
+                    await upstream_ws.close(
+                        _sanitize_close_code(downstream.close_code or 1000)
+                    )
 
             async def fwd_up_to_down() -> None:
                 try:
                     async for msg in upstream_ws:
                         await downstream.send_text(msg)
                 finally:
-                    await downstream.close()
+                    await downstream.close(
+                        _sanitize_close_code(upstream_ws.close_code or 1000)
+                    )
 
             await asyncio.gather(
                 fwd_down_to_up(), fwd_up_to_down(), return_exceptions=True

@@ -100,6 +100,7 @@ class WebSocket:
         self.writer = writer
         self.is_client = is_client
         self.closed = False
+        self.close_code: int | None = None
 
     async def send_text(self, message: str) -> None:
         """Send a text frame."""
@@ -187,6 +188,7 @@ class WebSocket:
                 payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
 
             if opcode == 0x08:  # Close frame
+                self.close_code = int.from_bytes(payload[:2], byteorder="big")
                 await self.close()
                 break
             elif opcode == 0x09:  # Ping
