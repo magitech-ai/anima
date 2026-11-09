@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from anima.core import Context, Service
+from anima.core import Context, Disposer, Service
+from anima.server import WebSocket
 
 
 class HttpError(Exception):
@@ -59,6 +62,11 @@ class HttpRequest:
     headers: dict[str, str] = field(default_factory=dict)
     data: bytes | None = None
     timeout: float = 30.0
+    proxy_agent: str | None = None
+
+
+HttpConnector = Callable[[HttpRequest], Awaitable[HttpResponse]]
+ProxyFactory = Callable[[urllib.parse.ParseResult], HttpConnector]
 
 
 @dataclass
@@ -72,6 +80,7 @@ class HttpConfig:
     data: Any = None
     validate_status: Callable[[int], bool] | None = None
     response_type: str = "response"
+    proxy_agent: str | None = None
 
 
 class HttpService(Service):
@@ -79,6 +88,24 @@ class HttpService(Service):
 
     def __init__(self, ctx: Context, name: str = "http") -> None:
         super().__init__(ctx, name)
+        self._proxies: dict[str, ProxyFactory] = {}
+
+    def proxy(
+        self,
+        protocols: str | list[str],
+        factory: ProxyFactory,
+    ) -> Disposer:
+        """Register a custom proxy connector for URL schemes."""
+        schemes = [protocols] if isinstance(protocols, str) else list(protocols)
+        for s in schemes:
+            self._proxies[s.lower()] = factory
+
+        def _dispose() -> None:
+            for s in schemes:
+                self._proxies.pop(s.lower(), None)
+
+        self.ctx.effect(lambda: _dispose)
+        return _dispose
 
     def merge_intercept(self, *configs: dict[str, Any]) -> dict[str, Any]:
         """Deep merge intercept configurations for HTTP client."""
@@ -92,6 +119,10 @@ class HttpService(Service):
                 merged["timeout"] = cfg["timeout"]
             if "headers" in cfg and isinstance(cfg["headers"], dict):
                 merged["headers"].update(cfg["headers"])
+            if cfg.get("proxy_agent"):
+                merged["proxy_agent"] = cfg["proxy_agent"]
+            if cfg.get("proxy"):
+                merged["proxy_agent"] = cfg["proxy"]
         return merged
 
     def resolve_url(
@@ -144,6 +175,7 @@ class HttpService(Service):
         timeout: float | None = None,
         validate_status: Callable[[int], bool] | None = None,
         response_type: str = "response",
+        proxy_agent: str | None = None,
     ) -> Any:
         """Execute an asynchronous HTTP request through waterfall pipeline."""
         intercept = self.resolve_intercept()
@@ -151,6 +183,7 @@ class HttpService(Service):
         effective_timeout = (
             timeout if timeout is not None else intercept.get("timeout", 30.0)
         )
+        effective_proxy_agent = proxy_agent or intercept.get("proxy_agent")
 
         merged_headers: dict[str, str] = {}
         headers_intercept = intercept.get("headers")
@@ -185,9 +218,22 @@ class HttpService(Service):
             headers=merged_headers,
             data=body_bytes,
             timeout=effective_timeout,
+            proxy_agent=effective_proxy_agent,
         )
 
         async def _default_fetch(current_req: HttpRequest) -> HttpResponse:
+            # Custom proxy connector dispatch
+            if current_req.proxy_agent:
+                p_url = urllib.parse.urlparse(current_req.proxy_agent)
+                scheme = p_url.scheme.lower()
+                if scheme in self._proxies:
+                    connector = self._proxies[scheme](p_url)
+                    return await connector(current_req)
+                raise HttpError(
+                    f"Cannot resolve proxy agent: {current_req.proxy_agent}",
+                    code="PROXY_ERROR",
+                )
+
             def _blocking_call() -> HttpResponse:
                 urllib_req = urllib.request.Request(
                     url=current_req.url,
@@ -275,6 +321,65 @@ class HttpService(Service):
     async def head(self, url: str, **kwargs: Any) -> Any:
         """Perform a HEAD request."""
         return await self.request("HEAD", url, **kwargs)
+
+    async def ws(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        timeout: float = 10.0,
+    ) -> Any:
+        """Establish an outgoing client WebSocket connection."""
+        parsed = urllib.parse.urlparse(url)
+        scheme = parsed.scheme.lower()
+        is_secure = scheme in ("wss", "https")
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if is_secure else 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        ssl_context = True if is_secure else None
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port, ssl=ssl_context),
+            timeout=timeout,
+        )
+
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        hdrs = {
+            "Host": f"{host}:{port}",
+            "Upgrade": "websocket",
+            "Connection": "Upgrade",
+            "Sec-WebSocket-Key": key,
+            "Sec-WebSocket-Version": "13",
+        }
+        if headers:
+            for k, v in headers.items():
+                if k.lower() not in (
+                    "upgrade",
+                    "connection",
+                    "sec-websocket-key",
+                    "sec-websocket-version",
+                ):
+                    hdrs[k] = v
+
+        req_lines = [f"GET {path} HTTP/1.1"]
+        for k, v in hdrs.items():
+            req_lines.append(f"{k}: {v}")
+        req_lines.append("\r\n")
+
+        writer.write("\r\n".join(req_lines).encode("utf-8"))
+        await writer.drain()
+
+        resp_head = await asyncio.wait_for(
+            reader.readuntil(b"\r\n\r\n"), timeout=timeout
+        )
+        status_line = resp_head.decode("utf-8", errors="replace").split("\r\n")[0]
+        if "101" not in status_line:
+            writer.close()
+            await writer.wait_closed()
+            raise HttpError(f"WebSocket upgrade rejected: {status_line}", status=400)
+
+        return WebSocket(reader, writer, is_client=True)
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Dispatch HTTP request directly via callable syntax."""

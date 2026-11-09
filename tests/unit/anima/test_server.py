@@ -364,7 +364,7 @@ async def test_server_websocket_advanced_framing():
 
         # Test ws_disposer
         ws_disposer()
-        assert "/ws/advanced" not in srv.ws_routes
+        assert all(r.path_spec != "/ws/advanced" for r in srv.ws_routes)
     finally:
         await srv.close()
 
@@ -503,5 +503,93 @@ async def test_server_sync_ws_immediate_close():
         await r.readuntil(b"\r\n\r\n")
         w.close()
         await w.wait_closed()
+    finally:
+        await srv.close()
+
+
+async def _raw_get(port: int, path: str) -> bytes:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(f"GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
+    await writer.drain()
+    data = await reader.read()
+    writer.close()
+    await writer.wait_closed()
+    return data
+
+
+@pytest.mark.asyncio
+async def test_server_routing_extensions():
+    ctx = Context()
+    srv = ServerService(ctx)
+
+    # Colon-style parameters
+    srv.get("/items/:item_id", lambda req, res: res.text(req.params["item_id"]))
+
+    # Middleware-style handler deferring past the last matching route -> 404
+    async def defer(req, res, next_fn):
+        await next_fn()
+
+    srv.get("/deferred", defer)
+
+    # Handler returning a distinct response object replaces the in-flight one
+    def replace(req, res):
+        out = ServerResponse()
+        out.send(b"replaced", status=201)
+        out.headers["X-Replaced"] = "1"
+        return out
+
+    srv.get("/replace", replace)
+
+    # Nonstandard status code falls back to a generic reason phrase
+    srv.get("/odd", lambda req, res: res.send(b"odd", status=599))
+    srv.get("/odd-ok", lambda req, res: res.send(b"odd", status=299))
+
+    await srv.listen(host="127.0.0.1", port=0)
+    try:
+        assert (await _raw_get(srv.port, "/items/42")).endswith(b"42")
+        assert (await _raw_get(srv.port, "/deferred")).startswith(
+            b"HTTP/1.1 404 Not Found"
+        )
+        replaced = await _raw_get(srv.port, "/replace")
+        assert replaced.startswith(b"HTTP/1.1 201 Created")
+        assert b"X-Replaced: 1" in replaced
+        assert replaced.endswith(b"replaced")
+        assert (await _raw_get(srv.port, "/odd")).startswith(b"HTTP/1.1 599 Error")
+        assert (await _raw_get(srv.port, "/odd-ok")).startswith(b"HTTP/1.1 299 OK")
+    finally:
+        await srv.close()
+
+
+@pytest.mark.asyncio
+async def test_server_ws_intercept_options_and_dispose():
+    ctx = Context()
+    ServerService(ctx)
+    scoped = ctx.intercept("server", {"routes": {"WS /live": {"tag": "scoped"}}})
+
+    dispose = scoped.server.ws("/live", lambda ws: None, options={"base": True})
+    (route,) = ctx.server.ws_routes
+    assert route.options == {"base": True, "tag": "scoped"}
+
+    dispose()
+    dispose()  # idempotent
+    assert ctx.server.ws_routes == []
+
+
+@pytest.mark.asyncio
+async def test_server_ws_unmatched_upgrade_returns_404():
+    ctx = Context()
+    srv = ServerService(ctx)
+    await srv.listen(host="127.0.0.1", port=0)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", srv.port)
+        writer.write(
+            b"GET /nowhere HTTP/1.1\r\nHost: localhost\r\n"
+            b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+        )
+        await writer.drain()
+        data = await reader.read()
+        writer.close()
+        await writer.wait_closed()
+        assert data.startswith(b"HTTP/1.1 404 Not Found")
     finally:
         await srv.close()
