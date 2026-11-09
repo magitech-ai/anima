@@ -513,3 +513,22 @@ class TestRegistryServiceInjectTuple:
         from anima.core import Fiber
 
         assert isinstance(fiber, Fiber)
+
+
+class TestRegistryServicePluginRuntimeError:
+    def test_plugin_schedule_task_runtime_error(self):
+        """plugin() when _schedule_task raises RuntimeError (covers lines 196-197)."""
+        ctx = Context()
+        reg = RegistryService(ctx)
+
+        # Make _schedule_task raise RuntimeError
+        def _raise_runtime_error(coro):
+            raise RuntimeError("no running event loop")
+
+        ctx._schedule_task = _raise_runtime_error
+
+        # Should not raise - RuntimeError is caught and passed
+        fiber = reg.plugin(_DummyPlugin)
+        from anima.core import Fiber
+
+        assert isinstance(fiber, Fiber)
