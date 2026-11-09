@@ -903,3 +903,177 @@ class TestStageYarnBinAgentVersion:
             patch.object(Scaffold, "_cache_dir", return_value=tmp_path / ".cache"),
         ):
             s._stage_yarn_bin()  # agent.version "2.x" doesn't start with "1." → early return
+
+
+class TestStageYarnBinYarnpathDownload:
+    def test_stage_yarn_bin_yarnpath_pinned_download(self, tmp_path: Path):
+        """yarn_path pinned, target missing, cache missing → download path."""
+        s = Scaffold({})
+        s.root_dir = str(tmp_path)
+        (tmp_path / "package.json").write_text(json.dumps({}))
+        (tmp_path / ".yarnrc.yml").write_text(
+            "yarnPath: .yarn/releases/yarn-1.22.0.cjs\n"
+        )
+        cache_dir = tmp_path / ".cache" / "create-anima" / ".yarn/releases"
+        cache_dir.mkdir(parents=True)
+        # cache file does NOT exist → enter download block
+        with (
+            patch.object(
+                Scaffold,
+                "_which_agent",
+                return_value={"name": "yarn", "version": "1.x"},
+            ),
+            patch.object(Scaffold, "_cache_dir", return_value=cache_dir),
+        ):
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b"fake tarball data"
+            with (
+                patch(
+                    "anima.cli_create.urllib.request.urlopen", return_value=mock_resp
+                ),
+                patch("anima.cli_create.tarfile.open") as mock_tarfile,
+                patch("anima.cli_create.shutil.copy2"),
+            ):
+                mock_tar = MagicMock()
+                mock_member = MagicMock()
+                mock_member.name = "package-1.22.0/package/bin/yarn.js"
+                mock_tar.getmembers.return_value = [mock_member]
+                mock_extracted = MagicMock()
+                mock_extracted.read.return_value = b"fake yarn bin content"
+                mock_tar.extractfile.return_value = mock_extracted
+                mock_tarfile.return_value.__enter__.return_value = mock_tar
+                s._stage_yarn_bin()
+
+    def test_stage_yarn_bin_fetch_latest_download_write_rc(self, tmp_path: Path):
+        """No yarn_path, yarn 1.x agent, cache missing → fetch + write_rc path."""
+        s = Scaffold({})
+        s.root_dir = str(tmp_path)
+        (tmp_path / "package.json").write_text(json.dumps({}))
+        (tmp_path / ".yarnrc.yml").write_text("key: value\n")
+        cache_dir = tmp_path / ".cache" / "create-anima" / ".yarn/releases"
+        cache_dir.mkdir(parents=True)
+        with (
+            patch.object(
+                Scaffold,
+                "_which_agent",
+                return_value={"name": "yarn", "version": "1.x"},
+            ),
+            patch.object(Scaffold, "_fetch_latest_yarn", return_value="1.22.0"),
+            patch.object(Scaffold, "_cache_dir", return_value=cache_dir),
+        ):
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b"fake tarball data"
+            with (
+                patch(
+                    "anima.cli_create.urllib.request.urlopen", return_value=mock_resp
+                ),
+                patch("anima.cli_create.tarfile.open") as mock_tarfile,
+                patch("anima.cli_create.shutil.copy2"),
+            ):
+                mock_tar = MagicMock()
+                mock_member = MagicMock()
+                mock_member.name = "package-1.22.0/package/bin/yarn.js"
+                mock_tar.getmembers.return_value = [mock_member]
+                mock_extracted = MagicMock()
+                mock_extracted.read.return_value = b"fake yarn bin content"
+                mock_tar.extractfile.return_value = mock_extracted
+                mock_tarfile.return_value.__enter__.return_value = mock_tar
+                s._stage_yarn_bin()
+                # write_rc should be True → rc_path.write_text called
+                rc_path = tmp_path / ".yarnrc.yml"
+                content = rc_path.read_text()
+                assert "yarnPath: .yarn/releases/yarn-1.22.0.cjs" in content
+
+
+class TestStageYarnBinDownloadCoverage:
+    def test_stage_yarn_bin_cache_exists_skips_download(self, tmp_path: Path):
+        """cache_file exists → skip entire download block (337->353)."""
+        s = Scaffold({})
+        s.root_dir = str(tmp_path)
+        (tmp_path / "package.json").write_text(json.dumps({}))
+        (tmp_path / ".yarnrc.yml").write_text("key: value\n")
+        cache_dir = tmp_path / ".cache" / "create-anima" / ".yarn/releases"
+        cache_dir.mkdir(parents=True)
+        cache_file = cache_dir / "yarn-1.22.0.cjs"
+        cache_file.write_bytes(b"pre-existing yarn bin")
+        with (
+            patch.object(
+                Scaffold,
+                "_which_agent",
+                return_value={"name": "yarn", "version": "1.x"},
+            ),
+            patch.object(Scaffold, "_fetch_latest_yarn", return_value="1.22.0"),
+            patch.object(Scaffold, "_cache_dir", return_value=cache_dir),
+            patch("anima.cli_create.urllib.request.urlopen") as mock_urlopen,
+            patch("anima.cli_create.tarfile.open"),
+            patch("anima.cli_create.shutil.copy2"),
+        ):
+            s._stage_yarn_bin()
+            mock_urlopen.assert_not_called()
+
+    def test_stage_yarn_bin_member_name_no_match(self, tmp_path: Path):
+        """tar member name doesn't end with yarn.js → loop continues (345->344)."""
+        s = Scaffold({})
+        s.root_dir = str(tmp_path)
+        (tmp_path / "package.json").write_text(json.dumps({}))
+        (tmp_path / ".yarnrc.yml").write_text("key: value\n")
+        cache_dir = tmp_path / ".cache" / "create-anima" / ".yarn/releases"
+        cache_dir.mkdir(parents=True)
+        with (
+            patch.object(
+                Scaffold,
+                "_which_agent",
+                return_value={"name": "yarn", "version": "1.x"},
+            ),
+            patch.object(Scaffold, "_fetch_latest_yarn", return_value="1.22.0"),
+            patch.object(Scaffold, "_cache_dir", return_value=cache_dir),
+            patch("anima.cli_create.urllib.request.urlopen") as mock_urlopen,
+            patch("anima.cli_create.tarfile.open") as mock_tarfile,
+            patch("anima.cli_create.shutil.copy2"),
+        ):
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b"fake tarball data"
+            mock_urlopen.return_value = mock_resp
+            mock_tar = MagicMock()
+            mock_member = MagicMock()
+            mock_member.name = "other-file.txt"  # doesn't end with package/bin/yarn.js
+            mock_tar.getmembers.return_value = [mock_member]
+            mock_tarfile.return_value.__enter__.return_value = mock_tar
+            s._stage_yarn_bin()
+            # cache_file should NOT exist (no matching member to write)
+            cache_file = cache_dir / "yarn-1.22.0.cjs"
+            assert not cache_file.exists()
+
+    def test_stage_yarn_bin_extracted_none(self, tmp_path: Path):
+        """extractfile returns None → skip write_bytes (347->349)."""
+        s = Scaffold({})
+        s.root_dir = str(tmp_path)
+        (tmp_path / "package.json").write_text(json.dumps({}))
+        (tmp_path / ".yarnrc.yml").write_text("key: value\n")
+        cache_dir = tmp_path / ".cache" / "create-anima" / ".yarn/releases"
+        cache_dir.mkdir(parents=True)
+        with (
+            patch.object(
+                Scaffold,
+                "_which_agent",
+                return_value={"name": "yarn", "version": "1.x"},
+            ),
+            patch.object(Scaffold, "_fetch_latest_yarn", return_value="1.22.0"),
+            patch.object(Scaffold, "_cache_dir", return_value=cache_dir),
+            patch("anima.cli_create.urllib.request.urlopen") as mock_urlopen,
+            patch("anima.cli_create.tarfile.open") as mock_tarfile,
+            patch("anima.cli_create.shutil.copy2"),
+        ):
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b"fake tarball data"
+            mock_urlopen.return_value = mock_resp
+            mock_tar = MagicMock()
+            mock_member = MagicMock()
+            mock_member.name = "package-1.22.0/package/bin/yarn.js"
+            mock_tar.getmembers.return_value = [mock_member]
+            mock_tar.extractfile.return_value = None  # extracted is falsy
+            mock_tarfile.return_value.__enter__.return_value = mock_tar
+            s._stage_yarn_bin()
+            # cache_file should NOT exist (extracted was None, nothing written)
+            cache_file = cache_dir / "yarn-1.22.0.cjs"
+            assert not cache_file.exists()

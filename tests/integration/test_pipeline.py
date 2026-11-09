@@ -200,7 +200,14 @@ async def test_declarative_profile_integration(tmp_path: Path, monkeypatch):
 
     # Introspect context hierarchy
     tree = ctx.dump_tree()
-    assert set(tree["services"]) == {"provider", "tools", "agent", "loader"}
+    assert set(tree["services"]) == {
+        "provider",
+        "tools",
+        "agent",
+        "loader",
+        "registry",
+        "reflect",
+    }
     assert len(tree["fibers"]) == 3
 
 
