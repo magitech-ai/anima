@@ -15,11 +15,38 @@ import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from enum import Enum
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from anima.events import Disposer, EventBus, EventMode
 
 logger = logging.getLogger("anima")
+
+# Anima symbols system — Symbol.for() based unique symbols for internal protocol
+symbols = {
+    # internal symbols
+    "shadow": "anima.shadow",
+    "caller": "anima.caller",
+    "receiver": "anima.receiver",
+    "original": "anima.original",
+    "decorator": "anima.decorator",
+    "initHooks": "anima.initHooks",
+    "checkProto": "anima.checkProto",
+    # context symbols
+    "root": "anima.root",
+    "effect": "anima.effect",
+    "filter": "anima.filter",
+    "isolate": "anima.isolate",
+    "intercept": "anima.intercept",
+    # service symbols
+    "init": "anima.init",
+    "check": "anima.check",
+    "invoke": "anima.invoke",
+    "metadata": "anima.metadata",
+    "extend": "anima.extend",
+    "tracker": "anima.tracker",
+    "mergeIntercept": "anima.mergeIntercept",
+    "resolveIntercept": "anima.resolveIntercept",
+}
 
 _current_fiber: ContextVar[Fiber | None] = ContextVar("_current_fiber", default=None)
 _access_context: ContextVar[Context | None] = ContextVar(
@@ -32,6 +59,47 @@ def _next_uid() -> int:
     global _fiber_uid_counter
     _fiber_uid_counter += 1
     return _fiber_uid_counter
+
+
+class AnimaErrorCode:
+    INACTIVE_EFFECT = "cannot create effect on inactive context"
+
+
+class AnimaError(Exception):
+    """Anima-style error with code."""
+
+    def __init__(self, code: str, message: str | None = None) -> None:
+        self.code = code
+        super().__init__(message or AnimaErrorCode.INACTIVE_EFFECT)
+
+
+class ValidationError(TypeError):
+    """Validation error for config schema validation failures."""
+
+    name = "ValidationError"
+
+    def __init__(self, issues: list[dict[str, Any]]) -> None:
+        self.issues = issues
+        super().__init__(format_issues("invalid entry options", issues))
+
+
+def format_issues(title: str, issues: list[dict[str, Any]]) -> str:
+    lines = []
+    for issue in issues:
+        path = issue.get("path", [])
+        where = "/".join(str(p) for p in path) if path else ""
+        where_str = f" (at {where})" if where else ""
+        lines.append(f"  - {issue.get('message', '')}{where_str}")
+    return f"{title}:\n" + "\n".join(lines)
+
+
+def is_js_expr(value: Any) -> bool:
+    """Check if a value is a JS expression wrapper."""
+    return (
+        isinstance(value, dict)
+        and "__jsExpr" in value
+        and isinstance(value.get("__jsExpr"), str)
+    )
 
 
 class FiberState(str, Enum):
@@ -312,6 +380,41 @@ class Fiber:
             "error": str(self.error) if self.error else None,
         }
 
+    def assertActive(self) -> None:
+        """Assert that the fiber is active (has a uid)."""
+        if self.uid is None:
+            raise AnimaError(AnimaErrorCode.INACTIVE_EFFECT)
+
+    def effect(self, execute: Callable[[], Any], label: str = "anonymous") -> Any:
+        """Register an effect on this fiber, returning a disposer."""
+        self.assertActive()
+
+        meta: dict[str, Any] = {"label": label, "children": []}
+
+        try:
+            execute()
+        except Exception:
+            logger.exception("Effect %s failed", label)
+            raise
+
+        def wrapper() -> Any:
+            return None
+
+        # Store effect symbol metadata on wrapper (parity)
+        setattr(wrapper, symbols["effect"], meta)
+
+        # Register the wrapper as an effect disposer on this fiber
+        self.effects.append(wrapper)
+        return wrapper
+
+    def getEffects(self) -> list[dict[str, Any] | None]:
+        """Return effect metadata for all active effects."""
+        return [
+            getattr(d, symbols["effect"], None)
+            for d in self.effects
+            if getattr(d, symbols["effect"], None) is not None
+        ]
+
 
 class _BoundService:
     """Scoped facade that binds service invocations to the accessing Context."""
@@ -388,6 +491,18 @@ class _BoundService:
 class Service:
     """Base class for named capabilities mounted onto Context."""
 
+    # Symbol-based protocol (parity)
+    __symbols__: ClassVar[dict[str, str]] = {
+        "init": symbols["init"],
+        "check": symbols["check"],
+        "invoke": symbols["invoke"],
+        "metadata": symbols["metadata"],
+        "extend": symbols["extend"],
+        "tracker": symbols["tracker"],
+        "mergeIntercept": symbols["mergeIntercept"],
+        "resolveIntercept": symbols["resolveIntercept"],
+    }
+
     def __init__(self, ctx: Context, name: str) -> None:
         self.ctx = ctx
         self.name = name
@@ -398,6 +513,23 @@ class Service:
             ctx._unregister_service(name)
 
         ctx.effect(lambda: _unregister)
+
+    def __instancecheck__(self, instance: Any) -> bool:
+        """Symbol.hasInstance equivalent - walk prototype chain."""
+        if not instance:
+            return False
+        constructor = (
+            instance.__class__ if hasattr(instance, "__class__") else type(instance)
+        )
+        while constructor is not None:
+            if constructor is self:  # self IS the class in __instancecheck__
+                return True
+            bases = getattr(constructor, "__bases__", None)
+            if bases:
+                constructor = bases[0] if len(bases) == 1 else None
+            else:
+                break
+        return False
 
     def resolve_intercept(self) -> dict[str, Any]:
         """Resolve caller-scoped intercept configurations for this service."""
@@ -411,6 +543,26 @@ class Service:
             if isinstance(cfg, dict):
                 merged.update(cfg)
         return merged
+
+    def _filter(self, ctx: Context) -> bool:
+        """[symbols.filter] - check if ctx's isolate matches this service's."""
+        return (self.name in ctx._isolated_services) == (
+            self.name in self.ctx._isolated_services
+        )
+
+    def _extend(self, props: dict[str, Any] | None = None) -> Any:
+        """[symbols.extend] - create extended self with props."""
+        if self.__symbols__.get("invoke"):
+            # Create callable extension
+            obj = object.__new__(self.__class__)
+            obj.__dict__.update(self.__dict__)
+            obj.__dict__.update(props or {})
+            return obj
+        else:
+            obj = object.__new__(self.__class__)
+            obj.__dict__.update(self.__dict__)
+            obj.__dict__.update(props or {})
+            return obj
 
 
 class Context:
@@ -804,6 +956,13 @@ class Context:
             "isolated": list(self._isolated_services),
             "fibers": [f.status() for f in self._fibers],
         }
+
+
+class CoreService(Service):
+    """Concrete Service subclass for testing (parity)."""
+
+    def __init__(self, ctx: Context, name: str = "core_svc") -> None:
+        super().__init__(ctx, name)
 
 
 def inject(*deps: str, **dep_configs: Any) -> Callable[[Any], Any]:

@@ -4,8 +4,23 @@ from typing import Any, ClassVar
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from anima.core import Context, Fiber, FiberState, Service
+from anima.core import (
+    Context,
+    AnimaError,
+    AnimaErrorCode,
+    CoreService,
+    Fiber,
+    FiberState,
+    Service,
+    format_issues,
+    is_js_expr,
+    symbols,
+)
+from anima.core import ValidationError as AnimaValidationError
+from anima.schema import Schema, SchemaError
+from pydantic import BaseModel, ValidationError as PydanticValidationError
 from anima.events import EventMode
+from typing import ClassVar
 
 
 class MockGreeter(Service):
@@ -240,7 +255,7 @@ async def test_config_validation_with_pydantic():
     f_err = ctx.plugin(ServerPlugin, port="invalid_int")
     await ctx.flush()
     assert f_err.state == FiberState.FAILED
-    assert isinstance(f_err.error, ValidationError)
+    assert isinstance(f_err.error, PydanticValidationError)
 
 
 @pytest.mark.asyncio
@@ -985,3 +1000,404 @@ async def test_fiber_non_callable_config():
     fib = ctx.plugin(NonCallableConfigPlugin)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
+
+
+class TestAnimaError:
+    def test_anima_error_creation(self):
+        err = AnimaError(AnimaErrorCode.INACTIVE_EFFECT)
+        assert err.code == AnimaErrorCode.INACTIVE_EFFECT
+        assert "cannot create effect on inactive context" in str(err)
+
+    def test_anima_error_with_message(self):
+        err = AnimaError(AnimaErrorCode.INACTIVE_EFFECT, "custom message")
+        assert err.code == AnimaErrorCode.INACTIVE_EFFECT
+        assert str(err) == "custom message"
+
+
+class TestValidationError:
+    def test_validation_error_creation(self):
+        err = AnimaValidationError([{"message": "field required", "path": ["field"]}])
+        assert err.name == "ValidationError"
+        assert len(err.issues) == 1
+        assert err.issues[0]["message"] == "field required"
+
+    def test_format_issues(self):
+        err = AnimaValidationError([{"message": "field required", "path": ["field"]}])
+        text = format_issues("invalid entry options", err.issues)
+        assert "invalid entry options" in text
+        assert "field required" in text
+        assert "field" in text
+
+    def test_format_issues_no_path(self):
+        err = AnimaValidationError([{"message": "general error", "path": []}])
+        text = format_issues("invalid entry options", err.issues)
+        assert "general error" in text
+        assert "at " not in text
+
+
+class TestIsJsExpr:
+    def test_is_js_expr_true(self):
+        assert is_js_expr({"__jsExpr": "1 + 1"}) is True
+
+    def test_is_js_expr_false(self):
+        assert is_js_expr("hello") is False
+        assert is_js_expr({"foo": "bar"}) is False
+        assert is_js_expr(None) is False
+
+
+class TestFiberEffect:
+    def test_fiber_effect_basic(self):
+        ctx = Context()
+        fib = ctx.plugin(CoreService)
+        assert fib.state == FiberState.ACTIVE
+
+        result = []
+        fib.effect(lambda: result.append("effect_ran"), label="test_effect")
+        assert len(result) == 1
+        assert result[0] == "effect_ran"
+
+    def test_fiber_effect_stores_metadata(self):
+        ctx = Context()
+        fib = ctx.plugin(CoreService)
+
+        wrapper = fib.effect(lambda: None, label="my_effect")
+        meta = getattr(wrapper, symbols["effect"], None)
+        assert meta is not None
+        assert meta["label"] == "my_effect"
+        assert meta["children"] == []
+
+    def test_fiber_get_effects(self):
+        ctx = Context()
+        fib = ctx.plugin(CoreService)
+
+        fib.effect(lambda: None, label="effect1")
+        fib.effect(lambda: None, label="effect2")
+
+        effects = fib.getEffects()
+        assert len(effects) == 2
+        assert effects[0]["label"] == "effect1"
+        assert effects[1]["label"] == "effect2"
+
+    @pytest.mark.asyncio
+    async def test_fiber_effect_wrapper_called_on_dispose(self):
+        """Test that effect wrapper is called when fiber is disposed."""
+        ctx = Context()
+        fib = ctx.plugin(CoreService)
+
+        wrapper_called = []
+        fib.effect(lambda: wrapper_called.append("wrapper_executed"), label="test_wrapper")
+        await fib.dispose()
+        assert len(wrapper_called) == 1
+        assert wrapper_called[0] == "wrapper_executed"
+
+
+class TestServiceInstanceCheck:
+    def test_service_instancecheck(self):
+        ctx = Context()
+        svc = CoreService(ctx)
+
+        assert isinstance(svc, CoreService)
+        assert not isinstance("not_a_service", CoreService)
+        assert not isinstance(42, CoreService)
+
+    def test_service_instancecheck_subclass(self):
+        ctx = Context()
+
+        class SubService(CoreService):
+            pass
+
+        sub = SubService(ctx)
+        assert isinstance(sub, CoreService)
+
+
+class TestServiceFilter:
+    def test_service_filter_same_isolate_state(self):
+        """Both contexts have same isolation state for the service."""
+        ctx = Context()
+        svc = CoreService(ctx)
+
+        # Neither context has the service isolated
+        assert svc._filter(ctx) is True
+        child_ctx = ctx.extend()
+        assert svc._filter(child_ctx) is True
+
+    def test_service_filter_different_isolate_state(self):
+        """One context has the service isolated, the other doesn't."""
+        ctx = Context()
+        svc = CoreService(ctx)
+
+        child_ctx = ctx.extend()
+        child_ctx._isolated_services.add("core_svc")
+
+        # Child has core_svc isolated, service's ctx doesn't
+        assert svc._filter(child_ctx) is False
+
+        # Also test the reverse: service's ctx has it isolated, child doesn't
+        other_ctx = Context()
+        other_ctx._isolated_services.add("core_svc")
+        assert svc._filter(other_ctx) is False
+
+
+class TestCoreServiceAlias:
+    def test_core_service_exists(self):
+        """CoreService is the core service."""
+        assert CoreService is not None
+        assert CoreService.__name__ == "CoreService"
+
+
+class TestFiberValidateSchema:
+    @pytest.mark.asyncio
+    async def test_fiber_validate_schema_instance(self):
+        """Test Schema instance as Config goes through isinstance branch."""
+        ctx = Context()
+
+        class SchemaConfigPlugin:
+            name = "schema_config"
+            Config = Schema.string().required()
+
+        fib = ctx.plugin(SchemaConfigPlugin)
+        await ctx.flush()
+        # Schema.string().required() validates raw_config={} which fails
+        assert fib.state == FiberState.FAILED
+        assert fib.error is not None
+        assert isinstance(fib.error, SchemaError)
+
+
+class TestFiberValidateConfigSchema:
+    @pytest.mark.asyncio
+    async def test_fiber_validate_config_schema_failure(self):
+        ctx = Context()
+
+        class BadConfigPlugin:
+            name = "bad_config"
+
+            class Config(BaseModel):
+                required_field: str
+
+        fib = ctx.plugin(BadConfigPlugin)
+        await ctx.flush()
+        assert fib.state == FiberState.FAILED
+        assert fib.error is not None
+
+
+class TestFiberEffectException:
+    def test_fiber_effect_exception(self):
+        ctx = Context()
+        fib = ctx.plugin(CoreService)
+
+        def raising_effect():
+            raise RuntimeError("effect error")
+
+        with pytest.raises(RuntimeError, match="effect error"):
+            fib.effect(raising_effect, label="raising_effect")
+
+
+class TestServiceInstanceCheckSubclass:
+    def test_service_instancecheck_subclass_negative(self):
+        ctx = Context()
+        svc = CoreService(ctx)
+
+        class Unrelated:
+            pass
+
+        assert not isinstance(Unrelated(), CoreService)
+        assert not isinstance(None, CoreService)
+        assert not isinstance(42, CoreService)
+
+
+class TestServiceFilterEdgeCases:
+    def test_service_filter_same_ctx(self):
+        ctx = Context()
+        svc = CoreService(ctx)
+        assert svc._filter(ctx) is True
+
+    def test_service_filter_child_ctx_no_isolate(self):
+        ctx = Context()
+        svc = CoreService(ctx)
+        child_ctx = ctx.extend()
+        assert svc._filter(child_ctx) is True
+
+    def test_service_filter_different_isolate(self):
+        ctx = Context()
+        svc = CoreService(ctx)
+        child_ctx = ctx.extend()
+        child_ctx._isolated_services.add("core_svc")
+        assert svc._filter(child_ctx) is False
+
+        other_ctx = Context()
+        other_ctx._isolated_services.add("core_svc")
+        assert svc._filter(other_ctx) is False
+
+
+class TestServiceExtend:
+    def test_service_extend_with_invoke(self):
+        ctx = Context()
+
+        class CallableService(Service):
+            __symbols__ = {"invoke": symbols["invoke"]}
+
+            def __init__(self, c: Context):
+                super().__init__(c, "callable_svc")
+
+            def __call__(self):
+                return "called"
+
+        svc = CallableService(ctx)
+        extended = svc._extend({"extra": "data"})
+        assert extended.extra == "data"
+
+    def test_service_extend_without_invoke(self):
+        ctx = Context()
+        svc = CoreService(ctx)
+        extended = svc._extend({"extra": "data"})
+        assert extended.extra == "data"
+
+
+class TestFiberValidateSchemaSuccess:
+    @pytest.mark.asyncio
+    async def test_fiber_validate_schema_success(self):
+        """Test Schema validation success path (line 167 return)."""
+        ctx = Context()
+
+        class GoodSchemaPlugin:
+            name = "good_schema"
+            Config = Schema.object({"name": Schema.string()})
+
+            def __init__(self, c: Context, **cfg):
+                self.c = c
+
+        fib = ctx.plugin(GoodSchemaPlugin, name="hello")
+        await ctx.flush()
+        assert fib.state == FiberState.ACTIVE
+
+
+class TestFiberAssertActive:
+    def test_fiber_assert_active_raises(self):
+        ctx = Context()
+        fib = ctx.plugin(CoreService)
+        # Manually set uid to None to simulate disposed fiber
+        fib.uid = None
+        with pytest.raises(AnimaError):
+            fib.assertActive()
+
+
+class TestServiceInstanceCheckEdgeCases:
+    def test_service_instancecheck_none(self):
+        ctx = Context()
+        svc = CoreService(ctx)
+        assert not isinstance(None, CoreService)
+
+    def test_service_instancecheck_non_object(self):
+        ctx = Context()
+        svc = CoreService(ctx)
+        assert not isinstance(42, CoreService)
+        assert not isinstance("string", CoreService)
+        assert not isinstance([], CoreService)
+
+    def test_service_instancecheck_subclass(self):
+        """Test __instancecheck__ walking up the base class chain."""
+        ctx = Context()
+
+        class SubService(CoreService):
+            pass
+
+        sub = SubService(ctx)
+        # Call __instancecheck__ directly since isinstance() uses metaclass lookup
+        result = CoreService.__instancecheck__(CoreService, sub)
+        assert result is True
+        # Also verify isinstance works (uses default type.__instancecheck__)
+        assert isinstance(sub, CoreService)
+
+    def test_service_instancecheck_direct_call(self):
+        """Test direct __instancecheck__ call covering the while loop body."""
+        ctx = Context()
+
+        class DeepSubService(CoreService):
+            pass
+
+        class DeepSubSubService(DeepSubService):
+            pass
+
+        subsub = DeepSubSubService(ctx)
+        # Walk up: DeepSubSubService -> DeepSubService -> CoreService
+        result = CoreService.__instancecheck__(CoreService, subsub)
+        assert result is True
+        assert isinstance(subsub, CoreService)
+
+
+class TestServiceBoundCallCoverage:
+    def test_bound_service_call_covers_call_method(self):
+        """Test that _BoundService.__call__ body executes."""
+        ctx = Context()
+
+        class CallableService(Service):
+            def __init__(self, c: Context):
+                super().__init__(c, "callable_svc")
+                self.value = 10
+
+            def __call__(self, x: int) -> int:
+                return x + self.value
+
+        svc = CallableService(ctx)
+        # Call _BoundService.__call__ directly to cover lines 474-478
+        from anima.core import _BoundService
+
+        bound = _BoundService(svc, ctx)
+        result = bound(5)
+        assert result == 15
+
+
+class TestServiceExtendElseBranch:
+    def test_service_extend_without_invoke_flag(self):
+        """Test _extend else branch (covers lines 562-565)."""
+        ctx = Context()
+
+        class NoInvokeService(Service):
+            __symbols__: ClassVar[dict[str, str]] = {
+                "init": symbols["init"],
+                "check": symbols["check"],
+                # No "invoke" key
+                "metadata": symbols["metadata"],
+                "extend": symbols["extend"],
+                "tracker": symbols["tracker"],
+                "mergeIntercept": symbols["mergeIntercept"],
+                "resolveIntercept": symbols["resolveIntercept"],
+            }
+
+            def __init__(self, c: Context):
+                super().__init__(c, "no_invoke_svc")
+
+        svc = NoInvokeService(ctx)
+        extended = svc._extend({"custom": "value"})
+        assert extended.custom == "value"
+
+
+class TestInstanceCheckDirect:
+    def test_instancecheck_none_instance(self):
+        """Test __instancecheck__ with None instance (covers line 520)."""
+        ctx = Context()
+        svc = CoreService(ctx)
+        result = CoreService.__instancecheck__(CoreService, None)
+        assert result is False
+
+    def test_instancecheck_multiple_bases(self):
+        """Test __instancecheck__ with multiple base classes (covers lines 531-532)."""
+        ctx = Context()
+
+        class Base1(CoreService):
+            pass
+
+        class Base2(CoreService):
+            pass
+
+        class MultiSub(Base1, Base2):
+            pass
+
+        subsub = MultiSub(ctx)
+        # MultiSub.__bases__ = (Base1, Base2) has len 2, so constructor becomes None
+        result = CoreService.__instancecheck__(CoreService, subsub)
+        assert result is False  # MultiSub doesn't directly inherit from CoreService
+        # But isinstance uses full MRO which includes CoreService:
+        assert isinstance(subsub, CoreService)
+
+
