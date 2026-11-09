@@ -36,7 +36,9 @@ class MockServerHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "server error"}).encode("utf-8"))
         elif parsed.path == "/headers":
             self.send_response(200)
-            custom_hdr = self.headers.get("X-Custom", "")
+            custom_hdr = (
+                self.headers.get("X-Custom", "").replace("\r", "").replace("\n", "")
+            )
             self.send_header("X-Echo", custom_hdr)
             self.end_headers()
             self.wfile.write(b"ok")
