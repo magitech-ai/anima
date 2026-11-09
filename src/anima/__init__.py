@@ -32,6 +32,8 @@ from anima.logger import (
     Message,
 )
 from anima.pkg import PkgResult, PkgService
+from anima.reflect import ReflectService
+from anima.registry import RegistryService
 from anima.schema import Schema, SchemaError, z
 from anima.server import Route, ServerRequest, ServerResponse, ServerService, WebSocket
 from anima.timer import Scheduled, TimerService
@@ -68,6 +70,8 @@ __all__ = [
     "Message",
     "PkgResult",
     "PkgService",
+    "ReflectService",
+    "RegistryService",
     "Route",
     "Scheduled",
     "Schema",

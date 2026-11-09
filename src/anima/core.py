@@ -442,6 +442,13 @@ class Context:
         self._fiber: Fiber | None = fiber
         self._filter_predicate: Callable[[Context], bool] | None = filter_predicate
 
+        # Lazily imported to avoid circular imports
+        from anima.reflect import ReflectService
+        from anima.registry import RegistryService
+
+        self.registry = RegistryService(self)
+        self.reflect = ReflectService(self)
+
     @property
     def root(self) -> Context:
         """Return the root ancestor context."""
