@@ -405,3 +405,61 @@ class TestReflectServiceNotifyNoMatch:
         reg.plugin(TestPlugin)
         # Fiber.inject is empty, so notify should not match
         rs.notify(["my_svc"])
+
+    def test_notify_filter_false_for_matching_fiber(self):
+        """notify with filter_fn returning False for a matching fiber (covers line 135-136)."""
+        ctx = Context()
+        rs = ReflectService(ctx)
+        rs.provide("my_svc", "hello")
+
+        class TestPlugin:
+            name = "test_plugin"
+
+            def __init__(self, ctx):
+                self.ctx = ctx
+
+            def apply(self, ctx):
+                pass
+
+        reg = ctx.registry
+        fiber = reg.plugin(TestPlugin)
+        fiber.inject = ["my_svc"]
+
+        # Filter returns False, so the fiber should be skipped (line 135-136)
+        rs.notify(["my_svc"], filter_fn=lambda ctx, name: False)
+
+    def test_notify_runtime_without_fibers(self):
+        """notify with a runtime object that has no 'fibers' attribute (covers line 128-129)."""
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        # Add a non-PluginRuntime object to _internal - it won't have 'fibers'
+        ctx.registry._internal["fake_key"] = object()
+
+        # Should not raise
+        rs.notify(["my_svc"])
+
+    def test_notify_impl_none(self):
+        """notify where _get_impl returns None (covers line 140->132 branch fall-through)."""
+        ctx = Context()
+        rs = ReflectService(ctx)
+        rs.provide("my_svc", "hello")
+
+        class TestPlugin:
+            name = "test_plugin"
+
+            def __init__(self, ctx):
+                self.ctx = ctx
+
+            def apply(self, ctx):
+                pass
+
+        reg = ctx.registry
+        fiber = reg.plugin(TestPlugin)
+        fiber.inject = ["my_svc"]
+
+        # Remove the impl from the store so _get_impl returns None
+        del rs.store["my_svc"]
+
+        # Should not raise - impl is None, falls through to line 142
+        rs.notify(["my_svc"])
