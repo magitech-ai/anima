@@ -53,23 +53,28 @@ class ReflectService(Service):
     def get(self, name: str, strict: bool = True) -> Any:
         """Get a service implementation value by name."""
         impl = self._get_impl(name, strict)
-        if impl is None:
-            return None
-        return impl.value
+        if impl is not None:
+            return impl.value
+        # Fall back to ctx._services for services registered via ctx._register_service
+        if name in self.ctx._services:
+            return self.ctx._services[name]
+        return None
 
     def _get_impl(self, name: str, strict: bool = True) -> Impl | None:
-        key = self.ctx._isolated_services  # not directly used; kept for API parity
-        _ = key
-        impl = self.store.get(name)
-        if impl is None:
-            return None
-        if strict and impl.ctx.fiber.state != FiberState.ACTIVE:
-            return None
-        return impl
+        for impl in self.store.values():
+            if impl.name == name:
+                if strict and impl.ctx.fiber.state != FiberState.ACTIVE:
+                    return None
+                return impl
+        return None
 
     def set(self, name: str, value: Any, error: Any = None) -> bool:
         """Set a service implementation value."""
-        impl = self.store.get(name)
+        impl = None
+        for candidate in self.store.values():
+            if candidate.name == name:
+                impl = candidate
+                break
         if impl is None:
             raise ValueError(f'cannot set property "{name}" without provide')
         if impl.ctx.fiber is not self.ctx.fiber:

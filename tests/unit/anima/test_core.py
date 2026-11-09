@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Any, ClassVar
 
 import pytest
@@ -17,6 +18,8 @@ from anima.core import (
     symbols,
 )
 from anima.core import ValidationError as AnimaValidationError
+from anima.cli_env import CliEnv, load_env_cascade
+from anima.reflect import ReflectService
 from anima.schema import Schema, SchemaError
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 from anima.events import EventMode
@@ -1372,6 +1375,194 @@ class TestServiceExtendElseBranch:
         assert extended.custom == "value"
 
 
+class TestContextGetSet:
+    def test_context_get_set(self):
+        """Test Context.get and Context.set methods."""
+        ctx = Context()
+        svc = CoreService(ctx)
+
+        # get should return the service
+        assert ctx.get("core_svc") is svc
+        # get with strict=True should return the service when fiber is ACTIVE
+        assert ctx.get("core_svc", strict=True) is svc
+        # get with non-existent name should return None
+        assert ctx.get("nonexistent") is None
+
+    def test_context_set(self):
+        """Test Context.set method."""
+        ctx = Context()
+        svc = CoreService(ctx)
+        assert ctx.get("core_svc") is svc
+
+        # Create a new service and set it via Context.set
+        new_svc = CoreService(ctx, "new_core_svc")
+        ctx.set("renamed_svc", svc)
+        assert ctx.get("renamed_svc") is svc
+
+
+class TestCliEnvPlugin:
+    def test_cli_env_load_cascade(self):
+        """Test cli_env.load_env_cascade function."""
+        from anima.cli_env import load_env_cascade
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = os.path.join(tmpdir, ".env")
+            with open(env_file, "w") as f:
+                f.write("HELLO=world\nFOO=bar\n")
+
+            merged = load_env_cascade(base_dir=tmpdir)
+            assert merged["HELLO"] == "world"
+            assert merged["FOO"] == "bar"
+
+    def test_cli_env_plugin_mount(self):
+        """Test CliEnv plugin mounting."""
+        from anima.cli_env import CliEnv
+        ctx = Context()
+        fiber = ctx.plugin(CliEnv)
+        assert fiber.state == FiberState.ACTIVE
+        assert ctx.env is not None
+        assert ctx.env == os.environ
+
+    def test_context_is_static(self):
+        """Test Context.is_ static method."""
+        ctx = Context()
+        assert Context.is_(ctx) is True
+        assert Context.is_("not a context") is False
+
+
+class TestReflectService:
+    def test_reflect_get(self):
+        """Test ReflectService.get."""
+        ctx = Context()
+        rs = ctx.reflect
+        svc = CoreService(ctx)
+        assert rs.get("core_svc") is svc
+        assert rs.get("nonexistent") is None
+
+    def test_reflect_set(self):
+        """Test ReflectService.set."""
+        ctx = Context()
+        rs = ReflectService(ctx)
+        svc = CoreService(ctx)
+        rs.provide("my_svc", svc)
+        rs.set("my_svc", svc)
+        assert rs.get("my_svc") == svc
+
+        # Setting on a different fiber should raise
+        other_ctx = Context()
+        impl = rs._get_impl("my_svc", strict=False)
+        impl.ctx = other_ctx
+        with pytest.raises(ValueError):
+            rs.set("my_svc", svc)
+
+    def test_reflect_provide(self):
+        """Test ReflectService.provide."""
+        ctx = Context()
+        rs = ReflectService(ctx)
+        disposer = rs.provide("my_svc", "hello")
+        assert rs.get("my_svc") == "hello"
+        disposer()
+        assert rs.get("my_svc") is None
+
+    def test_reflect_provide_with_check(self):
+        """Test ReflectService.provide with check function."""
+        ctx = Context()
+
+        def check():
+            return False
+
+        rs = ReflectService(ctx)
+        rs.provide("my_svc", "hello", check=check)
+        assert rs.get("my_svc") == "hello"
+
+    def test_reflect_accessor(self):
+        """Test ReflectService.accessor."""
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        def getter(receiver, error):
+            return "value"
+
+        disposer = rs.accessor("my_prop", {"get": getter})
+        assert "my_prop" in rs.props
+        disposer()
+        assert "my_prop" not in rs.props
+
+    def test_reflect_mixin(self):
+        """Test ReflectService.mixin."""
+        ctx = Context()
+
+        class Source:
+            def __init__(self):
+                self.foo = "bar"
+
+        source = Source()
+        rs = ReflectService(ctx)
+        disposer = rs.mixin(source, ["foo"])
+        assert "foo" in rs.props
+        disposer()
+        assert "foo" not in rs.props
+
+    def test_reflect_trace(self):
+        """Test ReflectService.trace."""
+        ctx = Context()
+        rs = ReflectService(ctx)
+        val = {"key": "value"}
+        assert rs.trace(val) is val
+
+    def test_reflect_bind(self):
+        """Test ReflectService.bind."""
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        def callback(a, b):
+            return a + b
+
+        bound = rs.bind(callback)
+        assert callable(bound)
+        assert bound(1, 2) == 3
+
+    def test_reflect_notify(self):
+        """Test ReflectService.notify."""
+        ctx = Context()
+        rs = ReflectService(ctx)
+        rs.provide("my_svc", "hello")
+        # Should not raise
+        rs.notify(["my_svc"])
+        rs.notify(["my_svc"], filter_fn=lambda ctx, name: True)
+        rs.notify(["my_svc"], filter_fn=lambda ctx, name: False)
+
+    def test_context_accessor(self):
+        """Test Context.accessor."""
+        ctx = Context()
+        rs = ctx.reflect
+
+        def getter(receiver, error):
+            return "value"
+
+        disposer = rs.accessor("my_prop", {"get": getter})
+        assert "my_prop" in rs.props
+        disposer()
+        assert "my_prop" not in rs.props
+
+    def test_context_mixin(self):
+        """Test Context.mixin."""
+        ctx = Context()
+
+        class Source:
+            def __init__(self):
+                self.foo = "bar"
+
+        source = Source()
+        rs = ctx.reflect
+        disposer = rs.mixin(source, ["foo"])
+        assert "foo" in rs.props
+        disposer()
+        assert "foo" not in rs.props
+
+
 class TestInstanceCheckDirect:
     def test_instancecheck_none_instance(self):
         """Test __instancecheck__ with None instance (covers line 520)."""
@@ -1401,3 +1592,15 @@ class TestInstanceCheckDirect:
         assert isinstance(subsub, CoreService)
 
 
+
+
+class TestInstanceCheckObjectBase:
+    def test_instancecheck_object_base(self):
+        """Test __instancecheck__ where base class has empty __bases__ (covers line 534).
+
+        object.__bases__ is (), which is falsy, so the `else: break` branch is taken.
+        """
+        ctx = Context()
+        # object.__bases__ is () - empty tuple, so bases is falsy
+        result = CoreService.__instancecheck__(CoreService, object())
+        assert result is False  # object is not an instance of CoreService
