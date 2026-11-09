@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -428,3 +429,559 @@ async def test_class_plugin_sync_apply_and_disposer_idempotent():
     disposer()
     disposer()  # second call when disposer not in fiber.effects
     assert ran == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_context_provide_and_cascade():
+    ctx = Context()
+    d = ctx.provide("dynamic_service", {"foo": "bar"})
+    assert ctx.has("dynamic_service")
+    assert ctx.dynamic_service == {"foo": "bar"}
+
+    d()
+    assert not ctx.has("dynamic_service")
+
+
+@pytest.mark.asyncio
+async def test_context_intercept_and_resolve():
+    ctx = Context()
+
+    class InterceptableService(Service):
+        def __init__(self, c: Context):
+            super().__init__(c, "target")
+
+        def config(self):
+            return self.resolve_intercept()
+
+    ctx.plugin(InterceptableService)
+    await ctx.flush()
+
+    assert ctx.target.config() == {}
+
+    child1 = ctx.intercept("target", {"a": 1, "b": 1})
+    child2 = child1.intercept("target", {"b": 2, "c": 3})
+
+    assert child1.target.config() == {"a": 1, "b": 1}
+    assert child2.target.config() == {"a": 1, "b": 2, "c": 3}
+
+
+@pytest.mark.asyncio
+async def test_context_intercept_custom_merge():
+    ctx = Context()
+
+    class CustomMergeService(Service):
+        def __init__(self, c: Context):
+            super().__init__(c, "custom_svc")
+
+        def merge_intercept(self, *configs):
+            tags = []
+            for cfg in configs:
+                tags.extend(cfg.get("tags", []))
+            return {"tags": tags}
+
+    ctx.plugin(CustomMergeService)
+    await ctx.flush()
+
+    child = ctx.intercept("custom_svc", {"tags": ["root"]}).intercept(
+        "custom_svc", {"tags": ["child"]}
+    )
+    assert child.custom_svc.resolve_intercept() == {"tags": ["root", "child"]}
+
+
+@pytest.mark.asyncio
+async def test_context_inline_inject_and_dict_deps():
+    ctx = Context()
+    runs = []
+
+    # Inject with list of deps, waiting for 'db'
+    async def on_deps(c: Context):
+        runs.append(c.db)
+
+    ctx.inject(["db"], on_deps)
+    await ctx.flush()
+    assert runs == []
+
+    # Provide 'db'
+    ctx.provide("db", "connected_db")
+    await ctx.flush()
+    assert runs == ["connected_db"]
+
+    # Inject with dict deps containing config
+    sync_runs = []
+    ctx.inject({"db": {"timeout": 30}}, lambda c: sync_runs.append(c.db))
+    await ctx.flush()
+    assert sync_runs == ["connected_db"]
+
+
+@pytest.mark.asyncio
+async def test_inject_decorator():
+    from anima.core import inject as inject_dec
+
+    @inject_dec("db", auth={"roles": ["admin"]})
+    class DecoratedPlugin:
+        def __init__(self, ctx: Context):
+            self.ctx = ctx
+
+    assert "db" in DecoratedPlugin.inject
+    assert "auth" in DecoratedPlugin.inject
+    assert DecoratedPlugin.inject_config == {"auth": {"roles": ["admin"]}}
+
+    # Decorator on target that already has inject list
+    @inject_dec("cache")
+    class AnotherPlugin:
+        inject: ClassVar[list[str]] = ["db"]
+
+    assert AnotherPlugin.inject == ["db", "cache"]
+
+    # Decorator with no existing inject or invalid existing
+    class PlainPlugin:
+        inject = 123  # not a sequence
+
+    decorated = inject_dec("svc")(PlainPlugin)
+    assert decorated.inject == ["svc"]
+
+
+@pytest.mark.asyncio
+async def test_fiber_restart_and_update():
+    ctx = Context()
+    load_counts = []
+    received_updates = []
+
+    class UpdatablePlugin:
+        def __init__(self, c: Context, **cfg):
+            self.c = c
+            self.cfg = cfg
+            load_counts.append(cfg.get("val", 0))
+
+    fib = ctx.plugin(UpdatablePlugin, val=1)
+    await ctx.flush()
+    assert load_counts == [1]
+
+    # Restart fiber
+    await fib.restart()
+    await ctx.flush()
+    assert load_counts == [1, 1]
+
+    # Restart disposed fiber is no-op
+    disposed_fib = ctx.plugin(lambda c: None)
+    await ctx.flush()
+    await disposed_fib.dispose()
+    await disposed_fib.restart()
+    assert disposed_fib.state == FiberState.DISPOSED
+
+    # Update with internal/update intercepted (no restart)
+    async def update_interceptor(cfg, next_fn):
+        received_updates.append(cfg["val"])
+        # Return without next_fn to accept in-place
+
+    ctx.on("internal/update", update_interceptor, mode=EventMode.WATERFALL)
+
+    committed = []
+    ctx.on("internal/commit", lambda f, cfg: committed.append(cfg))
+
+    await fib.update({"val": 2})
+    assert received_updates == [2]
+    assert committed == [{"val": 2}]
+    # load_counts didn't increment because update was accepted in-place
+    assert load_counts == [1, 1]
+
+    # Update on DISPOSED fiber is no-op
+    await disposed_fib.update({"val": 99})
+
+    # Update with validation error -> FAILED
+    from pydantic import BaseModel
+
+    class StrictConfig(BaseModel):
+        num: int
+
+    class StrictPlugin:
+        Config = StrictConfig
+
+        def __init__(self, c: Context, **cfg):
+            pass
+
+    strict_fib = ctx.plugin(StrictPlugin, num=10)
+    await ctx.flush()
+    assert strict_fib.state == FiberState.ACTIVE
+
+    await strict_fib.update({"num": "not_an_int"}, no_save=True)
+    assert strict_fib.state == FiberState.FAILED
+
+    # Calling update on FAILED fiber is a no-op
+    await strict_fib.update({"num": "still_bad"})
+    assert strict_fib.state == FiberState.FAILED
+
+    # Update on pending fiber
+    def needs_service(c: Context, **cfg):
+        pass
+
+    needs_service.inject = ["special_svc"]
+    pending_fib = ctx.plugin(needs_service, val=5)
+    await ctx.flush()
+    assert pending_fib.state == FiberState.PENDING
+
+    # Updating pending fiber with dependencies unsatisfied remains pending
+    await pending_fib.update({"val": 10})
+    assert pending_fib.state == FiberState.PENDING
+    assert pending_fib.config["val"] == 10
+
+    # Provide dependency -> loads with latest config
+    ctx.provide("special_svc", "ready")
+    await ctx.flush()
+    assert pending_fib.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_context_once_effect_registration():
+    ctx = Context()
+    calls = []
+
+    ctx.once("single", lambda x: calls.append(x))
+    ctx.emit("single", "a")
+    ctx.emit("single", "b")
+    assert calls == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_default_restart_on_unhandled_update():
+    ctx = Context()
+    reloads = []
+
+    class SimpleReloadPlugin:
+        def __init__(self, c: Context, **cfg):
+            reloads.append(cfg.get("tag", "initial"))
+
+    fib = ctx.plugin(SimpleReloadPlugin, tag="v1")
+    await ctx.flush()
+    assert reloads == ["v1"]
+
+    # When no listener intercepts internal/update, default_restart restarts it
+    await fib.update({"tag": "v2"})
+    await ctx.flush()
+    assert reloads == ["v1", "v2"]
+
+
+@pytest.mark.asyncio
+async def test_bound_service_and_intercept_edge_cases():
+    ctx = Context()
+
+    class CallableService(Service):
+        def __init__(self, c: Context):
+            super().__init__(c, "callable_svc")
+            self.value = 10
+
+        def __call__(self, x: int) -> int:
+            return x + self.value
+
+    ctx.plugin(CallableService)
+    await ctx.flush()
+
+    bound = ctx.callable_svc
+    assert bound.ctx == ctx
+    assert bound(5) == 15
+    bound.value = 20
+    assert bound.value == 20
+    assert bound(5) == 25
+    assert (bound == ctx.callable_svc) is True
+    assert bound == ctx.get("callable_svc")
+    assert repr(bound) == repr(ctx.get("callable_svc"))
+
+    # Plain non-service capability without merge_intercept
+    ctx.provide("plain_obj", {"item": 1})
+    assert ctx.resolve_intercept("plain_obj") == {}
+    child_plain = ctx.intercept("plain_obj", {"override": 2})
+    assert child_plain.resolve_intercept("plain_obj") == {"override": 2}
+
+    # Parent with child fiber restarting with async disposer
+    async_unloads = []
+
+    def parent_with_child(p_ctx: Context):
+        def inner_child(c_ctx: Context):
+            async def async_disposer():
+                await asyncio.sleep(0.001)
+                async_unloads.append("child_unloaded")
+
+            c_ctx.effect(lambda: async_disposer)
+
+        p_ctx.plugin(inner_child)
+
+    p_fib = ctx.plugin(parent_with_child)
+    await ctx.flush()
+    await p_fib.restart()
+    assert "child_unloaded" in async_unloads
+
+    # Service with dict inject
+    results = []
+
+    class DictInjectPlugin:
+        inject: ClassVar[dict[str, Any]] = {"callable_svc": {"override": True}}
+
+        def __init__(self, c: Context):
+            results.append(c.resolve_intercept("callable_svc"))
+
+    ctx.plugin(DictInjectPlugin)
+    await ctx.flush()
+    assert results == [{"override": True}]
+
+    # resolve_intercept on unregistered service
+    assert ctx.resolve_intercept("unregistered") == {}
+
+    # non-dict in merge_intercept
+    assert bound.merge_intercept("invalid_cfg") == {}
+
+    # Disposer exception in _unload handled safely
+    def failing_disposer_plugin(c: Context):
+        def bad():
+            raise RuntimeError("unload error")
+
+        c.effect(lambda: bad)
+
+    fail_fib = ctx.plugin(failing_disposer_plugin)
+    await ctx.flush()
+    await fail_fib.restart()
+    assert fail_fib.state == FiberState.ACTIVE
+
+    # Update pending fiber whose dependencies are satisfied
+    def pending_target(c: Context):
+        pass
+
+    pending_target.inject = ["callable_svc"]
+    f_pend = ctx.plugin(pending_target)
+    f_pend.state = FiberState.PENDING
+    await f_pend.update({})
+    assert f_pend.state == FiberState.ACTIVE
+
+    # Synchronous disposer in _unload
+    def sync_disposer_plugin(c: Context):
+        c.effect(lambda: lambda: None)
+
+    f_sync = ctx.plugin(sync_disposer_plugin)
+    await ctx.flush()
+    await f_sync.restart()
+
+    # Restart when dependencies unsatisfied
+    def dep_restart_plugin(c: Context):
+        pass
+
+    dep_restart_plugin.inject = ["missing_dep"]
+    f_missing = ctx.plugin(dep_restart_plugin)
+    f_missing.state = FiberState.ACTIVE
+    await f_missing.restart()
+    assert f_missing.state == FiberState.PENDING
+
+    # resolve_intercept with inject_config containing other services or non-dict values
+    edge_results = []
+
+    class InjectConfigEdgeCases:
+        inject: ClassVar[list[str]] = ["callable_svc"]
+        inject_config: ClassVar[dict[str, Any]] = {
+            "other_svc": {"x": 1},
+            "callable_svc": "not_a_dict",
+        }
+
+        def __init__(self, c: Context):
+            edge_results.append(c.resolve_intercept("callable_svc"))
+            edge_results.append(c.resolve_intercept("not_in_config"))
+
+    ctx.plugin(InjectConfigEdgeCases)
+    await ctx.flush()
+    assert edge_results == [{}, {}]
+
+    # Fiber with None inject_config calling resolve_intercept
+    class NoConfigPlugin:
+        def __init__(self, c: Context):
+            _ = c.resolve_intercept("callable_svc")
+
+    ctx.plugin(NoConfigPlugin)
+    await ctx.flush()
+
+    # Decorator when key in dep_configs is already in deps
+    from anima.core import inject as inject_dec
+
+    @inject_dec("existing_key", existing_key={"k": "v"})
+    class PreExistingKeyPlugin:
+        pass
+
+    assert PreExistingKeyPlugin.inject == ["existing_key"]
+
+
+@pytest.mark.asyncio
+async def test_fiber_replace_and_context_all_fibers():
+    from typing import ClassVar
+
+    ctx = Context()
+    child_ctx = ctx.extend()
+
+    events = []
+
+    class PluginV1:
+        inject: ClassVar[list[str]] = ["test_svc"]
+
+        def __init__(self, c: Context):
+            events.append("v1_init")
+
+    class PluginV2:
+        inject: ClassVar[dict[str, Any]] = {"test_svc": {"mode": "fast"}}
+
+        def __init__(self, c: Context):
+            events.append("v2_init")
+
+    class PluginV3:
+        # No inject
+        def __init__(self, c: Context):
+            events.append("v3_init")
+
+    ctx.provide("test_svc", "active")
+
+    fib1 = ctx.plugin(PluginV1)
+    fib2 = child_ctx.plugin(PluginV3)
+    await ctx.flush()
+
+    assert events == ["v1_init", "v3_init"]
+    all_f = ctx.all_fibers()
+    assert fib1 in all_f
+    assert fib2 in all_f
+
+    # Replace PluginV1 with PluginV2 (dict inject)
+    await fib1.replace(PluginV2)
+    assert events == ["v1_init", "v3_init", "v2_init"]
+    assert fib1.name == "PluginV2"
+    assert fib1.inject == ["test_svc"]
+    assert fib1.inject_config == {"test_svc": {"mode": "fast"}}
+
+    # Replace with PluginV3 (no inject)
+    await fib1.replace(PluginV3)
+    assert events == ["v1_init", "v3_init", "v2_init", "v3_init"]
+    assert fib1.inject == []
+
+    # Replace with PluginV1 (list inject)
+    await fib1.replace(PluginV1)
+    assert fib1.inject == ["test_svc"]
+    assert events == ["v1_init", "v3_init", "v2_init", "v3_init", "v1_init"]
+
+    # Replace on disposed fiber is no-op
+    await fib1.dispose()
+    await fib1.replace(PluginV1)
+    assert events == ["v1_init", "v3_init", "v2_init", "v3_init", "v1_init"]
+
+
+@pytest.mark.asyncio
+async def test_context_fiber_scope_and_filtering():
+    ctx = Context()
+
+    # 1. Root lazy fiber creation & scope alias
+    root_fiber = ctx.fiber
+    assert root_fiber is not None
+    assert ctx.scope is root_fiber
+    assert ctx.fiber is root_fiber
+
+    # 2. Child inheriting parent fiber
+    child_ctx = ctx.extend()
+    assert child_ctx.fiber is root_fiber
+    raw_child = Context(parent=ctx)
+    assert raw_child.fiber is root_fiber
+
+    # 3. Inside plugin load, ctx.fiber is the plugin fiber
+    observed_fibers = []
+
+    def sample_plugin(c: Context):
+        observed_fibers.append(c.fiber)
+        assert c.scope is c.fiber
+
+    p_fib = ctx.plugin(sample_plugin)
+    await ctx.flush()
+    assert len(observed_fibers) == 1
+    assert observed_fibers[0] is p_fib
+
+    # 4. Filter and Exclude
+    filter_worker = ctx.filter(lambda c: c.get("role") == "worker")
+    assert filter_worker.match(ctx.isolate("role")) is False
+    worker_ctx = ctx.extend()
+    worker_ctx.provide("role", "worker")
+    assert filter_worker.match(worker_ctx) is True
+
+    # Nested filter
+    nested = filter_worker.filter(lambda c: c.get("tier") == 1)
+    assert nested.match(worker_ctx) is False
+    worker_ctx.provide("tier", 1)
+    assert nested.match(worker_ctx) is True
+
+    # Exclude
+    excluded = ctx.exclude(lambda c: c.get("blocked") is True)
+    blocked_ctx = ctx.extend()
+    blocked_ctx.provide("blocked", True)
+    assert excluded.match(blocked_ctx) is False
+    assert excluded.match(worker_ctx) is True
+
+    # Context event bus dispatch with filtering
+    worker_received = []
+    non_worker_received = []
+    worker_ctx.on("task", lambda payload: worker_received.append(payload))
+    non_worker = ctx.extend()
+    non_worker.provide("role", "manager")
+    non_worker.on("task", lambda payload: non_worker_received.append(payload))
+
+    # Emitting from filter_worker dispatches only to worker_ctx
+    filter_worker.emit("task", "payload-1")
+    assert worker_received == ["payload-1"]
+    assert non_worker_received == []
+
+    # Test once listener on context
+    once_received = []
+    ctx.once("single", lambda x: once_received.append(x))
+    ctx.emit("single", 42)
+    ctx.emit("single", 43)
+    assert once_received == [42]
+
+
+@pytest.mark.asyncio
+async def test_bound_service_async_method_and_call():
+    ctx = Context()
+
+    class AsyncService(Service):
+        def __init__(self, c: Context):
+            super().__init__(c, "async_svc")
+
+        async def async_method(self, val: str) -> str:
+            resolved = self.resolve_intercept()
+            prefix = resolved.get("prefix", "")
+            return f"{prefix}{val}"
+
+        async def __call__(self, val: str) -> str:
+            resolved = self.resolve_intercept()
+            prefix = resolved.get("prefix", "")
+            return f"{prefix}call:{val}"
+
+    ctx.plugin(AsyncService)
+    await ctx.flush()
+
+    child = ctx.intercept("async_svc", {"prefix": "intercepted:"})
+    child2 = ctx.intercept("async_svc", {"prefix": "intercepted2:"})
+    res1 = await child.async_svc.async_method("hello")
+    assert res1 == "intercepted:hello"
+
+    res2 = await child.async_svc("world")
+    assert res2 == "intercepted:call:world"
+
+    # BoundService properties and dunder methods
+    assert child.async_svc.ctx == child
+    child.async_svc.custom_attr = "custom"
+    assert child.async_svc.custom_attr == "custom"
+    assert child.async_svc == ctx.async_svc
+    assert child.async_svc == child2.async_svc
+    assert repr(child.async_svc) == repr(ctx.async_svc)
+
+
+@pytest.mark.asyncio
+async def test_fiber_non_callable_config():
+    ctx = Context()
+
+    class NonCallableConfigPlugin:
+        Config = 12345
+
+        def __init__(self, c: Context):
+            pass
+
+    fib = ctx.plugin(NonCallableConfigPlugin)
+    await ctx.flush()
+    assert fib.state == FiberState.ACTIVE

@@ -22,6 +22,9 @@ from anima.events import Disposer, EventBus, EventMode
 logger = logging.getLogger("anima")
 
 _current_fiber: ContextVar[Fiber | None] = ContextVar("_current_fiber", default=None)
+_access_context: ContextVar[Context | None] = ContextVar(
+    "_access_context", default=None
+)
 _fiber_uid_counter: int = 0
 
 
@@ -71,14 +74,41 @@ class Fiber:
 
         # Read inject dependencies
         inject_decl = getattr(target, "inject", None)
-        if isinstance(inject_decl, (list, tuple, set)):
-            self.inject: list[str] = list(inject_decl)
+        if isinstance(inject_decl, dict):
+            self.inject: list[str] = list(inject_decl.keys())
+            self.inject_config: dict[str, Any] | None = dict(inject_decl)
+        elif isinstance(inject_decl, (list, tuple, set)):
+            self.inject = list(inject_decl)
+            self.inject_config = getattr(target, "inject_config", None)
         else:
             self.inject = []
+            self.inject_config = getattr(target, "inject_config", None)
 
     def _validate_config(self) -> None:
         config_schema = getattr(self.target, "Config", None)
-        if config_schema is not None and callable(config_schema):
+        if config_schema is None:
+            config_schema = getattr(self.target, "schema", None)
+        if config_schema is None:
+            return
+
+        from anima.schema import Schema, SchemaError
+
+        if isinstance(config_schema, Schema):
+            try:
+                self.config = config_schema.validate(self.raw_config)
+                return
+            except SchemaError as e:
+                self.error = e
+                self.state = FiberState.FAILED
+                logger.error(
+                    "Config validation failed for plugin %s (uid %d): %s",
+                    self.name,
+                    self.uid,
+                    e,
+                )
+                return
+
+        elif callable(config_schema):
             try:
                 self.config = config_schema(**self.raw_config)
             except Exception as e:  # noqa: BLE001
@@ -105,7 +135,12 @@ class Fiber:
 
     async def load(self) -> Any:
         """Mount and activate the plugin."""
-        if self.state in (FiberState.LOADING, FiberState.ACTIVE, FiberState.FAILED):
+        if self.state in (
+            FiberState.LOADING,
+            FiberState.ACTIVE,
+            FiberState.FAILED,
+            FiberState.DISPOSED,
+        ):
             return None
 
         if not self.check_dependencies():
@@ -154,8 +189,30 @@ class Fiber:
         finally:
             _current_fiber.reset(token)
 
+    async def _unload(self) -> None:
+        """Unwind child fibers and effect disposers in reverse order (LIFO)."""
+        self._set_state(FiberState.UNLOADING)
+
+        # Dispose child fibers first
+        for child in reversed(self.child_fibers):
+            await child._unload()
+        self.child_fibers.clear()
+
+        # Run registered effect disposers in reverse order (LIFO)
+        for disposer in reversed(self.effects):
+            try:
+                res = disposer()
+                if inspect.isawaitable(res):
+                    await res
+            except Exception:
+                logger.exception(
+                    "Error during fiber %d (%s) effect unload", self.uid, self.name
+                )
+
+        self.effects.clear()
+
     async def dispose(self) -> None:
-        """Unload plugin and unwind all registered effects in LIFO order."""
+        """Unload plugin and mark permanently as DISPOSED."""
         if self.state in (FiberState.UNLOADING, FiberState.DISPOSED):
             return
 
@@ -180,6 +237,69 @@ class Fiber:
         self.effects.clear()
         self._set_state(FiberState.DISPOSED)
 
+    async def restart(self) -> None:
+        """Unload active effects and re-mount plugin instance."""
+        if self.state in (FiberState.UNLOADING, FiberState.DISPOSED):
+            return
+
+        await self._unload()
+        if self.check_dependencies():
+            await self.load()
+        else:
+            self._set_state(FiberState.PENDING)
+
+    async def replace(self, new_target: Any) -> None:
+        """Replace plugin target and reload fiber with updated target."""
+        if self.state in (FiberState.UNLOADING, FiberState.DISPOSED):
+            return
+
+        self.target = new_target
+        self.name = getattr(
+            new_target, "name", getattr(new_target, "__name__", str(new_target))
+        )
+        self._validate_config()
+
+        inject_decl = getattr(new_target, "inject", None)
+        if isinstance(inject_decl, dict):
+            self.inject = list(inject_decl.keys())
+            self.inject_config = dict(inject_decl)
+        elif isinstance(inject_decl, (list, tuple, set)):
+            self.inject = list(inject_decl)
+            self.inject_config = getattr(new_target, "inject_config", None)
+        else:
+            self.inject = []
+            self.inject_config = getattr(new_target, "inject_config", None)
+
+        await self.restart()
+
+    async def update(self, config: dict[str, Any], no_save: bool = False) -> None:
+        """Update plugin configuration with live lifecycle hooks."""
+        if self.state == FiberState.DISPOSED:
+            return
+
+        self.raw_config = dict(config)
+        self.config = dict(config)
+        self._validate_config()
+
+        if not no_save:
+            self.ctx.emit("internal/commit", self, config)
+
+        if self.state == FiberState.FAILED:
+            return
+
+        if self.state == FiberState.ACTIVE:
+
+            async def _default_restart(cfg: Any) -> None:
+                await self.restart()
+
+            await self.ctx.waterfall(
+                "internal/update",
+                self.config,
+                default_handler=_default_restart,
+            )
+        elif self.state == FiberState.PENDING and self.check_dependencies():
+            await self.load()
+
     def status(self) -> dict[str, Any]:
         """Return diagnostic status snapshot of this fiber."""
         return {
@@ -191,6 +311,78 @@ class Fiber:
             "children_count": len(self.child_fibers),
             "error": str(self.error) if self.error else None,
         }
+
+
+class _BoundService:
+    """Scoped facade that binds service invocations to the accessing Context."""
+
+    def __init__(self, svc: Service, ctx: Context) -> None:
+        object.__setattr__(self, "_svc", svc)
+        object.__setattr__(self, "_ctx", ctx)
+
+    @property
+    def ctx(self) -> Context:
+        return cast(Context, object.__getattribute__(self, "_ctx"))
+
+    def __getattr__(self, item: str) -> Any:
+        svc = object.__getattribute__(self, "_svc")
+        ctx = object.__getattribute__(self, "_ctx")
+        attr = getattr(svc, item)
+        if callable(attr):
+            if inspect.iscoroutinefunction(attr):
+
+                async def _async_wrapped(*args: Any, **kwargs: Any) -> Any:
+                    token = _access_context.set(ctx)
+                    try:
+                        return await attr(*args, **kwargs)
+                    finally:
+                        _access_context.reset(token)
+
+                return _async_wrapped
+
+            def _wrapped(*args: Any, **kwargs: Any) -> Any:
+                token = _access_context.set(ctx)
+                try:
+                    return attr(*args, **kwargs)
+                finally:
+                    _access_context.reset(token)
+
+            return _wrapped
+        return attr
+
+    def __setattr__(self, key: str, value: Any) -> None:
+        svc = object.__getattribute__(self, "_svc")
+        setattr(svc, key, value)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        svc = object.__getattribute__(self, "_svc")
+        ctx = object.__getattribute__(self, "_ctx")
+        if callable(svc) and inspect.iscoroutinefunction(svc.__call__):
+
+            async def _async_call() -> Any:
+                token = _access_context.set(ctx)
+                try:
+                    return await svc(*args, **kwargs)
+                finally:
+                    _access_context.reset(token)
+
+            return _async_call()
+
+        token = _access_context.set(ctx)
+        try:
+            return svc(*args, **kwargs)
+        finally:
+            _access_context.reset(token)
+
+    def __eq__(self, other: object) -> bool:
+        svc = object.__getattribute__(self, "_svc")
+        if isinstance(other, _BoundService):
+            return bool(svc == object.__getattribute__(other, "_svc"))
+        return bool(svc == other)
+
+    def __repr__(self) -> str:
+        svc = object.__getattribute__(self, "_svc")
+        return repr(svc)
 
 
 class Service:
@@ -207,6 +399,19 @@ class Service:
 
         ctx.effect(lambda: _unregister)
 
+    def resolve_intercept(self) -> dict[str, Any]:
+        """Resolve caller-scoped intercept configurations for this service."""
+        ctx = _access_context.get() or self.ctx
+        return ctx.resolve_intercept(self.name)
+
+    def merge_intercept(self, *configs: dict[str, Any]) -> dict[str, Any]:
+        """Merge intercept configuration dictionaries from outer to inner."""
+        merged: dict[str, Any] = {}
+        for cfg in configs:
+            if isinstance(cfg, dict):
+                merged.update(cfg)
+        return merged
+
 
 class Context:
     """The central Anima Context repository of services, events, effects, and scopes."""
@@ -217,15 +422,25 @@ class Context:
         *,
         isolated_services: set[str] | None = None,
         scope_label: str | None = None,
+        intercept_configs: dict[str, dict[str, Any]] | None = None,
+        fiber: Fiber | None = None,
+        filter_predicate: Callable[[Context], bool] | None = None,
     ) -> None:
         self._parent = parent
+        self._children: list[Context] = []
+        if parent is not None:
+            parent._children.append(self)
         self._services: dict[str, Any] = {}
         self._fibers: list[Fiber] = []
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._event_bus: EventBus = parent._event_bus if parent else EventBus()
         self._isolated_services: set[str] = isolated_services or set()
         self._scope_label = scope_label
-        self._intercept_configs: dict[str, dict[str, Any]] = {}
+        self._intercept_configs: dict[str, dict[str, Any]] = (
+            intercept_configs if intercept_configs is not None else {}
+        )
+        self._fiber: Fiber | None = fiber
+        self._filter_predicate: Callable[[Context], bool] | None = filter_predicate
 
     @property
     def root(self) -> Context:
@@ -234,6 +449,51 @@ class Context:
         while curr._parent is not None:
             curr = curr._parent
         return curr
+
+    @property
+    def fiber(self) -> Fiber:
+        """Return the Fiber associated with this context scope."""
+        current_fib = _current_fiber.get()
+        if current_fib is not None:
+            return current_fib
+        if self._fiber is not None:
+            return self._fiber
+        if self._parent is not None:
+            return self._parent.fiber
+        self._fiber = Fiber(self, target=lambda c: None, args=(), kwargs={})
+        return self._fiber
+
+    @property
+    def scope(self) -> Fiber:
+        """Alias for ctx.fiber providing parity with scope conventions."""
+        return self.fiber
+
+    def filter(self, predicate: Callable[[Context], bool]) -> Context:
+        """Spawn a child context with filtered event observation."""
+        child = self.extend()
+        if self._filter_predicate is not None:
+            parent_pred = self._filter_predicate
+            child._filter_predicate = lambda c: parent_pred(c) and predicate(c)
+        else:
+            child._filter_predicate = predicate
+        return child
+
+    def exclude(self, predicate: Callable[[Context], bool]) -> Context:
+        """Spawn a child context excluding targets matching predicate."""
+        return self.filter(lambda c: not predicate(c))
+
+    def match(self, target_ctx: Context) -> bool:
+        """Check if target_ctx satisfies the filtering rules of this context."""
+        if self._filter_predicate is None:
+            return True
+        return bool(self._filter_predicate(target_ctx))
+
+    def all_fibers(self) -> list[Fiber]:
+        """Return all fibers in this context and all child contexts."""
+        fibers = list(self._fibers)
+        for child in self._children:
+            fibers.extend(child.all_fibers())
+        return fibers
 
     async def flush(self) -> None:
         """Wait for all pending plugin load and event tasks to settle."""
@@ -280,6 +540,8 @@ class Context:
             return super().__getattribute__(name)
         svc = self.get(name)
         if svc is not None:
+            if isinstance(svc, Service) and getattr(svc, "ctx", None) is not self:
+                return _BoundService(svc, self)
             return svc
         raise AttributeError(
             f"Service '{name}' is not registered on Context. "
@@ -352,6 +614,97 @@ class Context:
 
         return _cleanup
 
+    def provide(self, name: str, value: Any) -> Disposer:
+        """Dynamically register a named capability on this context with automatic effect cleanup."""
+        self._register_service(name, value)
+
+        def _unregister() -> None:
+            self._unregister_service(name)
+
+        return self.effect(lambda: _unregister)
+
+    def intercept(self, service_name: str, config: dict[str, Any]) -> Context:
+        """Spawn a child context with intercepted configuration for a target service."""
+        new_intercepts = {k: dict(v) for k, v in self._intercept_configs.items()}
+        if service_name in new_intercepts:
+            new_intercepts[service_name].update(config)
+        else:
+            new_intercepts[service_name] = dict(config)
+        return Context(
+            parent=self,
+            isolated_services=set(self._isolated_services),
+            scope_label=self._scope_label,
+            intercept_configs=new_intercepts,
+            fiber=self._fiber,
+            filter_predicate=self._filter_predicate,
+        )
+
+    def resolve_intercept(self, service_name: str) -> dict[str, Any]:
+        """Resolve merged intercept configs for service_name in this context scope."""
+        configs: list[dict[str, Any]] = []
+        chain: list[Context] = []
+        curr: Context | None = self
+        while curr is not None:
+            chain.append(curr)
+            curr = curr._parent
+        chain.reverse()
+        for ctx in chain:
+            if service_name in ctx._intercept_configs:
+                configs.append(ctx._intercept_configs[service_name])
+
+        current_fib = _current_fiber.get()
+        if (
+            current_fib is not None
+            and isinstance(current_fib.inject_config, dict)
+            and service_name in current_fib.inject_config
+        ):
+            cfg = current_fib.inject_config[service_name]
+            if isinstance(cfg, dict):
+                configs.insert(0, cfg)
+
+        svc = self.get(service_name)
+        if (
+            svc is not None
+            and hasattr(svc, "merge_intercept")
+            and callable(svc.merge_intercept)
+        ):
+            return cast(dict[str, Any], svc.merge_intercept(*configs))
+
+        merged: dict[str, Any] = {}
+        for cfg in configs:
+            merged.update(cfg)
+        return merged
+
+    def inject(
+        self,
+        deps: list[str] | dict[str, Any],
+        callback: Callable[[Context], Any],
+    ) -> Fiber:
+        """Mount an inline dynamic callback that executes when dependencies are satisfied."""
+        if isinstance(deps, dict):
+            inject_list = list(deps.keys())
+            inject_cfg: dict[str, Any] | None = deps
+        else:
+            inject_list = list(deps)
+            inject_cfg = None
+
+        class _InlineInjectPlugin:
+            inject = inject_list
+
+            def __init__(self, ctx: Context) -> None:
+                self.ctx = ctx
+
+            async def apply(self, ctx: Context) -> Any:
+                res = callback(ctx)
+                if inspect.isawaitable(res):
+                    return await res
+                return res
+
+        fib = self.plugin(_InlineInjectPlugin)
+        if inject_cfg is not None:
+            fib.inject_config = inject_cfg
+        return fib
+
     def on(
         self,
         event: str,
@@ -359,27 +712,46 @@ class Context:
         *,
         mode: EventMode = EventMode.EMIT,
         prepend: bool = False,
+        global_: bool = False,
     ) -> Disposer:
         """Register an event listener as an effect."""
-        disposer = self._event_bus.on(event, callback, mode=mode, prepend=prepend)
+        disposer = self._event_bus.on(
+            event, callback, mode=mode, prepend=prepend, ctx=self, global_=global_
+        )
+        self.effect(lambda: disposer)
+        return disposer
+
+    def once(
+        self,
+        event: str,
+        callback: Callable[..., Any],
+        *,
+        mode: EventMode = EventMode.EMIT,
+        prepend: bool = False,
+        global_: bool = False,
+    ) -> Disposer:
+        """Register a one-shot event listener as an effect."""
+        disposer = self._event_bus.once(
+            event, callback, mode=mode, prepend=prepend, ctx=self, global_=global_
+        )
         self.effect(lambda: disposer)
         return disposer
 
     def emit(self, event: str, *args: Any, **kwargs: Any) -> None:
         """Synchronously broadcast an event."""
-        self._event_bus.emit(event, *args, **kwargs)
+        self._event_bus.emit(event, *args, this_arg=self, **kwargs)
 
     async def parallel(self, event: str, *args: Any, **kwargs: Any) -> list[Any]:
         """Concurrently broadcast an event and await all listeners."""
-        return await self._event_bus.parallel(event, *args, **kwargs)
+        return await self._event_bus.parallel(event, *args, this_arg=self, **kwargs)
 
     async def serial(self, event: str, *args: Any, **kwargs: Any) -> Any:
         """Sequential async execution; stops on first non-None."""
-        return await self._event_bus.serial(event, *args, **kwargs)
+        return await self._event_bus.serial(event, *args, this_arg=self, **kwargs)
 
     def bail(self, event: str, *args: Any, **kwargs: Any) -> Any:
         """Sequential sync execution; stops on first non-None."""
-        return self._event_bus.bail(event, *args, **kwargs)
+        return self._event_bus.bail(event, *args, this_arg=self, **kwargs)
 
     async def waterfall(
         self,
@@ -390,12 +762,18 @@ class Context:
     ) -> Any:
         """Around-middleware pipeline passing (*args, next)."""
         return await self._event_bus.waterfall(
-            event, *args, default_handler=default_handler, **kwargs
+            event, *args, this_arg=self, default_handler=default_handler, **kwargs
         )
 
     def extend(self) -> Context:
         """Create a child context inheriting all parent services."""
-        return Context(parent=self)
+        return Context(
+            parent=self,
+            isolated_services=set(self._isolated_services),
+            scope_label=self._scope_label,
+            intercept_configs=dict(self._intercept_configs),
+            filter_predicate=self._filter_predicate,
+        )
 
     def isolate(self, service_name: str, label: str | None = None) -> Context:
         """Create a child context with an isolated service scope for `service_name`.
@@ -404,7 +782,13 @@ class Context:
         """
         isolated = set(self._isolated_services)
         isolated.add(service_name)
-        return Context(parent=self, isolated_services=isolated, scope_label=label)
+        return Context(
+            parent=self,
+            isolated_services=isolated,
+            scope_label=label,
+            intercept_configs=dict(self._intercept_configs),
+            filter_predicate=self._filter_predicate,
+        )
 
     def dump_tree(self) -> dict[str, Any]:
         """Dump the full runtime hierarchy of plugins and services for introspection."""
@@ -413,3 +797,27 @@ class Context:
             "isolated": list(self._isolated_services),
             "fibers": [f.status() for f in self._fibers],
         }
+
+
+def inject(*deps: str, **dep_configs: Any) -> Callable[[Any], Any]:
+    """Declare service dependencies and configuration constraints on a plugin or service."""
+
+    def decorator(target: Any) -> Any:
+        existing = getattr(target, "inject", None)
+        if existing is None:
+            inject_list = list(deps)
+        elif isinstance(existing, (list, tuple, set)):
+            inject_list = list(existing) + [d for d in deps if d not in existing]
+        else:
+            inject_list = list(deps)
+
+        if dep_configs:
+            for k in dep_configs:
+                if k not in inject_list:
+                    inject_list.append(k)
+            target.inject_config = dep_configs
+
+        target.inject = inject_list
+        return target
+
+    return decorator
