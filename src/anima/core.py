@@ -236,6 +236,12 @@ class Fiber:
             if inspect.isclass(target):
                 target_cls = cast(type[Any], target)
                 instance = target_cls(self.ctx, *self.args, **self.raw_config)
+                # call init method if present (symbols.init parity)
+                init_method = getattr(instance, "init", None)
+                if init_method is not None and callable(init_method):
+                    res = init_method()
+                    if inspect.isawaitable(res):
+                        await res
                 if hasattr(instance, "apply") and callable(instance.apply):
                     res = instance.apply(self.ctx)
                     if inspect.isawaitable(res):

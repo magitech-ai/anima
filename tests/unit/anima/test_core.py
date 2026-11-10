@@ -1968,3 +1968,60 @@ class TestInstanceCheckObjectBase:
         # object.__bases__ is () - empty tuple, so bases is falsy
         result = CoreService.__instancecheck__(CoreService, object())
         assert result is False  # object is not an instance of CoreService
+
+
+class TestServiceInit:
+    """Tests for Service.init protocol (symbols.init parity)."""
+
+    def test_service_init_called_on_load(self):
+        """Test that Service.__init__ calls init method after construction."""
+        ctx = Context()
+        init_called = []
+
+        class InitService(Service):
+            def __init__(self, c: Context):
+                super().__init__(c, "init_svc")
+
+            def init(self):
+                init_called.append("init_called")
+                return "init_result"
+
+        fib = ctx.plugin(InitService)
+        # Manually trigger load since plugin() may not auto-load in test context
+        import asyncio
+
+        asyncio.run(fib.load())
+        assert init_called == ["init_called"]
+
+    def test_service_init_async(self):
+        """Test that async init method is awaited."""
+        ctx = Context()
+        init_called = []
+
+        class AsyncInitService(Service):
+            def __init__(self, c: Context):
+                super().__init__(c, "async_init_svc")
+
+            async def init(self):
+                init_called.append("async_init_called")
+                return "async_init_result"
+
+        fib = ctx.plugin(AsyncInitService)
+        import asyncio
+
+        asyncio.run(fib.load())
+        assert init_called == ["async_init_called"]
+
+    def test_service_no_init_method(self):
+        """Test that Service without init method loads fine."""
+        ctx = Context()
+
+        class NoInitService(Service):
+            def __init__(self, c: Context):
+                super().__init__(c, "no_init_svc")
+
+        fib = ctx.plugin(NoInitService)
+        import asyncio
+
+        asyncio.run(fib.load())
+        assert fib.state == FiberState.ACTIVE
