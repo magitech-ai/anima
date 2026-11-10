@@ -2,7 +2,9 @@
 Anima: The Composable Micro-Kernel by Magitech.
 """
 
-from anima.cli import CliCommand, CliService, CliSyntaxError
+import importlib
+from typing import Any
+
 from anima.core import Context, Fiber, FiberState, Service, inject
 from anima.events import DisposableList, Disposer, EventBus, EventMode, is_bailed
 from anima.group import Group, GroupEntry
@@ -38,6 +40,24 @@ from anima.schema import Schema, SchemaError, z
 from anima.server import Route, ServerRequest, ServerResponse, ServerService, WebSocket
 from anima.timer import Scheduled, TimerService
 from anima.watcher import WatchEntry, WatcherService
+
+# CLI symbols resolve lazily: importing anima.cli eagerly puts it in
+# sys.modules before `python -m anima.cli` executes it, which triggers a
+# RuntimeWarning about the double import.
+_LAZY_CLI_EXPORTS = {
+    "CliCommand": "anima.cli",
+    "CliService": "anima.cli",
+    "CliSyntaxError": "anima.cli",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily resolve CLI exports (PEP 562)."""
+    if name in _LAZY_CLI_EXPORTS:
+        module = importlib.import_module(_LAZY_CLI_EXPORTS[name])
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "CliCommand",
