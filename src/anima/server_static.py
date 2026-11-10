@@ -177,7 +177,7 @@ class ServerStatic:
                     if not self._is_excluded(rel):
                         return self._serve_file(cand, res)
 
-            # Error page for the resolved status (any status, parity).
+            # Error page for the resolved status (any status, anima parity).
             status = res.status
             if self.config.fallthrough:
                 await next_fn()

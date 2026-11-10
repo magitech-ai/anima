@@ -1,6 +1,6 @@
 """Module loading utilities for Anima.
 
-Python port of the reference @anima/loader-utils: module namespace export
+Python port of loader-utils: module namespace export
 resolution, module status codes, and load-cache job extraction.
 """
 
@@ -11,14 +11,14 @@ from typing import Any
 
 
 def is_nullable(value: Any) -> bool:
-    """Return True when `value` is None (null/undefined equivalent)."""
+    """Return True when `value` is None (anima null/undefined equivalent)."""
     return value is None
 
 
 def unwrap_exports(exports: Any) -> Any:
     """Get the plugin exported by a module namespace.
 
-    Mirrors the reference unwrapExports: handles CommonJS (module.exports),
+    Mirrors unwrapExports: handles CommonJS (module.exports),
     ES modules (__es_module + default), and plain values.
     """
     if is_nullable(exports):
@@ -45,7 +45,7 @@ class ModuleFormat(str, Enum):
 
 
 class ModuleStatus(int, Enum):
-    """ESM module job status codes (parity)."""
+    """ESM module job status codes (anima parity)."""
 
     UNINSTANTIATED = 0
     INSTANTIATING = 1

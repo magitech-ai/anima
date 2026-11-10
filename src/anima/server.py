@@ -210,7 +210,7 @@ class Route:
         options: dict[str, Any] | None = None,
     ) -> None:
         self.method = method.upper()
-        # An empty path spec names the root path, matching the reference behavior.
+        # An empty path spec names the root path, matching anima behavior.
         if path_spec == "":
             path_spec = "/"
         self.path_spec = path_spec

@@ -400,7 +400,7 @@ class Fiber:
         def wrapper() -> Any:
             return None
 
-        # Store effect symbol metadata on wrapper (parity)
+        # Store effect symbol metadata on wrapper (anima parity)
         setattr(wrapper, symbols["effect"], meta)
 
         # Register the wrapper as an effect disposer on this fiber
@@ -491,7 +491,7 @@ class _BoundService:
 class Service:
     """Base class for named capabilities mounted onto Context."""
 
-    # Symbol-based protocol (parity)
+    # Symbol-based protocol (anima parity)
     __symbols__: ClassVar[dict[str, str]] = {
         "init": symbols["init"],
         "check": symbols["check"],
@@ -532,6 +532,13 @@ class Service:
             else:
                 constructor = None  # pragma: no cover
         return False
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """[symbols.invoke] - make service instances callable."""
+        invoke = getattr(type(self), "invoke", None)
+        if invoke is not None and callable(invoke):
+            return invoke(self, *args, **kwargs)
+        raise TypeError(f"Service '{self.name}' is not callable")
 
     def resolve_intercept(self) -> dict[str, Any]:
         """Resolve caller-scoped intercept configurations for this service."""
@@ -603,10 +610,10 @@ class Context:
         self.reflect = ReflectService(self)
         self.registry = RegistryService(self)
         self._logger: Any = None
-        # Register core services for ctx.get() lookup (parity)
+        # Register core services for ctx.get() lookup (anima parity)
         self._services["reflect"] = self.reflect
         self._services["registry"] = self.registry
-        # Eagerly create root fiber and set ACTIVE state (parity)
+        # Eagerly create root fiber and set ACTIVE state (anima parity)
         if self._parent is None:
             self._fiber = Fiber(self, target=lambda c: None, args=(), kwargs={})
             self._fiber.state = FiberState.ACTIVE
@@ -1007,7 +1014,7 @@ class Context:
 
 
 class CoreService(Service):
-    """Concrete Service subclass for testing (parity)."""
+    """Concrete Service subclass for testing (anima parity)."""
 
     def __init__(self, ctx: Context, name: str = "core_svc") -> None:
         super().__init__(ctx, name)

@@ -12,7 +12,7 @@ from anima.server import ServerRequest, ServerResponse, WebSocket
 
 
 def _sanitize_close_code(code: int) -> int:
-    """Sanitize a WebSocket close code per RFC 6455 (parity).
+    """Sanitize a WebSocket close code per RFC 6455 (anima parity).
 
     Only 1000 and codes in [3000, 5000) are valid for user code; anything
     else is normalized to 1000.
@@ -120,7 +120,7 @@ class ServerProxy:
             res.status = resp.status
             res.reason = resp.reason
             # undici already decoded the body; these headers no longer match
-            # the forwarded bytes (parity).
+            # the forwarded bytes (anima parity).
             for hk, hv in resp.headers.items():
                 if hk.lower() not in {"content-encoding", "content-length"}:
                     res.headers[hk] = hv

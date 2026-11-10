@@ -45,7 +45,7 @@ def test_unwrap_exports_with_es_module():
 
 
 def test_module_status_enum():
-    """ModuleStatus enum values match the reference."""
+    """ModuleStatus enum values match anima."""
     assert ModuleStatus.UNINSTANTIATED.value == 0
     assert ModuleStatus.INSTANTIATING.value == 1
     assert ModuleStatus.INSTANTIATED.value == 2

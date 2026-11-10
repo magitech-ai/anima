@@ -1,6 +1,6 @@
 """create-anima: Scaffold an Anima application.
 
-Python port of the reference create-anima: interactive project scaffolding that
+Python port of the create-anima: interactive project scaffolding that
 downloads a template tarball from the npm registry, extracts it, optionally
 stages a yarn binary, and initializes a Git repository.
 """

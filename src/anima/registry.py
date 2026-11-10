@@ -1,6 +1,6 @@
 """Registry service for plugin runtimes.
 
-Python port of the reference RegistryService: manages plugin runtimes, fiber
+Python port of the RegistryService: manages plugin runtimes, fiber
 tracking, and plugin replacement.
 """
 
@@ -76,7 +76,7 @@ class PluginRuntime:
 class RegistryService:
     """Registry of plugin runtimes with fiber tracking and replacement.
 
-    RegistryService does not extend Service (parity).
+    RegistryService does not extend Service (anima parity).
     """
 
     def __init__(self, ctx: Context) -> None:

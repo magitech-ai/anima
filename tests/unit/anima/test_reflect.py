@@ -2,7 +2,7 @@
 
 import pytest
 
-from anima.core import Context, FiberState
+from anima.core import Context, FiberState, symbols
 from anima.reflect import Impl, Property, ReflectService
 
 
@@ -173,6 +173,211 @@ class TestReflectServiceBind:
         bound = rs.bind(callback)
         assert callable(bound)
         assert bound(1, 2) == 3
+
+    def test_bind_traces_args(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        traced = []
+
+        class Tracked:
+            pass
+
+        obj = Tracked()
+        obj.__dict__[symbols["tracker"]] = type(
+            "Tracker", (), {"property": "ctx", "noShadow": False, "associate": None}
+        )()
+
+        def callback(a, b):
+            traced.append(a)
+            return b
+
+        bound = rs.bind(callback)
+        bound(obj, 2)
+        assert len(traced) == 1
+
+
+class TestReflectServiceTraceAdvanced:
+    def test_trace_none(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        assert rs.trace(None) is None
+
+    def test_trace_primitives(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        assert rs.trace("hello") == "hello"
+        assert rs.trace(42) == 42
+        assert rs.trace(3.14) == 3.14
+        assert rs.trace(True) is True
+
+    def test_trace_dict(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        val = {"key": "value"}
+        assert rs.trace(val) is val
+
+    def test_trace_with_tracker(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        class Tracked:
+            pass
+
+        obj = Tracked()
+        tracker = type(
+            "Tracker", (), {"property": "ctx", "noShadow": False, "associate": None}
+        )()
+        setattr(obj, symbols["tracker"], tracker)
+
+        result = rs.trace(obj)
+        assert result is not obj
+        assert result.ctx is ctx
+        assert result[symbols["original"]] is obj
+
+    def test_trace_regular_attribute(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        class Tracked:
+            name = "tracked"
+
+        obj = Tracked()
+        tracker = type(
+            "Tracker", (), {"property": "ctx", "noShadow": False, "associate": None}
+        )()
+        setattr(obj, symbols["tracker"], tracker)
+
+        result = rs.trace(obj)
+        assert result.name == "tracked"
+
+    def test_trace_set_attribute(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        class Tracked:
+            pass
+
+        obj = Tracked()
+        tracker = type(
+            "Tracker", (), {"property": "ctx", "noShadow": False, "associate": None}
+        )()
+        setattr(obj, symbols["tracker"], tracker)
+
+        result = rs.trace(obj)
+        result.new_attr = "hello"
+        assert obj.new_attr == "hello"
+
+    def test_trace_invalid_key(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        class Tracked:
+            pass
+
+        obj = Tracked()
+        tracker = type(
+            "Tracker", (), {"property": "ctx", "noShadow": False, "associate": None}
+        )()
+        setattr(obj, symbols["tracker"], tracker)
+
+        result = rs.trace(obj)
+        with pytest.raises(KeyError):
+            result["nonexistent"]
+
+    def test_trace_with_shadow(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        class WithShadow:
+            pass
+
+        obj = WithShadow()
+        setattr(obj, symbols["shadow"], "some_shadow")
+
+        result = rs.trace(obj)
+        assert result is type(obj)
+
+    def test_trace_getattr_original(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        class Tracked:
+            pass
+
+        obj = Tracked()
+        tracker = type(
+            "Tracker", (), {"property": "ctx", "noShadow": False, "associate": None}
+        )()
+        setattr(obj, symbols["tracker"], tracker)
+
+        result = rs.trace(obj)
+        assert getattr(result, symbols["original"]) is obj
+
+    def test_trace_getattr_dunder(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        class Tracked:
+            pass
+
+        obj = Tracked()
+        tracker = type(
+            "Tracker", (), {"property": "ctx", "noShadow": False, "associate": None}
+        )()
+        setattr(obj, symbols["tracker"], tracker)
+
+        result = rs.trace(obj)
+        with pytest.raises(AttributeError):
+            result.__nonexistent__  # noqa: B018 - testing AttributeError is raised
+
+    def test_trace_getattr_callable(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        class Tracked:
+            def greet(self):
+                return "hello"
+
+        obj = Tracked()
+        tracker = type(
+            "Tracker", (), {"property": "ctx", "noShadow": False, "associate": None}
+        )()
+        setattr(obj, symbols["tracker"], tracker)
+
+        result = rs.trace(obj)
+        assert result.greet() == "hello"
+
+    def test_trace_setattr_internal(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+
+        class Tracked:
+            pass
+
+        obj = Tracked()
+        tracker = type(
+            "Tracker", (), {"property": "ctx", "noShadow": False, "associate": None}
+        )()
+        setattr(obj, symbols["tracker"], tracker)
+
+        result = rs.trace(obj)
+        result._ctx = ctx  # Should go through __setattr__ internal path
+
+
+class TestReflectServiceBindAdvanced:
+    def test_bind_traces_args(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        traced = []
+
+        def callback(a, b):
+            traced.append(a)
+            return b
+
+        bound = rs.bind(callback)
+        bound(obj := object(), 2)
+        assert len(traced) == 1
+        assert traced[0] is obj
 
 
 class TestReflectServicePropertyKwargs:

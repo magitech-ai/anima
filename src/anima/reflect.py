@@ -1,6 +1,6 @@
 """Reflect service for service property access and introspection.
 
-Python port of the reference ReflectService: manages service properties,
+Python port of the ReflectService: manages service properties,
 accessors, mixins, and change notification.
 """
 
@@ -9,7 +9,53 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from anima.core import Context, FiberState, _current_fiber
+from anima.core import Context, FiberState, _current_fiber, symbols
+
+
+def _is_traceable(value: Any) -> bool:
+    """Check if a value is an object-like type that can be traced."""
+    return value is not None and not isinstance(
+        value, (str, int, float, bool, bytes, type)
+    )
+
+
+class _TraceableProxy:
+    """Proxy that wraps a value with context tracking (getTraceable parity)."""
+
+    def __init__(self, ctx: Context, value: Any, tracker: Any) -> None:
+        object.__setattr__(self, "_ctx", ctx)
+        object.__setattr__(self, "_value", value)
+        object.__setattr__(self, "_tracker", tracker)
+
+    def __getattr__(self, name: str) -> Any:
+        if name == symbols["original"]:
+            return object.__getattribute__(self, "_value")
+        tracker = object.__getattribute__(self, "_tracker")
+        if name == tracker.property:
+            return object.__getattribute__(self, "_ctx")
+        if isinstance(name, str) and name.startswith("__"):
+            raise AttributeError(name)
+        value = object.__getattribute__(self, "_value")
+        attr = getattr(value, name)
+        if callable(attr) and not tracker.noShadow:
+
+            def bound(*args: Any, **kwargs: Any) -> Any:
+                return attr(*args, **kwargs)
+
+            return bound
+        return attr
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in ("_ctx", "_value", "_tracker"):
+            object.__setattr__(self, name, value)
+            return
+        target = object.__getattribute__(self, "_value")
+        setattr(target, name, value)
+
+    def __getitem__(self, key: Any) -> Any:
+        if key == symbols["original"]:
+            return object.__getattribute__(self, "_value")
+        raise KeyError(key)
 
 
 class Impl:
@@ -44,7 +90,7 @@ class Property:
 class ReflectService:
     """Service property access, accessors, mixins, and change notification.
 
-    ReflectService does not extend Service (parity).
+    ReflectService does not extend Service (anima parity).
     """
 
     def __init__(self, ctx: Context) -> None:
@@ -120,7 +166,7 @@ class ReflectService:
                 del self.store[name]
             self.notify([name])
 
-        # Register disposer as effect on the current fiber (parity:
+        # Register disposer as effect on the current fiber (anima parity:
         # this.ctx.fiber.effect(...) registers the disposer on the fiber)
         fiber = _current_fiber.get() or self.ctx._fiber
         if fiber is not None:  # pragma: no cover
@@ -237,12 +283,21 @@ class ReflectService:
 
     def trace(self, value: Any) -> Any:
         """Return a context-traceable wrapper around a value."""
-        return value
+        if not _is_traceable(value):
+            return value
+        if hasattr(value, symbols["shadow"]):
+            return type(value)
+        tracker = getattr(value, symbols["tracker"], None)
+        if not tracker:
+            return value
+        return _TraceableProxy(self.ctx, value, tracker)
 
     def bind(self, callback: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap a callback with context tracing."""
 
         def bound(*args: Any, **kwargs: Any) -> Any:
-            return callback(*args, **kwargs)
+            traced_args = [self.trace(arg) for arg in args]
+            traced_kwargs = {k: self.trace(v) for k, v in kwargs.items()}
+            return callback(*traced_args, **traced_kwargs)
 
         return bound

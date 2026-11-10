@@ -59,7 +59,7 @@ uv run mypy src                         # Verify strict static type checking
 ## 7. Agent skills
 
 ### Issue tracker
-GitHub Issues via `gh` CLI (`magitech-ai` organization). See `docs/agents/issue-tracker.md`.
+GitHub Issues via `gh` CLI (`anima` organization). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 Canonical five-role triage vocabulary. See `docs/agents/triage-labels.md`.

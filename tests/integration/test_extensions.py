@@ -1,7 +1,7 @@
 """Integration tests for the five auxiliary ecosystem extensions.
 
 Exercises server:acl, server:proxy, server:static, http:socks, and cli:env
-cooperating on their respective contexts, mirroring the reference explicit plugin
+cooperating on their respective contexts, mirroring anima's explicit plugin
 mounting model (each extension imported and applied explicitly).
 """
 

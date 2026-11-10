@@ -1005,12 +1005,12 @@ async def test_fiber_non_callable_config():
 
 
 class TestAnimaError:
-    def test_anima_error_creation(self):
+    def test_error_creation(self):
         err = AnimaError(AnimaErrorCode.INACTIVE_EFFECT)
         assert err.code == AnimaErrorCode.INACTIVE_EFFECT
         assert "cannot create effect on inactive context" in str(err)
 
-    def test_anima_error_with_message(self):
+    def test_error_with_message(self):
         err = AnimaError(AnimaErrorCode.INACTIVE_EFFECT, "custom message")
         assert err.code == AnimaErrorCode.INACTIVE_EFFECT
         assert str(err) == "custom message"
@@ -1144,7 +1144,7 @@ class TestServiceFilter:
 
 class TestCoreServiceAlias:
     def test_core_service_exists(self):
-        """CoreService is the core service."""
+        """CoreService is the anima core service."""
         assert CoreService is not None
         assert CoreService.__name__ == "CoreService"
 
@@ -1349,6 +1349,31 @@ class TestServiceBoundCallCoverage:
         bound = _BoundService(svc, ctx)
         result = bound(5)
         assert result == 15
+
+
+class TestServiceCall:
+    def test_service_call_not_callable(self):
+        """Test Service.__call__ raises TypeError for non-callable service."""
+        ctx = Context()
+        svc = CoreService(ctx)
+        with pytest.raises(TypeError, match="is not callable"):
+            svc()
+
+    def test_service_call_invoke(self):
+        """Test Service.__call__ calls invoke method when defined."""
+        ctx = Context()
+
+        class InvokableService(Service):
+            def __init__(self, c: Context):
+                super().__init__(c, "invokable")
+
+            @classmethod
+            def invoke(cls, self_instance, *args, **kwargs):
+                return args[0] if args else None
+
+        svc = InvokableService(ctx)
+        result = svc(42)
+        assert result == 42
 
 
 class TestServiceExtendElseBranch:
