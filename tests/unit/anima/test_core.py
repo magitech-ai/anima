@@ -1376,6 +1376,100 @@ class TestServiceCall:
         assert result == 42
 
 
+class TestContextSetAttr:
+    def test_context_setattr_direct_attribute(self):
+        """Test __setattr__ sets direct instance attributes."""
+        ctx = Context()
+        ctx.custom_attr = 42
+        assert ctx.custom_attr == 42
+
+    def test_context_setattr_private_attribute(self):
+        """Test __setattr__ sets private attributes directly."""
+        ctx = Context()
+        ctx._private = "secret"
+        assert ctx._private == "secret"
+
+    def test_context_setattr_declared_service(self):
+        """Test __setattr__ routes declared service through reflect.set."""
+        ctx = Context()
+        ctx.reflect.provide("tracked", "initial_value")
+        # Setting a declared service routes through reflect.set
+        ctx.tracked = "new_value"
+        assert ctx.tracked == "new_value"
+
+    def test_context_setattr_accessor_setter(self):
+        """Test __setattr__ calls accessor setter."""
+        ctx = Context()
+
+        def my_setter(ctx, value, receiver, error):
+            receiver._custom_set_value = value
+            return True
+
+        ctx.reflect.accessor("custom_prop", {"set": my_setter})
+        ctx.custom_prop = "hello"
+        assert ctx._custom_set_value == "hello"
+
+    def test_context_setattr_accessor_no_setter(self):
+        """Test __setattr__ on accessor without setter is a no-op."""
+        ctx = Context()
+        ctx.reflect.accessor("read_only", {"get": lambda c, r, e: 42})
+        # Setting should not raise, just be ignored (proxy parity)
+        ctx.read_only = 99
+        assert ctx.read_only == 42
+
+    def test_context_setattr_accessor_no_getter(self):
+        """Test __getattr__ on accessor without getter raises AttributeError."""
+        ctx = Context()
+        ctx.reflect.accessor("write_only", {"set": lambda c, v, r, e: True})
+        # Reading should raise AttributeError since no getter
+        with pytest.raises(AttributeError):
+            _ = ctx.write_only
+
+
+class TestContextContains:
+    def test_context_contains_private(self):
+        """Test __contains__ with private attribute."""
+        ctx = Context()
+        ctx._private = "secret"
+        assert "_private" in ctx
+
+    def test_context_contains_service(self):
+        """Test __contains__ finds services in _services."""
+        ctx = Context()
+        CoreService(ctx)
+        assert "core_svc" in ctx
+
+    def test_context_contains_registered_service(self):
+        """Test __contains__ finds services registered via _register_service."""
+        ctx = Context()
+        ctx._register_service("manual_svc", "value")
+        assert "manual_svc" in ctx
+
+    def test_context_contains_reflect_store(self):
+        """Test __contains__ finds services in reflect.store."""
+        ctx = Context()
+        ctx.reflect.provide("reflect_svc", "value")
+        assert "reflect_svc" in ctx
+
+    def test_context_contains_props(self):
+        """Test __contains__ finds declared properties in reflect.props."""
+        ctx = Context()
+        ctx.reflect.accessor("declared_prop", {"get": lambda c, r, e: None})
+        assert "declared_prop" in ctx
+
+    def test_context_contains_parent(self):
+        """Test __contains__ checks parent context."""
+        parent = Context()
+        child = Context(parent=parent)
+        CoreService(parent)
+        assert "core_svc" in child
+
+    def test_context_contains_not_found(self):
+        """Test __contains__ returns False for unknown names."""
+        ctx = Context()
+        assert "nonexistent" not in ctx
+
+
 class TestServiceExtendElseBranch:
     def test_service_extend_without_invoke_flag(self):
         """Test _extend else branch (covers lines 562-565)."""
