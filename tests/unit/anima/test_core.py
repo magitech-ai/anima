@@ -2095,3 +2095,23 @@ class TestServiceInit:
 
         asyncio.run(fib.load())
         assert fib.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_fiber_load_context_as_plugin():
+    """Mounting a Context as a plugin must load to ACTIVE, not recurse.
+
+    Regression: Fiber.load probes getattr(instance, "init", None); a Context
+    instance has no "init", and the reflect special-property branch re-entered
+    Context.__getattr__ forever (RecursionError), marking the fiber FAILED.
+    """
+    ctx = Context()
+    fiber = ctx.plugin(Context)
+    await fiber.load()
+    assert fiber.state == FiberState.ACTIVE
+
+
+def test_context_init_probe_returns_none():
+    """The Fiber.load init probe on a Context instance returns None."""
+    ctx = Context()
+    assert getattr(ctx, "init", None) is None

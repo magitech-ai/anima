@@ -357,8 +357,10 @@ class ReflectService:
 
     def handler_get(self, target: Context, prop: str, ctx: Context) -> Any:
         """ProxyHandler.get trap - resolve service property."""
-        if _is_special_property(prop):  # pragma: no cover - special property getattr
-            return getattr(target, prop)
+        if _is_special_property(prop):
+            # Bypass Context.__getattr__: bare getattr() here re-enters it
+            # for a missing reserved word and recurses forever.
+            return object.__getattribute__(target, prop)
 
         try:
             object.__getattribute__(target, prop)
@@ -490,8 +492,10 @@ class ReflectService:
     def handler_set(self, target: Context, prop: str, value: Any, ctx: Context) -> bool:
         """ProxyHandler.set trap - set service property."""
         if _is_special_property(prop):
-            setattr(target, prop, value)  # pragma: no cover - special property setattr
-            return True  # pragma: no cover - special property setattr
+            # Bypass Context.__setattr__: bare setattr() here re-enters it
+            # for a reserved word and recurses forever.
+            object.__setattr__(target, prop, value)
+            return True
 
         error = AnimaError(
             "set_error", f'cannot set property "{prop}" without provide'
@@ -526,8 +530,14 @@ class ReflectService:
 
     def handler_has(self, target: Context, prop: str) -> bool:
         """ProxyHandler.has trap - check if property exists."""
-        if _is_special_property(prop):  # pragma: no cover - special property hasattr
-            return hasattr(target, prop)
+        if _is_special_property(prop):
+            # Bypass Context.__getattr__: bare hasattr() here re-enters it
+            # for a missing reserved word and recurses forever.
+            try:
+                object.__getattribute__(target, prop)
+            except AttributeError:
+                return False
+            return True
         try:
             object.__getattribute__(
                 target, prop

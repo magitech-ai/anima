@@ -812,3 +812,62 @@ class TestReflectServiceHandlerExtra:
         assert rs.handler_set(ctx, "my_svc", "new", ctx) is True
         assert rs.get("my_svc") == "new"
         ctx.fiber.runtime = None  # cleanup
+
+
+class TestReflectSpecialPropertyRecursion:
+    """Missing reserved-word attributes must raise AttributeError, not recurse.
+
+    Regression: handler_get/handler_set/handler_has used bare
+    getattr/setattr/hasattr on the Context for reserved words (init, check,
+    config, invoke). A missing reserved word re-entered Context.__getattr__
+    forever (RecursionError), which broke Fiber.load's init probe when a
+    Context itself was mounted as a plugin.
+    """
+
+    @pytest.mark.parametrize("prop", ["init", "check", "config", "invoke"])
+    def test_missing_reserved_word_getattr_returns_default(self, prop):
+        ctx = Context()
+        assert getattr(ctx, prop, None) is None
+
+    @pytest.mark.parametrize("prop", ["init", "check", "config", "invoke"])
+    def test_missing_reserved_word_getattr_raises(self, prop):
+        ctx = Context()
+        with pytest.raises(AttributeError):
+            _ = getattr(ctx, prop)
+
+    @pytest.mark.parametrize("prop", ["init", "check", "config", "invoke"])
+    def test_missing_reserved_word_hasattr_is_false(self, prop):
+        ctx = Context()
+        assert hasattr(ctx, prop) is False
+
+    @pytest.mark.parametrize("prop", ["init", "check", "config", "invoke"])
+    def test_missing_reserved_word_not_in_context(self, prop):
+        ctx = Context()
+        assert prop not in ctx
+
+    @pytest.mark.parametrize("prop", ["init", "check", "config", "invoke"])
+    def test_handler_get_missing_reserved_word_raises(self, prop):
+        ctx = Context()
+        with pytest.raises(AttributeError):
+            ctx.reflect.handler_get(ctx, prop, ctx)
+
+    def test_existing_reserved_word_methods_still_resolve(self):
+        ctx = Context()
+        assert callable(ctx.filter)
+        assert callable(ctx.isolate)
+
+    def test_existing_reserved_word_has_and_contains(self):
+        ctx = Context()
+        assert hasattr(ctx, "filter") is True
+        assert "filter" in ctx
+
+    def test_set_reserved_word_then_read(self):
+        ctx = Context()
+        ctx.init = "probe"
+        assert ctx.init == "probe"
+
+    def test_handler_set_reserved_word(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        assert rs.handler_set(ctx, "init", "probe", ctx) is True
+        assert ctx.init == "probe"
