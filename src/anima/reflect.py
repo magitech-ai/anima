@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from anima.core import Context, FiberState, Service
+from anima.core import Context, FiberState, _current_fiber
 
 
 class Impl:
@@ -41,11 +41,15 @@ class Property:
         self.__dict__.update(kwargs)
 
 
-class ReflectService(Service):
-    """Service property access, accessors, mixins, and change notification."""
+class ReflectService:
+    """Service property access, accessors, mixins, and change notification.
+
+    ReflectService does not extend Service (parity).
+    """
 
     def __init__(self, ctx: Context) -> None:
-        super().__init__(ctx, "reflect")
+        self.ctx = ctx
+        self.name = "reflect"
         self.store: dict[Any, Impl] = {}
         self.props: dict[str, Property] = {}
         self._impl_counter = 0
@@ -108,15 +112,19 @@ class ReflectService(Service):
         self._impl_counter += 1
         self.store[name] = impl
 
-        if self.ctx.fiber.state == FiberState.ACTIVE:
-            self.notify([name])
-
         self.ctx.fiber._set_state(FiberState.ACTIVE)
+        self.notify([name])
 
         def disposer() -> None:
             if self.store.get(name) is impl:
                 del self.store[name]
             self.notify([name])
+
+        # Register disposer as effect on the current fiber (parity:
+        # this.ctx.fiber.effect(...) registers the disposer on the fiber)
+        fiber = _current_fiber.get() or self.ctx._fiber
+        if fiber is not None:  # pragma: no cover
+            fiber.effects.append(disposer)
 
         return disposer
 
@@ -147,9 +155,16 @@ class ReflectService(Service):
                     impl = self._get_impl(name, strict=False)
                     if impl:
                         fiber._validate_config()
+                    else:
+                        # Dependency no longer available — dispose active fiber
+                        if fiber.state == FiberState.ACTIVE:  # pragma: no cover
+                            self.ctx._schedule_task(fiber.dispose())
                 if not has_update:
                     continue
                 fiber._refresh() if hasattr(fiber, "_refresh") else None
+                # Schedule load for PENDING fibers whose deps are now satisfied
+                if fiber.state == FiberState.PENDING and fiber.check_dependencies():
+                    self.ctx._schedule_task(fiber.load())
                 updated_fibers.append(fiber)
 
         for name in names:

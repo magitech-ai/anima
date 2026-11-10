@@ -6,25 +6,27 @@ tracking, and plugin replacement.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterable
 from typing import Any, cast
 
-from anima.core import Context, Fiber, FiberState, Service, symbols
+from anima.core import Context, Fiber, FiberState
 
 
-def Inject(name: str, config: Any = None):
+def Inject(name: str, config: Any = None) -> Callable[[Any], Any]:
     """Decorator for declaring service dependencies on classes or methods.
 
     Inject decorator parity. When applied to a class, sets
     ``cls.inject[name] = config``. When applied to a method, stores
     inject metadata on the method for later processing.
     """
+
     def decorator(value: Any) -> Any:  # pragma: no cover
         if isinstance(value, type):  # pragma: no cover
             # Class decorator  # pragma: no cover
-            if not hasattr(value, "inject") or value.inject is None:  # pragma: no cover
-                value.inject = {}  # pragma: no cover
-            value.inject[name] = config  # pragma: no cover
+            if not hasattr(value, "inject") or value.inject is None:  # type: ignore[attr-defined]  # pragma: no cover
+                value.inject = {}  # type: ignore[attr-defined]  # pragma: no cover
+            value.inject[name] = config  # type: ignore[attr-defined]  # pragma: no cover
             return value  # pragma: no cover
         else:  # pragma: no cover
             # Function/method decorator  # pragma: no cover
@@ -32,6 +34,7 @@ def Inject(name: str, config: Any = None):
                 value._inject_metadata = {}  # pragma: no cover
             value._inject_metadata[name] = config  # pragma: no cover
             return value  # pragma: no cover
+
     return decorator  # pragma: no cover
 
 
@@ -49,7 +52,9 @@ def resolve_inject(inject: Any, result: dict[str, Any] | None = None) -> dict[st
             result[name] = None
     elif isinstance(inject, dict):  # pragma: no cover
         for name in inject:  # pragma: no cover
-            result[name] = inject[name] if inject[name] is not None else None  # pragma: no cover
+            result[name] = (
+                inject[name] if inject[name] is not None else None
+            )  # pragma: no cover
     return result  # pragma: no cover
 
 
@@ -68,11 +73,15 @@ class PluginRuntime:
         self.Config = Config
 
 
-class RegistryService(Service):
-    """Registry of plugin runtimes with fiber tracking and replacement."""
+class RegistryService:
+    """Registry of plugin runtimes with fiber tracking and replacement.
+
+    RegistryService does not extend Service (parity).
+    """
 
     def __init__(self, ctx: Context) -> None:
-        super().__init__(ctx, "registry")
+        self.ctx = ctx
+        self.name = "registry"
         self._counter = 0
         self._internal: dict[Callable[..., Any], PluginRuntime] = {}
         # function id -> plugin (WeakMap-like alias chain)
@@ -216,17 +225,19 @@ class RegistryService(Service):
         resolve_inject(deps, inject_map)
         inject_list = list(inject_map.keys())
 
-        target = type(
-            "_InlineRegistryPlugin",
-            (),
-            {
-                "inject": inject_list,
-                "apply": callback,
-                "name": callback.__name__,
-                "__init__": lambda self, ctx: setattr(self, "ctx", ctx),
-            },
-        )
-        return self.plugin(target)
+        class _InlineRegistryPlugin:
+            inject = inject_list
+
+            def __init__(self, ctx: Context) -> None:
+                self.ctx = ctx
+
+            async def apply(self, ctx: Context) -> Any:
+                res = callback(ctx)
+                if inspect.isawaitable(res):
+                    return await res
+                return res
+
+        return self.plugin(_InlineRegistryPlugin)
 
     def plugin(self, plugin: Any, config: Any = None) -> Fiber:
         """Mount a plugin and return its fiber."""
@@ -239,9 +250,8 @@ class RegistryService(Service):
 
         callback, target = forwarded
         runtime = self._internal.get(callback) or self._create(callback, target)
-        fiber = Fiber(self.ctx, target, (), {})
-        fiber.raw_config = dict(config or {})
-        fiber.config = dict(config or {})
+        config_dict = dict(config or {})
+        fiber = Fiber(self.ctx, target, (), config_dict)
         runtime.fibers.append(fiber)
         self.ctx.fiber.child_fibers.append(fiber)
         self.ctx.emit("internal/plugin", fiber)

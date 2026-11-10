@@ -3,8 +3,10 @@ import os
 from typing import Any, ClassVar
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
+from anima.cli_env import CliEnv, load_env_cascade
 from anima.core import (
     Context,
     AnimaError,
@@ -18,12 +20,9 @@ from anima.core import (
     symbols,
 )
 from anima.core import ValidationError as AnimaValidationError
-from anima.cli_env import CliEnv, load_env_cascade
+from anima.events import EventMode
 from anima.reflect import ReflectService
 from anima.schema import Schema, SchemaError
-from pydantic import BaseModel, ValidationError as PydanticValidationError
-from anima.events import EventMode
-from typing import ClassVar
 
 
 class MockGreeter(Service):
@@ -1088,7 +1087,9 @@ class TestFiberEffect:
         fib = ctx.plugin(CoreService)
 
         wrapper_called = []
-        fib.effect(lambda: wrapper_called.append("wrapper_executed"), label="test_wrapper")
+        fib.effect(
+            lambda: wrapper_called.append("wrapper_executed"), label="test_wrapper"
+        )
         await fib.dispose()
         assert len(wrapper_called) == 1
         assert wrapper_called[0] == "wrapper_executed"
@@ -1198,7 +1199,7 @@ class TestFiberEffectException:
 class TestServiceInstanceCheckSubclass:
     def test_service_instancecheck_subclass_negative(self):
         ctx = Context()
-        svc = CoreService(ctx)
+        CoreService(ctx)
 
         class Unrelated:
             pass
@@ -1237,7 +1238,7 @@ class TestServiceExtend:
         ctx = Context()
 
         class CallableService(Service):
-            __symbols__ = {"invoke": symbols["invoke"]}
+            __symbols__: ClassVar[dict[str, str]] = {"invoke": symbols["invoke"]}
 
             def __init__(self, c: Context):
                 super().__init__(c, "callable_svc")
@@ -1287,12 +1288,12 @@ class TestFiberAssertActive:
 class TestServiceInstanceCheckEdgeCases:
     def test_service_instancecheck_none(self):
         ctx = Context()
-        svc = CoreService(ctx)
+        CoreService(ctx)
         assert not isinstance(None, CoreService)
 
     def test_service_instancecheck_non_object(self):
         ctx = Context()
-        svc = CoreService(ctx)
+        CoreService(ctx)
         assert not isinstance(42, CoreService)
         assert not isinstance("string", CoreService)
         assert not isinstance([], CoreService)
@@ -1395,7 +1396,7 @@ class TestContextGetSet:
         assert ctx.get("core_svc") is svc
 
         # Create a new service and set it via Context.set
-        new_svc = CoreService(ctx, "new_core_svc")
+        CoreService(ctx, "new_core_svc")
         ctx.set("renamed_svc", svc)
         assert ctx.get("renamed_svc") is svc
 
@@ -1403,9 +1404,8 @@ class TestContextGetSet:
 class TestCliEnvPlugin:
     def test_cli_env_load_cascade(self):
         """Test cli_env.load_env_cascade function."""
-        from anima.cli_env import load_env_cascade
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = os.path.join(tmpdir, ".env")
@@ -1418,7 +1418,7 @@ class TestCliEnvPlugin:
 
     def test_cli_env_plugin_mount(self):
         """Test CliEnv plugin mounting."""
-        from anima.cli_env import CliEnv
+
         ctx = Context()
         fiber = ctx.plugin(CliEnv)
         assert fiber.state == FiberState.ACTIVE
@@ -1567,7 +1567,7 @@ class TestInstanceCheckDirect:
     def test_instancecheck_none_instance(self):
         """Test __instancecheck__ with None instance (covers line 520)."""
         ctx = Context()
-        svc = CoreService(ctx)
+        CoreService(ctx)
         result = CoreService.__instancecheck__(CoreService, None)
         assert result is False
 
@@ -1592,15 +1592,13 @@ class TestInstanceCheckDirect:
         assert isinstance(subsub, CoreService)
 
 
-
-
 class TestInstanceCheckObjectBase:
     def test_instancecheck_object_base(self):
         """Test __instancecheck__ where base class has empty __bases__ (covers line 534).
 
         object.__bases__ is (), which is falsy, so the `else: break` branch is taken.
         """
-        ctx = Context()
+        Context()
         # object.__bases__ is () - empty tuple, so bases is falsy
         result = CoreService.__instancecheck__(CoreService, object())
         assert result is False  # object is not an instance of CoreService

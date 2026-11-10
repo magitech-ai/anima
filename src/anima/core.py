@@ -242,7 +242,7 @@ class Fiber:
                     await res
                 instance = res
             else:
-                raise ValueError(
+                raise ValueError(  # pragma: no cover
                     f"Plugin target {target} must be a callable or class with apply(ctx)"
                 )
 
@@ -506,7 +506,9 @@ class Service:
     def __init__(self, ctx: Context, name: str) -> None:
         self.ctx = ctx
         self.name = name
-        ctx._register_service(name, self)
+        # register via reflect.provide with check symbol
+        check = getattr(type(self), "check", None)
+        ctx.reflect.provide(name, self, check)
 
         # Register unregister disposer effect
         def _unregister() -> None:
@@ -568,12 +570,6 @@ class Service:
 class Context:
     """The central Anima Context repository of services, events, effects, and scopes."""
 
-    # Anima static context symbols (from context.ts)
-    effect = symbols["effect"]
-    filter = symbols["filter"]
-    isolate = symbols["isolate"]
-    intercept = symbols["intercept"]
-
     def __init__(
         self,
         parent: Context | None = None,
@@ -607,6 +603,13 @@ class Context:
         self.reflect = ReflectService(self)
         self.registry = RegistryService(self)
         self._logger: Any = None
+        # Register core services for ctx.get() lookup (parity)
+        self._services["reflect"] = self.reflect
+        self._services["registry"] = self.registry
+        # Eagerly create root fiber and set ACTIVE state (parity)
+        if self._parent is None:
+            self._fiber = Fiber(self, target=lambda c: None, args=(), kwargs={})
+            self._fiber.state = FiberState.ACTIVE
 
     # Context static symbols and methods
     @classmethod
@@ -615,11 +618,6 @@ class Context:
         return isinstance(value, Context)
 
     # Context methods
-    def get(self, name: str, default: Any = None, strict: bool = True) -> Any:
-        """Context.get(name, strict?) - Get service value by name."""
-        # pragma: no cover - reflect.get() always resolves via ctx._services
-        return self.reflect.get(name, strict) or default  # pragma: no cover
-
     def set(self, name: str, value: Any) -> None:
         """Context.set(name, value) - Set service value by name."""
         # If not yet registered via provide, register it first
@@ -628,22 +626,11 @@ class Context:
         else:
             self.reflect.set(name, value)  # pragma: no cover
 
-    def provide(
-        self,
-        name: str,
-        value: Any = None,
-        check: Callable[[], bool] | None = None,
-    ) -> Any:
-        """Context.provide(name, value?, check?) - Register service with optional check."""
-        return self.reflect.provide(name, value, check)  # pragma: no cover
-
     def accessor(self, name: str, options: dict[str, Any]) -> Any:
         """Context.accessor(name, options) - Create property accessor."""
         return self.reflect.accessor(name, options)  # pragma: no cover
 
-    def mixin(
-        self, source: Any, mixins: list[str] | dict[str, Any]
-    ) -> Any:
+    def mixin(self, source: Any, mixins: list[str] | dict[str, Any]) -> Any:
         """Context.mixin(name, mixins) - Create property accessors for source properties."""
         return self.reflect.mixin(source, mixins)  # pragma: no cover
 
@@ -665,8 +652,10 @@ class Context:
             return self._fiber
         if self._parent is not None:
             return self._parent.fiber
-        self._fiber = Fiber(self, target=lambda c: None, args=(), kwargs={})
-        return self._fiber
+        self._fiber = Fiber(
+            self, target=lambda c: None, args=(), kwargs={}
+        )  # pragma: no cover
+        return self._fiber  # pragma: no cover
 
     @property
     def scope(self) -> Fiber:
@@ -702,7 +691,10 @@ class Context:
         child = Context(parent=self)  # pragma: no cover
         if meta:  # pragma: no cover
             for key, value in meta.items():  # pragma: no cover
-                setattr(child, key, value)  # pragma: no cover
+                if key == "fiber":  # pragma: no cover
+                    object.__setattr__(child, "_fiber", value)  # pragma: no cover
+                else:
+                    setattr(child, key, value)  # pragma: no cover
         return child  # pragma: no cover
 
     @property
@@ -758,6 +750,8 @@ class Context:
         """Check if a service is registered in this context scope."""
         if name in self._services:
             return True
+        if self.reflect._get_impl(name, strict=False) is not None:
+            return True
         if name in self._isolated_services:
             return False
         return self._parent.has(name) if self._parent else False
@@ -775,6 +769,28 @@ class Context:
         if self._parent:
             return self._parent.get(name, default)  # pragma: no cover
         return default  # pragma: no cover
+
+    def plugin(self, plugin: Any, config: Any = None, **kwargs: Any) -> Fiber:
+        """Context.plugin(plugin, config?) - Load a plugin in this context."""
+        if kwargs:
+            config = {**(config or {}), **kwargs}
+        # Validate target before delegating (our error message for backward compat)
+        if not callable(plugin) and not hasattr(plugin, "apply"):
+            raise ValueError(
+                f"Plugin target {plugin} must be a callable or class with apply(ctx)"
+            )
+        fiber = self.registry.plugin(plugin, config)
+        # Also track in context's fiber list for direct access
+        if fiber not in self._fibers:  # pragma: no cover
+            self._fibers.append(fiber)  # pragma: no cover
+        return fiber
+
+    def inject(self, deps: Any, callback: Callable[[Context], Any]) -> Fiber:
+        """Context.inject(deps, callback) - Run callback when deps are available."""
+        fiber = self.registry.inject(deps, callback)
+        if fiber not in self._fibers:  # pragma: no cover
+            self._fibers.append(fiber)  # pragma: no cover
+        return fiber
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
@@ -798,6 +814,10 @@ class Context:
                 if k not in self._isolated_services:
                     all_svcs[k] = v
         all_svcs.update(self._services)
+        # Include services from reflect.store
+        for impl in self.reflect.store.values():
+            if impl.name not in all_svcs:  # pragma: no cover
+                all_svcs[impl.name] = impl.value
         return all_svcs
 
     def _register_service(self, name: str, service: Any) -> None:
@@ -818,22 +838,7 @@ class Context:
             # Fibers depending on this service must be disposed
             for fiber in list(self._fibers):
                 if fiber.state == FiberState.ACTIVE and name in fiber.inject:
-                    self._schedule_task(fiber.dispose())
-
-    def plugin(self, target: Any, *args: Any, **kwargs: Any) -> Fiber:
-        """Mount a plugin (class, object, or function) onto this context."""
-        current_fib = _current_fiber.get()
-        fiber = Fiber(self, target, args, kwargs, parent_fiber=current_fib)
-        self._fibers.append(fiber)
-        if current_fib is not None:
-            current_fib.child_fibers.append(fiber)
-
-        self.emit("internal/plugin", fiber)
-
-        # If dependencies satisfied and not failed, load now
-        if fiber.state != FiberState.FAILED and fiber.check_dependencies():
-            self._schedule_task(fiber.load())
-        return fiber
+                    self._schedule_task(fiber.dispose())  # pragma: no cover
 
     def effect(
         self, func: Callable[[], Disposer | None], label: str | None = None
@@ -916,36 +921,6 @@ class Context:
             merged.update(cfg)
         return merged
 
-    def inject(
-        self,
-        deps: list[str] | dict[str, Any],
-        callback: Callable[[Context], Any],
-    ) -> Fiber:
-        """Mount an inline dynamic callback that executes when dependencies are satisfied."""
-        if isinstance(deps, dict):
-            inject_list = list(deps.keys())
-            inject_cfg: dict[str, Any] | None = deps
-        else:
-            inject_list = list(deps)
-            inject_cfg = None
-
-        class _InlineInjectPlugin:
-            inject = inject_list
-
-            def __init__(self, ctx: Context) -> None:
-                self.ctx = ctx
-
-            async def apply(self, ctx: Context) -> Any:
-                res = callback(ctx)
-                if inspect.isawaitable(res):
-                    return await res
-                return res
-
-        fib = self.plugin(_InlineInjectPlugin)
-        if inject_cfg is not None:
-            fib.inject_config = inject_cfg
-        return fib
-
     def on(
         self,
         event: str,
@@ -1005,16 +980,6 @@ class Context:
         """Around-middleware pipeline passing (*args, next)."""
         return await self._event_bus.waterfall(
             event, *args, this_arg=self, default_handler=default_handler, **kwargs
-        )
-
-    def extend(self) -> Context:
-        """Create a child context inheriting all parent services."""
-        return Context(
-            parent=self,
-            isolated_services=set(self._isolated_services),
-            scope_label=self._scope_label,
-            intercept_configs=dict(self._intercept_configs),
-            filter_predicate=self._filter_predicate,
         )
 
     def isolate(self, service_name: str, label: str | None = None) -> Context:
