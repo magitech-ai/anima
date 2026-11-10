@@ -344,7 +344,7 @@ class Fiber:
         """
         old_epoch = self._getCurrentEpoch()
         try:
-            self.config = self._resolve_config(self.raw_config)
+            self.config = await self._resolve_config(self.raw_config)
             await self.load()
         except Exception as e:
             self._set_state(FiberState.FAILED, error=e)
@@ -354,7 +354,7 @@ class Fiber:
             if self._getCurrentEpoch() == old_epoch:
                 self.inertia = None
 
-    def _resolve_config(
+    async def _resolve_config(
         self, config: Any
     ) -> Any:  # pragma: no cover - async waterfall path, hard to trigger in sync tests
         """Resolve plugin config through internal/config waterfall parity.
@@ -365,14 +365,7 @@ class Fiber:
         async def _default(cfg: Any) -> Any:
             return cfg
 
-        # Run waterfall hook (sync wrapper for simplicity)
-        try:
-            loop = asyncio.get_event_loop()
-            resolved = loop.run_until_complete(
-                self.ctx.waterfall("internal/config", config, _default)
-            )
-        except RuntimeError:
-            resolved = config
+        resolved = await self.ctx.waterfall("internal/config", config, _default)
 
         # Apply schema validation if declared
         config_schema = getattr(self.target, "Config", None)
