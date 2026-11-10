@@ -34,8 +34,15 @@ Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
 Run a declarative profile (default `anima.yaml`):
 
 ```sh
-uv run python -m anima.cli run
-uv run python -m anima.cli run my-profile.yaml
+anima run
+anima run my-profile.yaml
+```
+
+From a repository checkout:
+
+```sh
+uv run anima run
+uv run anima run my-profile.yaml
 ```
 
 The profile file must exist: if it does not, the command exits with code 0 and loads nothing.
