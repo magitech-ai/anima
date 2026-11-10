@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -419,3 +421,33 @@ async def test_cli_additional_syntax_branches():
     # 3. Double dispose
     cmd.dispose()
     cmd.dispose()
+
+
+def test_console_main_runs_help_synchronously(monkeypatch, capsys):
+    """console_main is a sync entrypoint: help exits 0 without an event loop."""
+    from anima.cli import console_main
+
+    monkeypatch.setattr(sys, "argv", ["anima", "help"])
+    assert console_main() == 0
+    assert "Anima Command-Line Interface" in capsys.readouterr().out
+
+
+def test_console_main_returns_one_for_unknown_command(monkeypatch, capsys):
+    """console_main propagates the async main exit code."""
+    from anima.cli import console_main
+
+    monkeypatch.setattr(sys, "argv", ["anima", "unknown_cmd_foo"])
+    assert console_main() == 1
+    assert "Error:" in capsys.readouterr().err
+
+
+def test_module_execution_has_no_runtime_warning():
+    """python -m anima.cli runs without the double-import RuntimeWarning."""
+    result = subprocess.run(
+        [sys.executable, "-m", "anima.cli", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "RuntimeWarning" not in result.stderr
