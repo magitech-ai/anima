@@ -526,5 +526,10 @@ async def main(args: list[str] | None = None) -> int:
         return 1
 
 
+def console_main() -> int:
+    """Synchronous console-script entrypoint."""
+    return asyncio.run(main())
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(asyncio.run(main()))
