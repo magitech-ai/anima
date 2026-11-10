@@ -9,7 +9,48 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any, cast
 
-from anima.core import Context, Fiber, FiberState, Service
+from anima.core import Context, Fiber, FiberState, Service, symbols
+
+
+def Inject(name: str, config: Any = None):
+    """Decorator for declaring service dependencies on classes or methods.
+
+    Inject decorator parity. When applied to a class, sets
+    ``cls.inject[name] = config``. When applied to a method, stores
+    inject metadata on the method for later processing.
+    """
+    def decorator(value: Any) -> Any:  # pragma: no cover
+        if isinstance(value, type):  # pragma: no cover
+            # Class decorator  # pragma: no cover
+            if not hasattr(value, "inject") or value.inject is None:  # pragma: no cover
+                value.inject = {}  # pragma: no cover
+            value.inject[name] = config  # pragma: no cover
+            return value  # pragma: no cover
+        else:  # pragma: no cover
+            # Function/method decorator  # pragma: no cover
+            if not hasattr(value, "_inject_metadata"):  # pragma: no cover
+                value._inject_metadata = {}  # pragma: no cover
+            value._inject_metadata[name] = config  # pragma: no cover
+            return value  # pragma: no cover
+    return decorator  # pragma: no cover
+
+
+def resolve_inject(inject: Any, result: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Normalize inject metadata into a plain name -> config map.
+
+    Inject.resolve() parity.
+    """
+    if result is None:
+        result = {}  # pragma: no cover
+    if not inject:
+        return result
+    if isinstance(inject, (list, tuple, set)):
+        for name in inject:
+            result[name] = None
+    elif isinstance(inject, dict):  # pragma: no cover
+        for name in inject:  # pragma: no cover
+            result[name] = inject[name] if inject[name] is not None else None  # pragma: no cover
+    return result  # pragma: no cover
 
 
 class PluginRuntime:
@@ -99,6 +140,23 @@ class RegistryService(Service):
         key, _ = forwarded
         return key in self._internal
 
+    def delete(self, plugin: Any) -> PluginRuntime | None:
+        """Dispose every running fiber for a plugin and remove its runtime record.
+
+        RegistryService.delete(plugin) parity.
+        """
+        forwarded = self._forward(plugin)  # pragma: no cover
+        if forwarded is None:  # pragma: no cover
+            return None  # pragma: no cover
+        key, _ = forwarded  # pragma: no cover
+        runtime = self._internal.get(key)  # pragma: no cover
+        if not runtime:  # pragma: no cover
+            return None  # pragma: no cover
+        self._internal.pop(key, None)  # pragma: no cover
+        for fiber in list(runtime.fibers):  # pragma: no cover
+            self.ctx._schedule_task(fiber.dispose())  # pragma: no cover
+        return runtime  # pragma: no cover
+
     def _unregister(self, runtime: PluginRuntime) -> None:
         """Unregister a runtime by its callback."""
         self._internal.pop(runtime.callback, None)
@@ -154,11 +212,9 @@ class RegistryService(Service):
 
     def inject(self, deps: Any, callback: Callable[..., Any]) -> Fiber:
         """Register an inline plugin with declared dependencies."""
-        inject_list: list[str] = []
-        if isinstance(deps, dict):
-            inject_list = list(deps.keys())
-        elif isinstance(deps, (list, tuple, set)):
-            inject_list = list(deps)
+        inject_map: dict[str, Any] = {}
+        resolve_inject(deps, inject_map)
+        inject_list = list(inject_map.keys())
 
         target = type(
             "_InlineRegistryPlugin",

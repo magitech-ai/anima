@@ -33,7 +33,7 @@ from anima.logger import (
 )
 from anima.pkg import PkgResult, PkgService
 from anima.reflect import ReflectService
-from anima.registry import RegistryService
+from anima.registry import Inject, RegistryService, resolve_inject
 from anima.schema import Schema, SchemaError, z
 from anima.server import Route, ServerRequest, ServerResponse, ServerService, WebSocket
 from anima.timer import Scheduled, TimerService
@@ -61,6 +61,7 @@ __all__ = [
     "HttpService",
     "IncludeError",
     "IncludeService",
+    "Inject",
     "Journal",
     "JournalRecord",
     "LoaderService",
@@ -89,6 +90,7 @@ __all__ = [
     "inject",
     "interpolate_env",
     "load_profile",
+    "resolve_inject",
     "resolve_plugin_target",
     "save_profile",
     "z",
