@@ -770,6 +770,15 @@ class Service:
 class Context:
     """The central Anima Context repository of services, events, effects, and scopes."""
 
+    # Context static context symbols (parity).
+    # static readonly effect/filter/isolate/intercept: unique symbol
+    # These conflict with instance methods of the same name, so we use SYMBOL_
+    # prefix. Access via Context.SYMBOL_EFFECT etc. or anima.core.symbols["effect"].
+    SYMBOL_EFFECT: ClassVar[str] = symbols["effect"]
+    SYMBOL_FILTER: ClassVar[str] = symbols["filter"]
+    SYMBOL_ISOLATE: ClassVar[str] = symbols["isolate"]
+    SYMBOL_INTERCEPT: ClassVar[str] = symbols["intercept"]
+
     def __init__(
         self,
         parent: Context | None = None,
