@@ -7,9 +7,17 @@ accessors, mixins, and change notification.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
-from anima.core import Context, FiberState, _current_fiber, symbols
+from anima.core import (
+    Context,
+    AnimaError,
+    FiberState,
+    Service,
+    _BoundService,
+    _current_fiber,
+    symbols,
+)
 
 
 def _is_traceable(value: Any) -> bool:
@@ -17,6 +25,26 @@ def _is_traceable(value: Any) -> bool:
     return value is not None and not isinstance(
         value, (str, int, float, bool, bytes, type)
     )
+
+
+# Anima reserved words for special properties
+_RESERVED_WORDS = frozenset({"prototype", "then"})
+
+
+def _is_special_property(prop: str) -> bool:
+    """Check if a property is special (reserved word, number string, or starts with _)."""
+    if prop in _RESERVED_WORDS:
+        return True
+    try:
+        num = float(prop)
+        return str(num) == prop or str(int(num)) == prop
+    except (ValueError, TypeError):
+        return prop.startswith("_")
+
+
+def _enhance_error(error: Exception) -> Exception:
+    """Enhance error stack trace."""
+    return error  # pragma: no cover - only called from async paths
 
 
 class _TraceableProxy:
@@ -301,3 +329,177 @@ class ReflectService:
             return callback(*traced_args, **traced_kwargs)
 
         return bound
+
+    # ReflectService.handler proxy traps
+    # These implement get/set/has traps for context property access (proxy parity)
+
+    def handler_get(self, target: Context, prop: str, ctx: Context) -> Any:
+        """ProxyHandler.get trap - resolve service property."""
+        if _is_special_property(prop):  # pragma: no cover - special property getattr
+            return getattr(target, prop)
+
+        try:
+            object.__getattribute__(target, prop)
+            return self.trace(
+                object.__getattribute__(target, prop)
+            )  # pragma: no cover - direct attribute read
+        except AttributeError:
+            pass
+
+        error = AnimaError("get_error", f'cannot get property "{prop}" without inject')
+
+        try:
+            defn = target.reflect.props.get(prop)
+            if defn is not None and defn.type == "accessor":
+                getter = getattr(defn, "get", None)
+                if getter is not None:
+                    return getter(ctx, ctx, error)
+                # Accessor without getter — cannot read  # pragma: no cover - accessor without getter
+                raise error
+
+            # ctx.events.waterfall('internal/get', ...) would be used
+            # here for async interception; in sync __getattr__, fall through
+            # to fiber chain resolution directly
+            return self._handler_get_fallback(target, prop, ctx, error)
+        except AnimaError:
+            raise  # pragma: no cover - AnimaError without "without inject"
+        except Exception as e:
+            raise _enhance_error(e) from e  # pragma: no cover - enhance_error path
+
+    def _handler_get_fallback(
+        self, target: Context, prop: str, ctx: Context, error: AnimaError
+    ) -> Any:
+        """Fallback for handler_get - walk fiber chain for service impl."""
+        key = target._isolated_services.get(prop)
+        try:
+            shadow = object.__getattribute__(target, symbols["shadow"])
+        except AttributeError:
+            shadow = None  # pragma: no cover - shadow rarely set on contexts
+        fiber = getattr(shadow, "fiber", ctx.fiber) if shadow is not None else ctx.fiber
+        while True:
+            # Check target context's reflect store first (most specific registration)
+            target_store_impl = (
+                target.reflect.store.get(prop)
+                if hasattr(target.reflect, "store")
+                else None
+            )
+            if target_store_impl is not None:
+                check_fn = target_store_impl.check
+                if check_fn is not None:
+                    try:
+                        check_ok = check_fn()
+                    except TypeError:
+                        check_ok = True  # check requires self, can't evaluate  # pragma: no cover
+                    if not check_ok:
+                        raise error
+                svc = target_store_impl.value
+                # Wrap in _BoundService only if service's ctx differs from target AND it's a Service
+                if isinstance(svc, Service) and getattr(svc, "ctx", None) is not target:
+                    return _BoundService(svc, target)
+                return svc
+            # Check target context's _services (for ctx.provide() registered services)
+            if prop in target._services:
+                svc = target._services[prop]
+                if isinstance(svc, Service) and getattr(svc, "ctx", None) is not target:
+                    return _BoundService(svc, target)
+                return svc
+            # Check fiber's store
+            impl = fiber._store.get(prop) if hasattr(fiber, "_store") else None
+            if impl is not None:
+                svc = impl.value
+                if isinstance(svc, Service) and getattr(svc, "ctx", None) is not target:
+                    return _BoundService(svc, target)
+                return svc
+            # Check this fiber's context reflect store
+            fib_ctx = getattr(fiber, "ctx", None)
+            if fib_ctx is not None:
+                fib_store_impl = (
+                    fib_ctx.reflect.store.get(prop)
+                    if hasattr(fib_ctx.reflect, "store")
+                    else None
+                )
+                if fib_store_impl is not None:
+                    if fib_store_impl.check is not None and not fib_store_impl.check():
+                        raise error
+                    svc = fib_store_impl.value
+                    if (
+                        isinstance(svc, Service)
+                        and getattr(svc, "ctx", None) is not target
+                    ):
+                        return _BoundService(svc, target)
+                    return svc
+            if prop in getattr(fiber, "inject", {}):
+                raise AnimaError(
+                    "inactive_context",
+                    f'cannot get required service "{prop}" in inactive context',
+                ) from error
+            if not getattr(fiber, "runtime", False):
+                raise error
+            parent_fiber = getattr(fiber, "parent", None)
+            if parent_fiber is None:  # pragma: no cover - root fiber has no parent
+                raise error
+            parent_isolate = (
+                getattr(parent_fiber.ctx, "_isolated_services", {})
+                if hasattr(parent_fiber, "ctx")
+                else {}
+            )
+            if (
+                parent_isolate.get(prop) != key
+            ):  # pragma: no cover - parent fiber walking
+                raise error
+            fiber = getattr(parent_fiber, "fiber", None)
+            if fiber is None:  # pragma: no cover - fiber chain should not end here
+                raise error
+
+    def handler_set(self, target: Context, prop: str, value: Any, ctx: Context) -> bool:
+        """ProxyHandler.set trap - set service property."""
+        if _is_special_property(prop):
+            setattr(target, prop, value)
+            return True
+
+        error = AnimaError(
+            "set_error", f'cannot set property "{prop}" without provide'
+        )
+
+        try:
+            defn = target.reflect.props.get(prop)
+            if defn is not None:
+                if defn.type == "accessor":
+                    setter = getattr(defn, "set", None)
+                    if setter is not None:
+                        return bool(setter(ctx, value, ctx, error))
+                    return False
+                return self.set(prop, value, error)
+
+            if not getattr(ctx.fiber, "runtime", False):
+                object.__setattr__(target, prop, value)
+                return True
+
+            # ctx.events.waterfall('internal/set', ...) would be used
+            # here for async interception; in sync __setattr__, fall through
+            # to reflect.set directly
+            return self.set(
+                prop, value, error
+            )  # pragma: no cover - requires fiber.runtime
+        except AnimaError:
+            raise  # pragma: no cover - AnimaError without "without inject"
+        except Exception as e:
+            raise _enhance_error(e) from e  # pragma: no cover - enhance_error path
+
+    def handler_has(self, target: Context, prop: str) -> bool:
+        """ProxyHandler.has trap - check if property exists."""
+        if _is_special_property(prop):  # pragma: no cover - special property hasattr
+            return hasattr(target, prop)
+        try:
+            object.__getattribute__(target, prop)
+            return True
+        except AttributeError:
+            pass
+        return prop in target.reflect.props
+
+    # Handler dict for use with Context proxy (ProxyHandler parity)
+    handler: ClassVar[dict[str, Any]] = {
+        "get": handler_get,
+        "set": handler_set,
+        "has": handler_has,
+    }

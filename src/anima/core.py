@@ -1009,58 +1009,48 @@ class Context:
         return fiber
 
     def __getattr__(self, name: str) -> Any:
+        """Context get trap - resolve service property via reflect handler."""
         if name.startswith("_"):
             return super().__getattribute__(name)
-        # Check reflect props for accessors (proxy get trap)
+        # ProxyHandler.get trap
         try:
             reflect = object.__getattribute__(self, "reflect")
         except AttributeError:  # pragma: no cover - reflect is always set
             # reflect is always set during Context.__init__; this is defensive
             reflect = None  # pragma: no cover
         if reflect is not None:  # pragma: no branch - reflect is always set
-            prop = reflect.props.get(name)
-            if prop is not None and prop.type == "accessor":
-                getter = getattr(prop, "get", None)
-                if getter is not None:
-                    return getter(self, self, AnimaError("get"))
-        svc = self.get(name)
-        if svc is not None:
-            if isinstance(svc, Service) and getattr(svc, "ctx", None) is not self:
-                return _BoundService(svc, self)
-            return svc
-        raise AttributeError(
+            try:
+                return reflect.handler_get(self, name, self)
+            except AnimaError as e:
+                if "without inject" in str(e):
+                    raise AttributeError(
+                        f"Service '{name}' is not registered on Context. "
+                        f"Available services: {list(self.services.keys())}"
+                    ) from e
+                raise  # pragma: no cover - AnimaError without "without inject"
+        raise AttributeError(  # pragma: no cover - reflect is always set in __init__
             f"Service '{name}' is not registered on Context. "
             f"Available services: {list(self.services.keys())}"
         )
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Context set trap - route service writes through reflect."""
+        """Context set trap - route service writes through reflect handler."""
         if name.startswith("_"):
             object.__setattr__(self, name, value)
             return
-        # Declared accessor property: call its setter
+        # ProxyHandler.set trap
         try:
             reflect = object.__getattribute__(self, "reflect")
         except AttributeError:  # pragma: no cover - reflect is always set
-            # reflect is always set during Context.__init__; this is defensive
             reflect = None  # pragma: no cover
         if reflect is not None:  # pragma: no branch - reflect is always set
-            prop = reflect.props.get(name)
-            if prop is not None and prop.type == "accessor":
-                setter = getattr(prop, "set", None)
-                if setter is not None:
-                    setter(self, value, self, AnimaError("set"))
-                    return
-                return
-            # Declared service: route through reflect.set
-            if prop is not None:
-                reflect.set(name, value)
-                return
+            reflect.handler_set(self, name, value, self)
+            return  # set was handled by handler
         # Default: direct instance attribute
         object.__setattr__(self, name, value)
 
     def __contains__(self, name: str) -> bool:
-        """Context has trap - check service registration."""
+        """Context has trap - check service registration via reflect handler."""
         if name.startswith("_"):
             return hasattr(self, name)
         if name in self._services:
@@ -1068,13 +1058,11 @@ class Context:
         try:
             reflect = object.__getattribute__(self, "reflect")
         except AttributeError:  # pragma: no cover - reflect is always set
-            # reflect is always set during Context.__init__; this is defensive
             reflect = None  # pragma: no cover
-        if reflect is not None:  # pragma: no branch - reflect is always set
-            if reflect._get_impl(name, strict=False) is not None:
-                return True
-            if name in reflect.props:
-                return True
+        if reflect is not None and reflect.handler_has(
+            self, name
+        ):  # pragma: no branch - reflect is always set
+            return True
         return self._parent.__contains__(name) if self._parent else False
 
     @property

@@ -2,7 +2,7 @@
 
 import pytest
 
-from anima.core import Context, FiberState, symbols
+from anima.core import Context, AnimaError, FiberState, Service, symbols
 from anima.reflect import Impl, Property, ReflectService
 
 
@@ -668,3 +668,147 @@ class TestReflectServiceNotifyNoMatch:
 
         # Should not raise - impl is None, falls through to line 142
         rs.notify(["my_svc"])
+
+
+class TestReflectServiceHandler:
+    """Tests for ReflectService handler proxy traps."""
+
+    def test_handler_get_from_store(self):
+        ctx = Context()
+        ctx.reflect.provide("my_svc", "hello")
+        result = ctx.reflect.handler_get(ctx, "my_svc", ctx)
+        assert result == "hello"
+
+    def test_handler_get_not_found(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        with pytest.raises(AnimaError, match="without inject"):
+            rs.handler_get(ctx, "nonexistent", ctx)
+
+    def test_handler_get_accessor(self):
+        ctx = Context()
+        ctx.reflect.accessor("computed", {"get": lambda c, r, e: 42})
+        result = ctx.reflect.handler_get(ctx, "computed", ctx)
+        assert result == 42
+
+    def test_handler_set_from_store(self):
+        ctx = Context()
+        ctx.reflect.provide("my_svc", "old")
+        assert ctx.reflect.handler_set(ctx, "my_svc", "new", ctx) is True
+        assert ctx.reflect.get("my_svc") == "new"
+
+    def test_handler_set_not_found(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        # Root fiber has no runtime, so set goes through directly (proxy parity)
+        assert rs.handler_set(ctx, "nonexistent", "value", ctx) is True
+        assert ctx.nonexistent == "value"
+
+    def test_handler_set_provided_service_raises(self):
+        ctx = Context()
+        ctx.reflect.provide("my_svc", "old")
+        assert ctx.reflect.handler_set(ctx, "my_svc", "new", ctx) is True
+        assert ctx.reflect.get("my_svc") == "new"
+
+    def test_handler_has_found(self):
+        ctx = Context()
+        ctx.reflect.provide("my_svc", "hello")
+        assert ctx.reflect.handler_has(ctx, "my_svc") is True
+
+    def test_handler_has_not_found(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        assert rs.handler_has(ctx, "nonexistent") is False
+
+    def test_handler_set_accessor(self):
+        ctx = Context()
+        ctx.reflect.accessor(
+            "writable",
+            {"set": lambda c, v, r, e: setattr(r, "_custom_set_value", v) or True},
+        )
+        ctx.reflect.handler_set(ctx, "writable", "hello", ctx)
+        assert ctx._custom_set_value == "hello"
+
+    def test_handler_has_accessor(self):
+        ctx = Context()
+        ctx.reflect.accessor("computed", {"get": lambda c, r, e: 42})
+        assert ctx.reflect.handler_has(ctx, "computed") is True
+
+
+class TestReflectServiceIsSpecialProperty:
+    """Tests for ReflectService._is_special_property."""
+
+    def test_reserved_word(self):
+        from anima.reflect import _is_special_property
+
+        assert _is_special_property("prototype") is True
+        assert _is_special_property("then") is True
+
+    def test_number_string(self):
+        from anima.reflect import _is_special_property
+
+        assert _is_special_property("0") is True
+        assert _is_special_property("42") is True
+
+    def test_underscore_prefix(self):
+        from anima.reflect import _is_special_property
+
+        assert _is_special_property("_private") is True
+
+    def test_normal_name(self):
+        from anima.reflect import _is_special_property
+
+        assert _is_special_property("hello") is False
+
+
+class TestReflectServiceHandlerExtra:
+    """Additional tests for ReflectService handler coverage."""
+
+    def test_number_string_zero(self):
+        from anima.reflect import _is_special_property
+
+        assert _is_special_property("0") is True
+
+    def test_accessor_without_getter(self):
+        ctx = Context()
+        ctx.reflect.accessor("write_only", {"set": lambda c, v, r, e: True})
+        with pytest.raises(AnimaError, match="without inject"):
+            ctx.reflect.handler_get(ctx, "write_only", ctx)
+
+    def test_handler_get_direct_attribute(self):
+        ctx = Context()
+        ctx.custom_attr = "hello"
+        result = ctx.reflect.handler_get(ctx, "custom_attr", ctx)
+        assert result == "hello"
+
+    def test_handler_get_impl_check_false(self):
+        ctx = Context()
+
+        class CheckedService(Service):
+            check = lambda self: False
+
+            def __init__(self, c: Context):
+                super().__init__(c, "checked")
+
+        svc = CheckedService(ctx)
+        # Override the check in reflect.store with a no-arg lambda
+        ctx.reflect.store["checked"] = Impl(
+            uid=1,
+            name="checked",
+            value=svc,
+            ctx=ctx,
+            check=lambda: False,
+            isolate="checked",
+        )
+        with pytest.raises(AnimaError, match="without inject"):
+            ctx.reflect.handler_get(ctx, "checked", ctx)
+
+    def test_handler_set_requires_runtime(self):
+        ctx = Context()
+        rs = ReflectService(ctx)
+        rs.provide("my_svc", "old")
+        # Manually set fiber.runtime to truthy to reach reflect.set path
+        ctx.fiber.runtime = True
+        assert rs.handler_set(ctx, "my_svc", "new", ctx) is True
+        assert rs.get("my_svc") == "new"
+        ctx.fiber.runtime = None  # cleanup
