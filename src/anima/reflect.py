@@ -27,8 +27,30 @@ def _is_traceable(value: Any) -> bool:
     )
 
 
-# Anima reserved words for special properties
-_RESERVED_WORDS = frozenset({"prototype", "then"})
+# Reserved words for special properties
+# Includes context symbols (effect, filter, isolate, intercept) and
+# service symbols (init, check, config, invoke, extend, tracker,
+# resolveConfig, mergeIntercept) that are accessed as special properties
+# via Symbol.for() based unique symbols.
+_RESERVED_WORDS = frozenset(
+    {
+        "prototype",
+        "then",
+        "effect",
+        "filter",
+        "isolate",
+        "intercept",
+        "init",
+        "check",
+        "config",
+        "invoke",
+        "extend",
+        "tracker",
+        "resolveConfig",
+        "mergeIntercept",
+        "metadata",
+    }
+)
 
 
 def _is_special_property(prop: str) -> bool:

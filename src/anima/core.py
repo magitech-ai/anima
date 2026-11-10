@@ -462,6 +462,10 @@ class Fiber:
         if self.error is not None:
             raise self.error
 
+    async def await_(self) -> None:  # pragma: no cover - alias for await_settle
+        """Alias for await_settle() matching Fiber.await() parity."""
+        await self.await_settle()
+
     def _checkImpl(self, name: str) -> None:
         """Check if a required service implementation is available for this fiber.
 
@@ -958,7 +962,7 @@ class Context:
         child = Context(
             parent=self,
             isolated_services=dict(self._isolated_services),
-            intercept_configs=dict(self._intercept_configs),
+            intercept_configs=None,
             filter_predicate=self._filter_predicate,
         )
         if meta:  # pragma: no cover
@@ -1187,11 +1191,8 @@ class Context:
 
     def intercept(self, service_name: str, config: dict[str, Any]) -> Context:
         """Spawn a child context with intercepted configuration for a target service."""
-        new_intercepts = {k: dict(v) for k, v in self._intercept_configs.items()}
-        if service_name in new_intercepts:
-            new_intercepts[service_name].update(config)
-        else:
-            new_intercepts[service_name] = dict(config)
+        new_intercepts: dict[str, dict[str, Any]] = {}
+        new_intercepts[service_name] = dict(config)
         return Context(
             parent=self,
             isolated_services=dict(self._isolated_services),
@@ -1314,7 +1315,7 @@ class Context:
             parent=self,
             isolated_services=isolated,
             scope_label=label,
-            intercept_configs=dict(self._intercept_configs),
+            intercept_configs=None,
             filter_predicate=self._filter_predicate,
         )
 
