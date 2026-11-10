@@ -124,13 +124,14 @@ class ReflectService(Service):
         self,
         names: list[str],
         filter_fn: Callable[[Context, str], bool] | None = None,
-    ) -> None:
-        """Notify fibers of service changes."""
+    ) -> list[Any]:
+        """Notify fibers of service changes. Returns list of updated fibers."""
         if filter_fn is None:
 
             def filter_fn(ctx: Context, name: str) -> bool:
                 return True
 
+        updated_fibers: list[Any] = []
         for runtime in list(self.ctx.registry.values()):
             if not hasattr(runtime, "fibers"):
                 continue
@@ -148,6 +149,15 @@ class ReflectService(Service):
                         fiber._validate_config()
                 if not has_update:
                     continue
+                fiber._refresh() if hasattr(fiber, "_refresh") else None
+                updated_fibers.append(fiber)
+
+        for name in names:
+            impl = self._get_impl(name, strict=False)
+            value = impl.value if impl else None
+            self.ctx.emit("internal/service", name, value)
+
+        return updated_fibers
 
     def accessor(self, name: str, options: dict[str, Any]) -> Callable[[], None]:
         """Create a property accessor and return a disposer."""

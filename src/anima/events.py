@@ -20,6 +20,11 @@ from typing import Any
 Disposer = Callable[[], None | Awaitable[None]]
 
 
+def is_bailed(value: Any) -> bool:
+    """isBailed(value) - true unless value is None or False."""
+    return value is not None and value is not False
+
+
 class EventMode(str, Enum):
     EMIT = "emit"
     PARALLEL = "parallel"
@@ -198,25 +203,25 @@ class EventBus:
     async def serial(
         self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any
     ) -> Any:
-        """Listeners run in order, awaited. The first non-None return value wins and stops the rest."""
+        """Serial - listeners run in order, awaited. First bailed value wins."""
         listeners = self._filter_listeners(event, this_arg)
         for listener in listeners:
             res = listener.callback(*args, **kwargs)
             if inspect.isawaitable(res):
                 res = await res
-            if res is not None:
+            if is_bailed(res):
                 return res
         return None
 
     def bail(self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any) -> Any:
-        """Synchronous version of serial. First non-None return value wins."""
+        """Bail - synchronous serial. First bailed value wins."""
         listeners = self._filter_listeners(event, this_arg)
         for listener in listeners:
             res = listener.callback(*args, **kwargs)
             if inspect.isawaitable(res):
                 # Cannot block safely in synchronous bail if awaitable returned
                 res = asyncio.run(_await_res(res))
-            if res is not None:
+            if is_bailed(res):
                 return res
         return None
 

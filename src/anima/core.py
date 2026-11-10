@@ -568,6 +568,12 @@ class Service:
 class Context:
     """The central Anima Context repository of services, events, effects, and scopes."""
 
+    # Anima static context symbols (from context.ts)
+    effect = symbols["effect"]
+    filter = symbols["filter"]
+    isolate = symbols["isolate"]
+    intercept = symbols["intercept"]
+
     def __init__(
         self,
         parent: Context | None = None,
