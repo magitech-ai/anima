@@ -707,6 +707,31 @@ async def test_context_provide_and_cascade():
 
 
 @pytest.mark.asyncio
+async def test_fiber_resolve_config_waterfall():
+    """Test that Fiber._resolve_config runs the internal/config waterfall."""
+    ctx = Context()
+    config_holder = {}
+
+    ctx.on(
+        "internal/config",
+        lambda cfg, _default, next: config_holder.update(cfg) or next(cfg),
+    )
+
+    class ConfigPlugin:
+        def __init__(self, c: Context, **cfg):
+            self.cfg = cfg
+
+    fib = ctx.plugin(ConfigPlugin, foo="bar")
+    await ctx.flush()
+
+    assert fib.state == FiberState.ACTIVE
+    # Manually trigger _resolve_config to test waterfall
+    resolved = await fib._resolve_config({"foo": "bar"})
+    assert config_holder == {"foo": "bar"}
+    assert resolved == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
 async def test_context_intercept_and_resolve():
     ctx = Context()
 
