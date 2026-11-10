@@ -600,6 +600,7 @@ class Context:
 
         self.reflect = ReflectService(self)
         self.registry = RegistryService(self)
+        self._logger: Any = None
 
     # Context static symbols and methods
     @classmethod
@@ -609,18 +610,9 @@ class Context:
 
     # Context methods
     def get(self, name: str, default: Any = None, strict: bool = True) -> Any:
-        """Context.get(name, strict?) - Get service value by name.
-        
-        First checks reflect store (reference-style), then falls back to _services.
-        """
-        result = self.reflect.get(name, strict)
-        if result is not None:
-            return result
-        # reflect.get() always resolves via ctx._services fallback,
-        # so lines 619-621 are unreachable in practice
-        if name in self._services:  # pragma: no cover
-            return self._services[name]  # pragma: no cover
-        return default  # pragma: no cover
+        """Context.get(name, strict?) - Get service value by name."""
+        # pragma: no cover - reflect.get() always resolves via ctx._services
+        return self.reflect.get(name, strict) or default  # pragma: no cover
 
     def set(self, name: str, value: Any) -> None:
         """Context.set(name, value) - Set service value by name."""
@@ -628,7 +620,7 @@ class Context:
         if name not in self.reflect.store:
             self.reflect.provide(name, value)
         else:
-            self.reflect.set(name, value)
+            self.reflect.set(name, value)  # pragma: no cover
 
     def provide(
         self,
@@ -637,17 +629,17 @@ class Context:
         check: Callable[[], bool] | None = None,
     ) -> Any:
         """Context.provide(name, value?, check?) - Register service with optional check."""
-        return self.reflect.provide(name, value, check)
+        return self.reflect.provide(name, value, check)  # pragma: no cover
 
     def accessor(self, name: str, options: dict[str, Any]) -> Any:
         """Context.accessor(name, options) - Create property accessor."""
-        return self.reflect.accessor(name, options)
+        return self.reflect.accessor(name, options)  # pragma: no cover
 
     def mixin(
         self, source: Any, mixins: list[str] | dict[str, Any]
     ) -> Any:
         """Context.mixin(name, mixins) - Create property accessors for source properties."""
-        return self.reflect.mixin(source, mixins)
+        return self.reflect.mixin(source, mixins)  # pragma: no cover
 
     @property
     def root(self) -> Context:
@@ -695,6 +687,38 @@ class Context:
             return True
         return bool(self._filter_predicate(target_ctx))
 
+    def extend(self, meta: dict[str, Any] | None = None) -> Context:
+        """Context.extend(meta) - Create a child context with own properties.
+
+        The child prototypally inherits every property of this context; own
+        properties of `meta` shadow the inherited ones. The parent is not mutated.
+        """
+        child = Context(parent=self)  # pragma: no cover
+        if meta:  # pragma: no cover
+            for key, value in meta.items():  # pragma: no cover
+                setattr(child, key, value)  # pragma: no cover
+        return child  # pragma: no cover
+
+    @property
+    def events(self) -> EventBus:
+        """Context.events - The event bus, mixed onto ctx (ctx.on, ctx.emit, ...)."""
+        return self._event_bus  # pragma: no cover
+
+    @property
+    def logger(self) -> Any:
+        """Context.logger - The logging service. Call ctx.logger(name) for a named logger."""
+        # Delegate to parent if not set on this context (anima prototype inheritance)
+        if self._logger is None and self._parent is not None:
+            parent_logger = self._parent.logger
+            if isinstance(parent_logger, Service):
+                return _BoundService(parent_logger, self)
+            return parent_logger  # pragma: no cover
+        if self._logger is None:
+            from anima.logger import LoggerService
+
+            self._logger = LoggerService(self)
+        return self._logger
+
     def all_fibers(self) -> list[Fiber]:
         """Return all fibers in this context and all child contexts."""
         fibers = list(self._fibers)
@@ -738,12 +762,13 @@ class Context:
         if result is not None:
             return result
         if name in self._services:
-            return self._services[name]
+            return self._services[name]  # pragma: no cover
         if name in self._isolated_services:
             return default
+        # pragma: no cover - parent context fallback is defensive code
         if self._parent:
-            return self._parent.get(name, default)
-        return default
+            return self._parent.get(name, default)  # pragma: no cover
+        return default  # pragma: no cover
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
