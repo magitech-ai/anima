@@ -746,6 +746,36 @@ class Service:
                 merged.update(cfg)
         return merged
 
+    def resolve_config(
+        self,
+        base: dict[str, Any] | None = None,
+        head: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """[symbols.resolveConfig] - resolve intercept config chain.
+
+        Walks up the context's intercept config chain (prototype chain in
+        parent chain here), collecting configs for this service name
+        at each level. Base is prepended, head is appended. If the service
+        declares Config.merge, uses that; otherwise shallow merge.
+        """
+        configs: list[dict[str, Any]] = []
+        ctx: Context | None = self.ctx
+        while ctx is not None:
+            if self.name in ctx._intercept_configs:
+                configs.insert(0, ctx._intercept_configs[self.name])
+            ctx = ctx._parent
+        if base:
+            configs.insert(0, base)
+        if head:
+            configs.append(head)
+        config_cls = getattr(type(self), "Config", None)
+        if config_cls is not None and hasattr(config_cls, "merge"):
+            return cast(dict[str, Any], config_cls.merge(*configs))
+        merged: dict[str, Any] = {}
+        for cfg in configs:
+            merged.update(cfg)
+        return merged
+
     def _filter(self, ctx: Context) -> bool:
         """[symbols.filter] - check if ctx's isolate label matches this service's."""
         my_label = self.ctx._isolated_services.get(self.name)
@@ -770,7 +800,7 @@ class Service:
 class Context:
     """The central Anima Context repository of services, events, effects, and scopes."""
 
-    # Context static context symbols (parity).
+    # Context static context symbols (anima parity).
     # static readonly effect/filter/isolate/intercept: unique symbol
     # These conflict with instance methods of the same name, so we use SYMBOL_
     # prefix. Access via Context.SYMBOL_EFFECT etc. or anima.core.symbols["effect"].
@@ -778,6 +808,24 @@ class Context:
     SYMBOL_FILTER: ClassVar[str] = symbols["filter"]
     SYMBOL_ISOLATE: ClassVar[str] = symbols["isolate"]
     SYMBOL_INTERCEPT: ClassVar[str] = symbols["intercept"]
+
+    # Context symbols dict (anima parity).
+    # Anima uses Context[symbols.isolate] etc. as keys. Access via
+    # Context.symbols["effect"] etc., equivalent to Context.SYMBOL_EFFECT.
+    symbols: ClassVar[dict[str, str]] = {
+        "effect": symbols["effect"],
+        "filter": symbols["filter"],
+        "isolate": symbols["isolate"],
+        "intercept": symbols["intercept"],
+        "init": symbols["init"],
+        "check": symbols["check"],
+        "invoke": symbols["invoke"],
+        "metadata": symbols["metadata"],
+        "extend": symbols["extend"],
+        "tracker": symbols["tracker"],
+        "mergeIntercept": symbols["mergeIntercept"],
+        "resolveIntercept": symbols["resolveIntercept"],
+    }
 
     def __init__(
         self,

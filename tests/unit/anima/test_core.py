@@ -1505,6 +1505,51 @@ class TestServiceFilterEdgeCases:
         assert svc._filter(other_ctx) is False
 
 
+class TestServiceResolveConfig:
+    """Tests for Service.resolve_config (symbols.resolveConfig parity)."""
+
+    def test_resolve_config_empty(self):
+        """Test resolve_config with no intercept configs returns empty dict."""
+        ctx = Context()
+        svc = CoreService(ctx)
+        assert svc.resolve_config() == {}
+
+    def test_resolve_config_with_parent_intercept(self):
+        """Test resolve_config walks parent context chain for intercept configs."""
+        ctx = Context()
+        ctx._intercept_configs["core_svc"] = {"a": 1}
+        child = ctx.extend()
+        child._intercept_configs["core_svc"] = {"b": 2}
+        svc = CoreService(child)
+        assert svc.resolve_config() == {"a": 1, "b": 2}
+
+    def test_resolve_config_with_base_and_head(self):
+        """Test resolve_config prepends base and appends head configs."""
+        ctx = Context()
+        ctx._intercept_configs["core_svc"] = {"b": 2}
+        svc = CoreService(ctx)
+        result = svc.resolve_config(base={"a": 1}, head={"c": 3})
+        assert result == {"a": 1, "b": 2, "c": 3}
+
+    def test_resolve_config_with_merge(self):
+        """Test resolve_config uses Config.merge if declared."""
+        ctx = Context()
+        ctx._intercept_configs["merged_svc"] = {"b": 2}
+
+        class MergedService(Service):
+            class Config:
+                @staticmethod
+                def merge(*configs):
+                    result = {}
+                    for cfg in configs:
+                        result.update(cfg)
+                    result["merged"] = True
+                    return result
+
+        svc = MergedService(ctx, "merged_svc")
+        assert svc.resolve_config() == {"b": 2, "merged": True}
+
+
 class TestServiceExtend:
     def test_service_extend_with_invoke(self):
         ctx = Context()
