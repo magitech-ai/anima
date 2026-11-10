@@ -1378,14 +1378,14 @@ class TestServiceFilter:
         svc = CoreService(ctx)
 
         child_ctx = ctx.extend()
-        child_ctx._isolated_services.add("core_svc")
+        child_ctx._isolated_services["core_svc"] = True
 
         # Child has core_svc isolated, service's ctx doesn't
         assert svc._filter(child_ctx) is False
 
         # Also test the reverse: service's ctx has it isolated, child doesn't
         other_ctx = Context()
-        other_ctx._isolated_services.add("core_svc")
+        other_ctx._isolated_services["core_svc"] = True
         assert svc._filter(other_ctx) is False
 
 
@@ -1472,11 +1472,11 @@ class TestServiceFilterEdgeCases:
         ctx = Context()
         svc = CoreService(ctx)
         child_ctx = ctx.extend()
-        child_ctx._isolated_services.add("core_svc")
+        child_ctx._isolated_services["core_svc"] = True
         assert svc._filter(child_ctx) is False
 
         other_ctx = Context()
-        other_ctx._isolated_services.add("core_svc")
+        other_ctx._isolated_services["core_svc"] = True
         assert svc._filter(other_ctx) is False
 
 

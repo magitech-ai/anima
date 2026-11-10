@@ -48,6 +48,9 @@ symbols = {
     "resolveIntercept": "anima.resolveIntercept",
 }
 
+# Anima context brand for Context.is() checks (symbol-based brand)
+_CONTEXT_BRAND = "_anima_context_brand"
+
 _current_fiber: ContextVar[Fiber | None] = ContextVar("_current_fiber", default=None)
 _access_context: ContextVar[Context | None] = ContextVar(
     "_access_context", default=None
@@ -745,10 +748,10 @@ class Service:
         return merged
 
     def _filter(self, ctx: Context) -> bool:
-        """[symbols.filter] - check if ctx's isolate matches this service's."""
-        return (self.name in ctx._isolated_services) == (
-            self.name in self.ctx._isolated_services
-        )
+        """[symbols.filter] - check if ctx's isolate label matches this service's."""
+        my_label = self.ctx._isolated_services.get(self.name)
+        their_label = ctx._isolated_services.get(self.name)
+        return my_label == their_label
 
     def _extend(self, props: dict[str, Any] | None = None) -> Any:
         """[symbols.extend] - create extended self with props."""
@@ -772,7 +775,7 @@ class Context:
         self,
         parent: Context | None = None,
         *,
-        isolated_services: set[str] | None = None,
+        isolated_services: dict[str, Any] | None = None,
         scope_label: str | None = None,
         intercept_configs: dict[str, dict[str, Any]] | None = None,
         fiber: Fiber | None = None,
@@ -786,13 +789,19 @@ class Context:
         self._fibers: list[Fiber] = []
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._event_bus: EventBus = parent._event_bus if parent else EventBus()
-        self._isolated_services: set[str] = isolated_services or set()
+        # isolation map service name -> scope label (Dict<symbol>)
+        self._isolated_services: dict[str, Any] = isolated_services or {}
         self._scope_label = scope_label
+        # intercept map service name -> config (Dict)
         self._intercept_configs: dict[str, dict[str, Any]] = (
             intercept_configs if intercept_configs is not None else {}
         )
         self._fiber: Fiber | None = fiber
         self._filter_predicate: Callable[[Context], bool] | None = filter_predicate
+        # Anima context brand for Context.is() checks
+        object.__setattr__(self, _CONTEXT_BRAND, True)
+        # baseUrl used to resolve relative plugin/module specifiers
+        self.baseUrl: str | None = None
 
         # Lazily imported to avoid circular imports
         from anima.reflect import ReflectService
@@ -812,8 +821,12 @@ class Context:
     # Context static symbols and methods
     @classmethod
     def is_(cls, value: Any) -> bool:
-        """Context.is(value) - checks if value is a Context instance."""
-        return isinstance(value, Context)
+        """Context.is(value) - symbol-based brand check.
+
+        !!value?.[Context.is as any]
+        Works across realms because the brand is keyed by a unique symbol/string.
+        """
+        return bool(getattr(value, _CONTEXT_BRAND, False))
 
     # Context methods
     def set(self, name: str, value: Any) -> None:
@@ -886,14 +899,19 @@ class Context:
         The child prototypally inherits every property of this context; own
         properties of `meta` shadow the inherited ones. The parent is not mutated.
         """
-        child = Context(parent=self)  # pragma: no cover
+        child = Context(
+            parent=self,
+            isolated_services=dict(self._isolated_services),
+            intercept_configs=dict(self._intercept_configs),
+            filter_predicate=self._filter_predicate,
+        )
         if meta:  # pragma: no cover
             for key, value in meta.items():  # pragma: no cover
                 if key == "fiber":  # pragma: no cover
                     object.__setattr__(child, "_fiber", value)  # pragma: no cover
                 else:
                     setattr(child, key, value)  # pragma: no cover
-        return child  # pragma: no cover
+        return child
 
     @property
     def events(self) -> EventBus:
@@ -1132,7 +1150,7 @@ class Context:
             new_intercepts[service_name] = dict(config)
         return Context(
             parent=self,
-            isolated_services=set(self._isolated_services),
+            isolated_services=dict(self._isolated_services),
             scope_label=self._scope_label,
             intercept_configs=new_intercepts,
             fiber=self._fiber,
@@ -1236,13 +1254,18 @@ class Context:
             event, *args, this_arg=self, default_handler=default_handler, **kwargs
         )
 
-    def isolate(self, service_name: str, label: str | None = None) -> Context:
+    def isolate(self, service_name: str, label: Any | None = None) -> Context:
         """Create a child context with an isolated service scope for `service_name`.
 
-        Reads and writes of `service_name` in the child will not resolve or affect the parent.
+        shadow = Object.create(this[symbols.isolate]); shadow[name] = label ?? Symbol(name).
+        Below the returned context, reads and writes of `service_name`
+        resolve against the new label instead of the parent's.
+        Passing the same `label` to two `isolate()` calls joins their scopes.
         """
-        isolated = set(self._isolated_services)
-        isolated.add(service_name)
+        isolated = dict(self._isolated_services)
+        isolated[service_name] = (
+            label if label is not None else f"__symbol__{service_name}"
+        )
         return Context(
             parent=self,
             isolated_services=isolated,
