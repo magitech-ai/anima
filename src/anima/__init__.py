@@ -4,7 +4,7 @@ Anima: The Composable Micro-Kernel by Magitech.
 
 from anima.cli import CliCommand, CliService, CliSyntaxError
 from anima.core import Context, Fiber, FiberState, Service, inject
-from anima.events import Disposer, EventBus, EventMode, is_bailed
+from anima.events import DisposableList, Disposer, EventBus, EventMode, is_bailed
 from anima.group import Group, GroupEntry
 from anima.hmr import HmrService
 from anima.http import HttpConfig, HttpError, HttpRequest, HttpResponse, HttpService
@@ -45,6 +45,7 @@ __all__ = [
     "CliSyntaxError",
     "ConsoleExporter",
     "Context",
+    "DisposableList",
     "Disposer",
     "EventBus",
     "EventMode",

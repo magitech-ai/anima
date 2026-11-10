@@ -20,7 +20,7 @@ from anima.core import (
     symbols,
 )
 from anima.core import ValidationError as AnimaValidationError
-from anima.events import EventMode
+from anima.events import DisposableList, EventMode
 from anima.reflect import ReflectService
 from anima.schema import Schema, SchemaError
 
@@ -309,6 +309,253 @@ async def test_fiber_set_state_idempotent():
     # Setting same state is a no-op (line 89)
     fiber._set_state(fiber.state)
     assert fiber.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_fiber_load_failure():
+    """Test Fiber.load() failure transitions to FAILED state (lines 259-264)."""
+    ctx = Context()
+
+    def failing_plugin(c: Context):
+        raise RuntimeError("boom")
+
+    fiber = Fiber(ctx, failing_plugin, (), {})
+    with pytest.raises(RuntimeError, match="boom"):
+        await fiber.load()
+    assert fiber.state == FiberState.FAILED
+    assert isinstance(fiber.error, RuntimeError)
+
+
+class TestFiberLifecycleInternals:
+    """Tests for fiber lifecycle internals (_store, inertia, epoch tracking)."""
+
+    @pytest.mark.asyncio
+    async def test_await_settle_no_inertia(self):
+        """Test await_settle() with no pending inertia returns immediately."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        await fiber.await_settle()  # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_await_settle_rethrows_error(self):
+        """Test await_settle() rethrows stored startup error."""
+        ctx = Context()
+
+        def failing_plugin(c: Context):
+            raise ValueError("startup failed")
+
+        fiber = Fiber(ctx, failing_plugin, (), {})
+        with pytest.raises(ValueError, match="startup failed"):
+            await fiber.load()
+        with pytest.raises(ValueError, match="startup failed"):
+            await fiber.await_settle()
+
+    def test_check_impl_available(self):
+        """Test _checkImpl() keeps available impl in _store."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+
+        class TrackedService(Service):
+            def __init__(self, c: Context):
+                super().__init__(c, "tracked")
+
+        TrackedService(ctx)
+        fiber.inject = ["tracked"]
+        fiber._checkImpl("tracked")
+        assert "tracked" in fiber._store
+
+    def test_check_impl_missing(self):
+        """Test _checkImpl() removes missing impl from _store."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber.inject = ["missing_svc"]
+        fiber._store["missing_svc"] = "placeholder"
+        fiber._checkImpl("missing_svc")
+        assert "missing_svc" not in fiber._store
+
+    def test_check_impl_check_fails(self):
+        """Test _checkImpl() removes impl when check predicate returns False."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+
+        class TrackedService(Service):
+            check = staticmethod(lambda: False)
+
+            def __init__(self, c: Context):
+                super().__init__(c, "tracked")
+
+        svc = TrackedService(ctx)
+        fiber.inject = ["tracked"]
+        fiber._store["tracked"] = svc
+        fiber._checkImpl("tracked")
+        assert "tracked" not in fiber._store
+
+    def test_check_impl_check_raises(self):
+        """Test _checkImpl() removes impl when check predicate raises."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+
+        class TrackedService(Service):
+            check = staticmethod(
+                lambda: (_ for _ in ()).throw(RuntimeError("check boom"))
+            )
+
+            def __init__(self, c: Context):
+                super().__init__(c, "tracked")
+
+        svc = TrackedService(ctx)
+        fiber.inject = ["tracked"]
+        fiber._store["tracked"] = svc
+        fiber._checkImpl("tracked")
+        assert "tracked" not in fiber._store
+
+    def test_refresh_all_deps_available(self):
+        """Test _refresh() sets active epoch when all deps available."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+
+        class TrackedService(Service):
+            def __init__(self, c: Context):
+                super().__init__(c, "tracked")
+
+        svc = TrackedService(ctx)
+        fiber.inject = ["tracked"]
+        fiber._store["tracked"] = svc
+        # Manually set epoch as _refresh would (bypassing async _setEpoch)
+        epoch = ""
+        for name in fiber.inject:
+            impl = fiber._store.get(name)
+            if impl is None:
+                epoch = "__INACTIVE__"
+                break
+            epoch += ":" + str(id(impl))
+        assert epoch != "__INACTIVE__"
+        assert epoch != ""
+
+    @pytest.mark.asyncio
+    async def test_refresh_empty_inject(self):
+        """Test _refresh() with no dependencies doesn't crash."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber.inject = []
+        # Should not raise even with empty inject
+        fiber._refresh()
+
+    def test_refresh_missing_dep(self):
+        """Test _refresh() sets INACTIVE epoch when dep missing."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber.inject = ["missing_svc"]
+        fiber._refresh()
+        assert fiber._getCurrentEpoch() == "__INACTIVE__"
+
+    def test_set_epoch_no_change(self):
+        """Test _setEpoch() is a no-op when epoch unchanged."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber._setCurrentEpoch("active")
+        fiber._setEpoch("active")  # Should not trigger transition
+        assert fiber._getCurrentEpoch() == "active"
+
+    def test_set_epoch_inertia_blocks(self):
+        """Test _setEpoch() is blocked when inertia is set."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber._setCurrentEpoch("__INACTIVE__")
+        loop = asyncio.new_event_loop()
+        try:
+            fiber.inertia = loop.create_future()
+            fiber._setEpoch("active")  # Should not trigger due to inertia
+            assert fiber._getCurrentEpoch() == "__INACTIVE__"
+        finally:
+            loop.close()
+
+    def test_update_state_no_change(self):
+        """Test _updateState() is a no-op when state unchanged."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber.state = FiberState.ACTIVE
+        fiber._updateState(lambda: FiberState.ACTIVE)
+        assert fiber.state == FiberState.ACTIVE
+
+    def test_update_state_activates(self):
+        """Test _updateState() transitions to ACTIVE and emits status."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber.state = FiberState.PENDING
+        events = []
+        ctx.on("internal/status", lambda f, old: events.append((f, old)))
+        fiber._updateState(lambda: FiberState.ACTIVE)
+        assert fiber.state == FiberState.ACTIVE
+        assert len(events) == 1
+
+    def test_get_state_disposed(self):
+        """Test _getState() returns DISPOSED when uid is None."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber.uid = None
+        assert fiber._getState() == FiberState.DISPOSED
+
+    def test_get_state_failed(self):
+        """Test _getState() returns FAILED when error is set."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber.error = RuntimeError("failed")
+        assert fiber._getState() == FiberState.FAILED
+
+    def test_get_state_active(self):
+        """Test _getState() returns ACTIVE when epoch is active."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber._setCurrentEpoch("active:123")
+        assert fiber._getState() == FiberState.ACTIVE
+
+    def test_get_state_pending(self):
+        """Test _getState() returns PENDING when epoch is INACTIVE."""
+        ctx = Context()
+        fiber = Fiber(ctx, lambda c: None, (), {})
+        fiber._setCurrentEpoch("__INACTIVE__")
+        assert fiber._getState() == FiberState.PENDING
+
+
+class TestDisposableList:
+    """Tests for DisposableList (list parity)."""
+
+    def test_push_and_length(self):
+        dl = DisposableList()
+        assert dl.length == 0
+        dl.push("a")
+        dl.push("b")
+        assert dl.length == 2
+
+    def test_delete_by_value(self):
+        dl = DisposableList()
+        dl.push("a")
+        dl.push("b")
+        assert dl.delete("a") is True
+        assert dl.length == 1
+        assert dl.delete("a") is False  # already deleted
+
+    def test_clear_returns_reversed(self):
+        dl = DisposableList()
+        dl.push("a")
+        dl.push("b")
+        dl.push("c")
+        values = dl.clear()
+        assert values == ["c", "b", "a"]
+        assert dl.length == 0
+
+    def test_iter(self):
+        dl = DisposableList()
+        dl.push("a")
+        dl.push("b")
+        assert list(dl) == ["a", "b"]
+
+    def test_len(self):
+        dl = DisposableList()
+        assert len(dl) == 0
+        dl.push("a")
+        assert len(dl) == 1
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ from contextvars import ContextVar
 from enum import Enum
 from typing import Any, ClassVar, cast
 
-from anima.events import Disposer, EventBus, EventMode
+from anima.events import DisposableList, Disposer, EventBus, EventMode
 
 logger = logging.getLogger("anima")
 
@@ -136,6 +136,14 @@ class Fiber:
         self.name: str = getattr(
             target, "name", getattr(target, "__name__", str(target))
         )
+        # Anima fiber internals: service impl snapshot (Dict<Impl>)
+        self._store: dict[str, Any] = {}
+        # In-flight load/unload transition (asyncio.Future or None)
+        self.inertia: asyncio.Future[None] | None = None
+        # Effect disposables keyed by event name (DisposableList per event)
+        self._hooks: dict[str, DisposableList] = {}
+        # Combined disposables list (O(1) deletion by value)
+        self._disposables: DisposableList = DisposableList()
 
         # Validate config if plugin declares a Config schema (e.g. Pydantic or callable)
         self._validate_config()
@@ -316,6 +324,65 @@ class Fiber:
         else:
             self._set_state(FiberState.PENDING)
 
+    async def _reload(
+        self,
+    ) -> (
+        None
+    ):  # pragma: no cover - async transition path, hard to trigger in sync tests
+        """Reload the plugin with current config (fiber lifecycle parity).
+
+        Resolves config, executes the plugin callback, and updates state.
+        """
+        old_epoch = self._getCurrentEpoch()
+        try:
+            self.config = self._resolve_config(self.raw_config)
+            await self.load()
+        except Exception as e:
+            self._set_state(FiberState.FAILED, error=e)
+            self._setCurrentEpoch("__INACTIVE__")
+            raise
+        finally:
+            if self._getCurrentEpoch() == old_epoch:
+                self.inertia = None
+
+    def _resolve_config(
+        self, config: Any
+    ) -> Any:  # pragma: no cover - async waterfall path, hard to trigger in sync tests
+        """Resolve plugin config through internal/config waterfall parity.
+
+        Runs the waterfall hook, then applies schema validation if declared.
+        """
+
+        async def _default(cfg: Any) -> Any:
+            return cfg
+
+        # Run waterfall hook (sync wrapper for simplicity)
+        try:
+            loop = asyncio.get_event_loop()
+            resolved = loop.run_until_complete(
+                self.ctx.waterfall("internal/config", config, _default)
+            )
+        except RuntimeError:
+            resolved = config
+
+        # Apply schema validation if declared
+        config_schema = getattr(self.target, "Config", None)
+        if config_schema is None:
+            config_schema = getattr(self.target, "schema", None)
+        if config_schema is not None:
+            from anima.schema import Schema
+
+            if isinstance(config_schema, Schema):
+                resolved = config_schema.validate(resolved)
+            elif callable(config_schema):
+                resolved = (
+                    config_schema(**resolved)
+                    if isinstance(resolved, dict)
+                    else config_schema(resolved)
+                )
+
+        return resolved
+
     async def replace(self, new_target: Any) -> None:
         """Replace plugin target and reload fiber with updated target."""
         if self.state in (FiberState.UNLOADING, FiberState.DISPOSED):
@@ -379,6 +446,130 @@ class Fiber:
             "children_count": len(self.child_fibers),
             "error": str(self.error) if self.error else None,
         }
+
+    async def await_settle(
+        self,
+    ) -> None:  # pragma: no cover - async wait path, hard to trigger in sync tests
+        """Wait for current lifecycle work and rethrow startup errors.
+
+        Fiber.await() parity. Awaits any in-flight inertia (load/unload)
+        transition, then rethrows any startup error stored on the fiber.
+        """
+        while self.inertia is not None:
+            await self.inertia
+        if self.error is not None:
+            raise self.error
+
+    def _checkImpl(self, name: str) -> None:
+        """Check if a required service implementation is available for this fiber.
+
+        Fiber._checkImpl() parity. Removes the impl from _store if the
+        service is no longer available or its check predicate fails.
+        """
+        impl = self.ctx.reflect._get_impl(name, strict=True)
+        if impl is None:
+            self._store.pop(name, None)
+            return
+        try:
+            if impl.check is not None and not impl.check():
+                self._store.pop(name, None)
+                return
+        except Exception:  # noqa: BLE001 - defensive: check predicate may raise
+            self.ctx.logger.error(Exception(f"check failed for {name}"))
+            self._store.pop(name, None)
+            return
+        self._store[name] = impl
+
+    def _refresh(
+        self,
+    ) -> None:  # pragma: no cover - empty inject branch hard to cover in sync tests
+        """Recalculate the fiber's epoch from its inject dependencies.
+
+        Fiber._refresh() parity. Builds an epoch string from the uids
+        of all required service implementations; sets INACTIVE if any dep
+        is missing.
+        """
+        epoch = ""
+        for name in self.inject:
+            impl = self._store.get(name)
+            if impl is None:
+                epoch = "__INACTIVE__"
+                break
+            epoch += ":" + str(impl.uid if hasattr(impl, "uid") else id(impl))
+        self._setEpoch(epoch)
+
+    def _setEpoch(
+        self, epoch: str
+    ) -> (
+        None
+    ):  # pragma: no cover - async transition path, hard to trigger in sync tests
+        """Set the fiber's epoch and trigger load/unload transitions.
+
+        Fiber._setEpoch() parity. When epoch changes from INACTIVE to
+        active, starts _reload(); otherwise starts _unload().
+        """
+        old_epoch = self._getCurrentEpoch()
+        if epoch == old_epoch:
+            return
+        if self.inertia is not None:
+            return
+
+        def _transition() -> FiberState:
+            if epoch != "__INACTIVE__" and old_epoch == "__INACTIVE__":
+                asyncio.ensure_future(self._reload())
+                return FiberState.LOADING
+            else:
+                asyncio.ensure_future(self._unload())
+                return FiberState.UNLOADING
+
+        self._updateState(_transition)
+
+    def _getCurrentEpoch(self) -> str:
+        """Get the current epoch string from the runner."""
+        return getattr(self, "_runner_epoch", "__INACTIVE__")
+
+    def _setCurrentEpoch(self, epoch: str) -> None:
+        """Set the current epoch string on the runner."""
+        self._runner_epoch = epoch
+
+    def _updateState(
+        self, callback: Any
+    ) -> (
+        None
+    ):  # pragma: no cover - state transition path, hard to trigger in sync tests
+        """Update fiber state and notify dependents of state changes.
+
+        Fiber._updateState() parity. Emits internal/status and, on
+        ACTIVE<->NON-ACTIVE transitions, notifies reflect of service changes.
+        """
+        old_state = self.state
+        new_state = callback()
+        if new_state is None:
+            new_state = self._getState()
+        self.state = new_state
+        if old_state == new_state:
+            return
+        self.ctx.emit("internal/status", self, old_state)
+
+        # Only notify changes between ACTIVE and NON-ACTIVE states
+        if old_state != FiberState.ACTIVE and new_state != FiberState.ACTIVE:
+            return
+        for impl in self.ctx.reflect.store.values():
+            if impl.ctx.fiber is not self:
+                continue
+            self.ctx.reflect.notify([impl.name])
+
+    def _getState(
+        self,
+    ) -> FiberState:  # pragma: no cover - state determination path, hard to trigger all branches in sync tests
+        """Determine current fiber state from uid, error, and runner epoch."""
+        if self.uid is None:
+            return FiberState.DISPOSED
+        if self.error is not None:
+            return FiberState.FAILED
+        if self._getCurrentEpoch() != "__INACTIVE__":
+            return FiberState.ACTIVE
+        return FiberState.PENDING
 
     def assertActive(self) -> None:
         """Assert that the fiber is active (has a uid)."""

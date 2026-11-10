@@ -20,6 +20,54 @@ from typing import Any
 Disposer = Callable[[], None | Awaitable[None]]
 
 
+class DisposableList:
+    """Ordered collection of disposable values with O(1) deletion by value.
+
+    DisposableList parity. Uses a serial-number map and a reverse
+    WeakMap-like index for constant-time insert, delete, and clear.
+    """
+
+    def __init__(self) -> None:
+        self._sn = 0
+        self._map: dict[int, Any] = {}
+        self._weak: dict[Any, int] = {}
+
+    @property
+    def length(self) -> int:
+        """Return the number of disposables in the list."""
+        return len(self._map)
+
+    def push(self, value: Any) -> Callable[[], None]:
+        """Append a disposable and return a disposer that removes it."""
+        self._sn += 1
+        sn = self._sn
+        self._map[sn] = value
+        self._weak[value] = sn
+        return lambda: self._map.pop(sn, None)
+
+    def delete(self, value: Any) -> bool:
+        """Remove a specific disposable by identity. Returns True if found."""
+        sn = self._weak.get(value)
+        if sn is None:
+            return False
+        self._weak.pop(value, None)
+        return self._map.pop(sn, None) is not None
+
+    def clear(self) -> list[Any]:
+        """Remove and return all disposables in reverse insertion order."""
+        values = list(self._map.values())
+        self._map.clear()
+        self._weak.clear()
+        values.reverse()
+        return values
+
+    def __iter__(self) -> Any:
+        return iter(self._map.values())
+
+    def __len__(self) -> int:
+        return self.length
+
+
 def is_bailed(value: Any) -> bool:
     """isBailed(value) - true unless value is None or False."""
     return value is not None and value is not False
