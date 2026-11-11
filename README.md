@@ -13,7 +13,7 @@ Documentation: [AGENTS.md](AGENTS.md) · [CONTEXT.md](CONTEXT.md) · [docs/adr/]
 
 ## Status
 
-Anima is at `0.1.0` and under active development. **The API is not yet stable and may change without notice.**
+Anima is at `0.2.0` and under active development. **The API is not yet stable and may change without notice.**
 
 ---
 
