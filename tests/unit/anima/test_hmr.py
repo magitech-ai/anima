@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -192,6 +193,52 @@ async def test_hmr_reload_class_plugin(tmp_path: Path):
             if str(tmp_path) in sys.path:
                 sys.path.remove(str(tmp_path))
 
+    finally:
+        sys.modules.pop(mod_name, None)
+
+
+@pytest.mark.asyncio
+async def test_hmr_reload_concurrent_deduped(tmp_path: Path):
+    # Two reloads of the same module racing each other (e.g. a watcher
+    # event firing while an explicit reload is in flight) share one
+    # in-flight reload: lifecycle events fire exactly once.
+    ctx = Context()
+    hmr = HmrService(ctx, root=tmp_path)
+
+    mod_file = tmp_path / "dedup_plugin.py"
+    mod_file.write_text("VALUE = 1\n")
+
+    mod_name = "dedup_plugin"
+    spec = importlib.util.spec_from_file_location(mod_name, str(mod_file))
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    mod.__spec__ = spec
+    sys.modules[mod_name] = mod
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    events: list[str] = []
+    ctx.on("hmr/before-reload", lambda name, p: events.append("before"))
+    ctx.on("hmr/after-reload", lambda name, p: events.append("after"))
+    ctx.on("hmr/reload", lambda name, p: events.append("reload"))
+
+    try:
+        mod_file.write_text("VALUE = 2\n")
+        # Bump mtime so the reload does not reuse cached bytecode: the
+        # rewrite lands in the same second at the same size otherwise.
+        import os
+        import time
+
+        os.utime(mod_file, (time.time() + 2, time.time() + 2))
+
+        first, second = await asyncio.gather(
+            hmr.reload_module(mod_name, path=mod_file),
+            hmr.reload_module(mod_name, path=mod_file),
+        )
+        assert first is second
+        assert first is not None
+        assert first.VALUE == 2
+        assert events == ["before", "after", "reload"]
     finally:
         sys.modules.pop(mod_name, None)
 

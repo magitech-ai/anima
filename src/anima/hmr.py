@@ -4,6 +4,7 @@ Hot Module Replacement (HMR) service for dynamic live reloading.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
 import sys
@@ -40,6 +41,7 @@ class HmrService(Service):
         self.interval = interval
         self._disposer: Disposer | None = None
         self._active = False
+        self._inflight: dict[str, asyncio.Task[ModuleType | None]] = {}
         self.ctx.effect(lambda: self.stop)
 
     async def apply(self, ctx: Context) -> None:
@@ -116,7 +118,31 @@ class HmrService(Service):
         mod: ModuleType | None = None,
         path: Path | None = None,
     ) -> ModuleType | None:
-        """Reload a Python module and update associated active fibers."""
+        """Reload a Python module and update associated active fibers.
+
+        Concurrent reloads of the same module share one in-flight reload:
+        a file-watcher event racing an explicit reload must not reload the
+        module twice or emit the lifecycle events twice.
+        """
+        existing = self._inflight.get(mod_name)
+        if existing is not None:
+            return await existing
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._reload_module(mod_name, mod=mod, path=path))
+        self._inflight[mod_name] = task
+        try:
+            return await task
+        finally:
+            self._inflight.pop(mod_name, None)
+
+    async def _reload_module(
+        self,
+        mod_name: str,
+        *,
+        mod: ModuleType | None = None,
+        path: Path | None = None,
+    ) -> ModuleType | None:
+        """Perform one reload of a Python module and reconcile its fibers."""
         target_mod = mod if mod is not None else sys.modules.get(mod_name)
         if target_mod is None:
             return None

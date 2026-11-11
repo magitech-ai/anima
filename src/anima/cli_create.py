@@ -171,7 +171,12 @@ class Scaffold:
         else:
             print()
             if self.root_dir != os.getcwd():
-                relative = os.path.relpath(self.root_dir, os.getcwd())
+                try:
+                    relative = os.path.relpath(self.root_dir, os.getcwd())
+                except ValueError:
+                    # Cross-drive paths (e.g. C: vs D: on Windows) have no
+                    # relative form; fall back to the absolute path.
+                    relative = self.root_dir
                 print(f"  cd {relative}")
             agent_str = agent["name"]
             print(f"  {agent_str} install")

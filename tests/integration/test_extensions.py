@@ -41,7 +41,10 @@ async def test_aux_extensions_integration(tmp_path: Path):
     """All five aux extensions cooperate on their respective contexts."""
     fixtures = tmp_path / "static"
     fixtures.mkdir()
-    (fixtures / "hello.txt").write_text("hello-static\n", encoding="utf-8")
+    # Byte-exact fixture: write_bytes so the file holds "\n" on every
+    # platform (write_text would translate it to "\r\n" on Windows and the
+    # static server serves bytes verbatim).
+    (fixtures / "hello.txt").write_bytes(b"hello-static\n")
     (tmp_path / ".env").write_text(
         "ANIMA_APP=integration\nANIMA_PORT=9000\n", encoding="utf-8"
     )

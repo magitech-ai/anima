@@ -569,6 +569,28 @@ class TestInstallEdgeCases:
             s.install()
             mock_run.assert_not_called()
 
+    def test_install_confirm_no_cross_drive(self, tmp_path: Path, capsys):
+        # os.path.relpath raises ValueError for paths on different drives
+        # (e.g. C: vs D: on Windows); install must fall back to the
+        # absolute path instead of crashing.
+        s = Scaffold({})
+        s.root_dir = str(tmp_path)
+        with (
+            patch.object(
+                Scaffold, "_which_agent", return_value={"name": "npm", "version": ""}
+            ),
+            patch("anima.cli_create.confirm", return_value=False),
+            patch("anima.cli_create.subprocess.run") as mock_run,
+            patch.object(
+                os.path,
+                "relpath",
+                side_effect=ValueError("path is on mount 'C:', start on mount 'D:'"),
+            ),
+        ):
+            s.install()
+            mock_run.assert_not_called()
+        assert f"  cd {tmp_path}\n" in capsys.readouterr().out
+
     def test_install_no_agent(self, tmp_path: Path):
         s = Scaffold({})
         s.root_dir = str(tmp_path)
