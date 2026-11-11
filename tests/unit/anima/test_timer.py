@@ -52,7 +52,9 @@ async def test_timeout_as_sleep_and_cancellation():
     t0 = asyncio.get_running_loop().time()
     await timer.timeout(0.02)
     t1 = asyncio.get_running_loop().time()
-    assert (t1 - t0) >= 0.015
+    # Half the requested delay: Windows timer granularity can fire a
+    # 20 ms sleep a few ms early, but the sleep must still have happened.
+    assert (t1 - t0) >= 0.01
 
     # Sleep cancelled via fiber effect unload
     sleep_task_done = False
