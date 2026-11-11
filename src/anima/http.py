@@ -86,8 +86,9 @@ class HttpConfig:
 class HttpService(Service):
     """Contextual HTTP client with interceptor waterfalls and type decoders."""
 
-    def __init__(self, ctx: Context, name: str = "http") -> None:
-        super().__init__(ctx, name)
+    def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
+        cfg = dict(config or {})
+        super().__init__(ctx, cfg.get("name", "http"))
         self._proxies: dict[str, ProxyFactory] = {}
 
     def proxy(

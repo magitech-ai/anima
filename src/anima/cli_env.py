@@ -157,10 +157,11 @@ class CliEnv:
     def __init__(
         self,
         ctx: Context,
-        base_dir: Path | str | None = None,
-        mode: str | None = None,
-        **kwargs: Any,
+        config: dict[str, Any] | None = None,
     ) -> None:
+        cfg = dict(config or {})
+        base_dir = cfg.get("base_dir")
+        mode = cfg.get("mode")
         self.ctx = ctx
         self.base_dir = (
             Path(base_dir).resolve()
@@ -195,9 +196,7 @@ class CliEnv:
 
 def apply(
     ctx: Context,
-    base_dir: Path | str | None = None,
-    mode: str | None = None,
-    **kwargs: Any,
+    config: dict[str, Any] | None = None,
 ) -> CliEnv:
     """Mount CliEnv plugin onto context."""
-    return CliEnv(ctx, base_dir=base_dir, mode=mode, **kwargs)
+    return CliEnv(ctx, config)

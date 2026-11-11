@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 from anima.core import (
     AnimaError,
     Context,
+    Fiber,
     FiberState,
     Service,
     _BoundService,
@@ -119,6 +120,7 @@ class Impl:
         ctx: Context,
         check: Callable[[], bool] | None,
         isolate: Any,
+        fiber: Fiber | None = None,
     ) -> None:
         self.uid = uid
         self.name = name
@@ -126,6 +128,8 @@ class Impl:
         self.ctx = ctx
         self.check = check
         self.isolate = isolate
+        # The fiber that provided this impl, if any.
+        self.fiber = fiber
         self.dependents: set[Impl] = set()
 
 
@@ -163,9 +167,10 @@ class ReflectService:
     def _get_impl(self, name: str, strict: bool = True) -> Impl | None:
         for impl in self.store.values():
             if impl.name == name:  # pragma: no branch
-                # pragma: no cover - branch coverage: fiber active case
-                if strict and impl.ctx.fiber.state != FiberState.ACTIVE:
-                    return None
+                if strict:
+                    provider = impl.fiber if impl.fiber is not None else impl.ctx.fiber
+                    if provider.state != FiberState.ACTIVE:
+                        return None
                 return impl
         return None
 
@@ -208,7 +213,6 @@ class ReflectService:
         self._impl_counter += 1
         self.store[name] = impl
 
-        self.ctx.fiber._set_state(FiberState.ACTIVE)
         self.notify([name])
 
         def disposer() -> None:
@@ -219,6 +223,7 @@ class ReflectService:
         # Register disposer as effect on the current fiber (anima parity:
         # this.ctx.fiber.effect(...) registers the disposer on the fiber)
         fiber = _current_fiber.get() or self.ctx._fiber
+        impl.fiber = fiber
         if fiber is not None:  # pragma: no cover
             fiber.effects.append(disposer)
 
@@ -247,17 +252,14 @@ class ReflectService:
                     if not filter_fn(fiber.ctx, name):
                         continue
                     has_update = True
-                    # Re-check impl for this fiber
-                    impl = self._get_impl(name, strict=False)
-                    if impl:
-                        fiber._validate_config()
-                    else:
-                        # Dependency no longer available — dispose active fiber
-                        if fiber.state == FiberState.ACTIVE:  # pragma: no cover
-                            self.ctx._schedule_task(fiber.dispose())
+                    # Re-check the impl for this fiber so _refresh
+                    # recomputes the epoch from a fresh _store. A dep
+                    # that went away unloads the fiber to PENDING
+                    # instead of disposing it.
+                    fiber._checkImpl(name)
                 if not has_update:
                     continue
-                fiber._refresh() if hasattr(fiber, "_refresh") else None
+                fiber._refresh()
                 # Schedule load for PENDING fibers whose deps are now satisfied
                 if fiber.state == FiberState.PENDING and fiber.check_dependencies():
                     self.ctx._schedule_task(fiber.load())

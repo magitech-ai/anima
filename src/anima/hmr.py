@@ -26,11 +26,12 @@ class HmrService(Service):
     def __init__(
         self,
         ctx: Context,
-        *,
-        root: str | Path | None = None,
-        ignored: list[str] | None = None,
-        interval: float = 0.5,
+        config: dict[str, Any] | None = None,
     ) -> None:
+        cfg = dict(config or {})
+        root = cfg.get("root")
+        ignored = cfg.get("ignored")
+        interval = cfg.get("interval", 0.5)
         super().__init__(ctx, "hmr")
         self.root = Path(root).resolve() if root else Path.cwd().resolve()
         self.ignored = (
@@ -41,10 +42,12 @@ class HmrService(Service):
         self.interval = interval
         self._disposer: Disposer | None = None
         self._active = False
-        self._inflight: dict[str, asyncio.Task[ModuleType | None]] = {}
+        self._inflight: dict[
+            str, tuple[asyncio.Task[ModuleType | None], tuple[float, int] | None]
+        ] = {}
         self.ctx.effect(lambda: self.stop)
 
-    async def apply(self, ctx: Context) -> None:
+    def init(self) -> None:
         """Lifecycle hook when mounted as a plugin."""
         self.start()
 
@@ -111,6 +114,29 @@ class HmrService(Service):
         mod_name, mod = match
         await self.reload_module(mod_name, mod=mod, path=path)
 
+    def _target_stat(
+        self,
+        mod_name: str,
+        *,
+        mod: ModuleType | None = None,
+        path: Path | None = None,
+    ) -> tuple[float, int] | None:
+        """(mtime, size) of the module file, or None if it cannot be read."""
+        target_path = path
+        if target_path is None:
+            target_mod = mod if mod is not None else sys.modules.get(mod_name)
+            if target_mod is None:
+                return None
+            m_file = getattr(target_mod, "__file__", None)
+            if not m_file:
+                return None
+            target_path = Path(m_file)
+        try:
+            st = target_path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime, st.st_size)
+
     async def reload_module(
         self,
         mod_name: str,
@@ -122,7 +148,10 @@ class HmrService(Service):
 
         Concurrent reloads of the same module share one in-flight reload:
         a file-watcher event racing an explicit reload must not reload the
-        module twice or emit the lifecycle events twice.
+        module twice or emit the lifecycle events twice. But a reload that
+        started before the file changed again returns the old content, so
+        a caller whose file moved on waits for the in-flight reload and
+        then reloads the current content instead of joining the stale one.
 
         Do not call this reentrantly from an HMR lifecycle handler
         (``hmr/before-reload``, ``hmr/after-reload``, ``hmr/reload``,
@@ -130,16 +159,26 @@ class HmrService(Service):
         in-flight reload it is running inside, and deadlock. Reloading a
         different module from a handler is safe.
         """
+        stat = self._target_stat(mod_name, mod=mod, path=path)
         existing = self._inflight.get(mod_name)
         if existing is not None:
-            return await existing
+            task, old_stat = existing
+            if stat is not None and old_stat is not None and stat != old_stat:
+                # The file changed since the in-flight reload started; its
+                # result is stale. Wait for it, then reload the current
+                # content below instead of joining the stale one.
+                await task
+            else:
+                return await task
         loop = asyncio.get_running_loop()
         task = loop.create_task(self._reload_module(mod_name, mod=mod, path=path))
-        self._inflight[mod_name] = task
+        self._inflight[mod_name] = (task, stat)
         try:
             return await task
         finally:
-            self._inflight.pop(mod_name, None)
+            current = self._inflight.get(mod_name)
+            if current is not None and current[0] is task:
+                self._inflight.pop(mod_name, None)
 
     async def _reload_module(
         self,

@@ -15,9 +15,10 @@ from anima.server import ServerService, WebSocket
 
 
 class MockModelProvider(Service):
-    def __init__(self, ctx: Context, model_name: str = "mock-gpt") -> None:
+    def __init__(self, ctx: Context, config: dict | None = None) -> None:
+        cfg = dict(config or {})
         super().__init__(ctx, "provider")
-        self.model_name = model_name
+        self.model_name = cfg.get("model_name", "mock-gpt")
         self.generation_count = 0
 
     async def generate(self, prompt: str) -> str:
@@ -102,7 +103,7 @@ async def test_end_to_end_agent_pipeline():
 
 @pytest.mark.asyncio
 async def test_agent_cascade_disposal_and_recovery():
-    """Verify cascading service disposal when an upstream dependency is unmounted."""
+    """Verify cascading unload when an upstream dependency is unmounted, and recovery on re-mount."""
     ctx = Context()
 
     provider_fib = ctx.plugin(MockModelProvider)
@@ -112,21 +113,20 @@ async def test_agent_cascade_disposal_and_recovery():
 
     assert agent_fib.state == FiberState.ACTIVE
 
-    # Now unmount provider -> agent should automatically unload and become DISPOSED
+    # Now unmount provider -> agent unloads to PENDING (recoverable)
     await provider_fib.dispose()
-    await ctx.flush()
+    await agent_fib.await_settle()
 
     assert not ctx.has("provider")
-    assert agent_fib.state == FiberState.DISPOSED
+    assert agent_fib.state == FiberState.PENDING
 
-    # Re-mount a new provider instance
+    # Re-mount a new provider instance -> the original agent recovers
     _new_provider_fib = ctx.plugin(MockModelProvider, model_name="anima-v2")
-    # Re-mount agent
-    new_agent_fib = ctx.plugin(MockAgent)
     await ctx.flush()
+    await agent_fib.await_settle()
 
     assert ctx.has("provider")
-    assert new_agent_fib.state == FiberState.ACTIVE
+    assert agent_fib.state == FiberState.ACTIVE
     assert ctx.provider.model_name == "anima-v2"
 
 
@@ -317,14 +317,15 @@ async def test_extended_ecosystem_network_cli_and_schema_integration(tmp_path: P
 
     ctx = Context()
 
-    # Valid config
+    # Valid config (validation is lazy, so flush before reading defaults)
     fib_valid = ctx.plugin(SecureGatewayPlugin, port=9000, api_key="secret-key-123")
+    # Invalid config (missing required field api_key causes fiber to enter FAILED state)
+    fib_invalid = ctx.plugin(SecureGatewayPlugin, port=9000)
+    await ctx.flush()
     assert fib_valid.config["port"] == 9000
     assert fib_valid.config["api_key"] == "secret-key-123"
     assert fib_valid.config["rate_limit"] == 100
 
-    # Invalid config (missing required field api_key causes fiber to enter FAILED state)
-    fib_invalid = ctx.plugin(SecureGatewayPlugin, port=9000)
     assert fib_invalid.state == FiberState.FAILED
     assert isinstance(fib_invalid.error, SchemaError)
     assert "missing required field 'api_key'" in str(fib_invalid.error)

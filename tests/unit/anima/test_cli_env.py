@@ -121,7 +121,7 @@ async def test_cli_env_plugin(tmp_path: Path, monkeypatch):
     from anima.cli_env import apply as cli_env_apply
 
     ctx2 = Context()
-    cli_env_apply(ctx2, base_dir=tmp_path)
+    cli_env_apply(ctx2, {"base_dir": tmp_path})
     assert ctx2.env["EXISTING_KEY"] == "original_value"
 
 

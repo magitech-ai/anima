@@ -267,8 +267,9 @@ class WsRoute(Route):
 class ServerService(Service):
     """Contextual HTTP and WebSocket server engine."""
 
-    def __init__(self, ctx: Context, name: str = "server") -> None:
-        super().__init__(ctx, name)
+    def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
+        cfg = dict(config or {})
+        super().__init__(ctx, cfg.get("name", "server"))
         self.routes: list[Route] = []
         self.ws_routes: list[WsRoute] = []
         self.server: asyncio.Server | None = None

@@ -10,6 +10,7 @@ import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from anima.core import Context, Service
 
@@ -30,7 +31,9 @@ class PkgResult:
 class PkgService(Service):
     """Asynchronous package manager service leveraging uv."""
 
-    def __init__(self, ctx: Context, *, uv_path: str | Path | None = None) -> None:
+    def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
+        cfg = dict(config or {})
+        uv_path = cfg.get("uv_path")
         super().__init__(ctx, "pkg")
         self.uv_path = (
             str(uv_path) if uv_path is not None else shutil.which("uv") or "uv"

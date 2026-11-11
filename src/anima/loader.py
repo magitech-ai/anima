@@ -108,7 +108,9 @@ def save_profile(path: Path | str, entries: list[dict[str, Any]]) -> None:
 class LoaderService(Service):
     """Configuration-driven loader service managing plugin lifecycles and persistence."""
 
-    def __init__(self, ctx: Context, *, filename: str | Path | None = None) -> None:
+    def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
+        cfg = dict(config or {})
+        filename = cfg.get("filename")
         super().__init__(ctx, "loader")
         self.filename = Path(filename).resolve() if filename else None
         self.entries: list[dict[str, Any]] = []
@@ -259,6 +261,6 @@ def load_profile(
 ) -> LoaderService:
     """Load a profile of plugin configurations into a Context."""
     filename = config_source if isinstance(config_source, (str, Path)) else None
-    loader = LoaderService(ctx, filename=filename)
+    loader = LoaderService(ctx, {"filename": filename})
     loader.load(config_source, env=env)
     return loader

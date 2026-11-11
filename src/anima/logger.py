@@ -346,9 +346,10 @@ class Logger:
 class LoggerService(Service):
     """Central logging micro-kernel service."""
 
-    def __init__(self, ctx: Context, buffer_size: int = 1000) -> None:
+    def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
+        cfg = dict(config or {})
         super().__init__(ctx, "logger")
-        self.buffer_size = buffer_size
+        self.buffer_size = cfg.get("buffer_size", 1000)
         self.buffer: list[Message] = []
         self.default_level: int = LoggerLevel.INFO
         self._sn_counter = 0

@@ -121,8 +121,9 @@ def apply_patch(
 class IncludeService(Service):
     """Subsystem for multi-file configuration resolution and profile synchronization."""
 
-    def __init__(self, ctx: Context, name: str = "include") -> None:
-        super().__init__(ctx, name)
+    def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
+        cfg = dict(config or {})
+        super().__init__(ctx, cfg.get("name", "include"))
         self.journal = Journal()
 
     def resolve_file(

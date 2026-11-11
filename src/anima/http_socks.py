@@ -267,6 +267,6 @@ class HttpSocks:
         ctx.http.proxy(protocols, lambda url: SocksProxyHandler(url))
 
 
-def apply(ctx: Context, **kwargs: Any) -> HttpSocks:
+def apply(ctx: Context, config: dict[str, Any] | None = None) -> HttpSocks:
     """Mount HttpSocks plugin onto context."""
-    return HttpSocks(ctx, **kwargs)
+    return HttpSocks(ctx)
