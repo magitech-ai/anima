@@ -1,7 +1,7 @@
 # 0004. Plugin-to-component rename
 
 Date: 2026-11-11
-Status: proposed
+Status: accepted
 
 ## Context
 
@@ -33,14 +33,13 @@ repos use those call sites throughout. No `Component` name exists in anima.
 
 ## Decision
 
-Proposed, pending Malcom's call. Two options:
-
-- **(A) Follow upstream exactly.** Add `use()` and `Component`; keep
-  `plugin()` as a deprecated alias delegating to `use()`. This matches
-  upstream's own migration path.
-- **(B) Clean rename, no alias.** Remove `plugin()` entirely. Free before
-  1.0.0 under the no-backwards-compatibility rule, but stricter than
-  upstream.
+Accepted 2026-11-11, Malcom's call: **(B) clean rename, no alias.**
+`plugin()` is removed entirely — no deprecated alias is kept. This is
+deliberately stricter than upstream (which kept the old methods as
+deprecated aliases delegating to `use()`); it is free before 1.0.0 under
+the no-backwards-compatibility rule, and it leaves no dead name behind
+to confuse the port. The `internal/plugin` event name is unaffected (it
+was not renamed upstream).
 
 ## Consequences
 
