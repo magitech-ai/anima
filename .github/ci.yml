@@ -1,0 +1,17 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test & Lint
+    uses: magitech-ai/.github/.github/workflows/python-ci.yml@main
+    with:
+      python-version: "3.12"
