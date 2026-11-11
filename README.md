@@ -2,7 +2,7 @@
 
 The standalone, lightweight composable micro-kernel powering **Magitech**.
 
-Built around the core philosophy: **"Everything is a Plugin"**.
+Built around the core philosophy: **"Everything is a Component"**.
 
 Documentation: [AGENTS.md](AGENTS.md) · [CONTEXT.md](CONTEXT.md) · [docs/adr/](docs/adr/)
 
@@ -68,7 +68,7 @@ class GreeterService(Service):
 async def main():
     ctx = Context()
 
-    ctx.plugin(GreeterService)
+    ctx.use(GreeterService)
 
     await ctx.flush()
 
@@ -80,10 +80,10 @@ asyncio.run(main())
 
 ## Configuration
 
-Profiles compose plugins from YAML. Each entry is a `module:plugin` target, or a mapping with a `config` block:
+Profiles compose components from YAML. Each entry is a `module:component` target, or a mapping with a `config` block:
 
 ```yaml
-plugins:
+components:
   - my_app:greeter
   - name: my_app:worker
     config:
@@ -96,13 +96,13 @@ Load a profile with `load_profile(ctx, "anima.yaml")`. Environment variables int
 
 ## Primitives
 
-* **`Context`**: Central dependency container and service registry. Sub-contexts (`ctx.extend()`, `ctx.isolate()`) provide isolated realms for subagents and sandboxed plugins.
+* **`Context`**: Central dependency container and service registry. Sub-contexts (`ctx.extend()`, `ctx.isolate()`) provide isolated realms for subagents and sandboxed components.
 
 * **`Service`**: Base class for named capabilities mounted onto `ctx`.
 
 * **`Fiber`**: Runtime state machine (`PENDING` ➔ `LOADING` ➔ `ACTIVE` ➔ `UNLOADING` ➔ `DISPOSED`; `FAILED` on error). Handles deferred loading via `inject = [...]`.
 
-* **Reversible Effects (`ctx.effect`)**: Any registration, tool addition, or watcher returns a disposer. When a plugin unloads, all effects unwind cleanly in reverse order (LIFO).
+* **Reversible Effects (`ctx.effect`)**: Any registration, tool addition, or watcher returns a disposer. When a component unloads, all effects unwind cleanly in reverse order (LIFO).
 
 * **The 5 Event Modes**:
   * `emit`: Synchronous broadcast (fire-and-forget).
@@ -113,7 +113,7 @@ Load a profile with `load_profile(ctx, "anima.yaml")`. Environment variables int
 
 * **Service Isolation Realms (`ctx.isolate`)**: Child scopes that prevent service leakage or pollution to/from parent contexts.
 
-* **Declarative YAML Profiles (`load_profile`)**: Composes ordered bundles and plugin entries dynamically from YAML configuration.
+* **Declarative YAML Profiles (`load_profile`)**: Composes ordered bundles and component entries dynamically from YAML configuration.
 
 ---
 
@@ -123,7 +123,7 @@ Every capability is a service mounted on a `Context`. The kernel ships these mod
 
 | Area | Modules | What they do |
 | --- | --- | --- |
-| Core | `core`, `events`, `group`, `registry`, `reflect` | Context and service registry, the 5 event modes, composite plugin groups, plugin runtime registry, service introspection |
+| Core | `core`, `events`, `group`, `registry`, `reflect` | Context and service registry, the 5 event modes, composite component groups, component runtime registry, service introspection |
 | Loading & config | `loader`, `loader_utils`, `include`, `schema`, `pkg`, `cli_env` | YAML profile loading, module resolution, multi-file includes with journaling and patches, declarative schema validation, `uv` package management, cascading environment variables |
 | Server & network | `server`, `server_acl`, `server_echo`, `server_proxy`, `server_static`, `http`, `http_socks` | Async HTTP and WebSocket server, host/loopback access control, echo, reverse proxy, and static file routes; async HTTP client with SOCKS4/5 support |
 | Runtime services | `timer`, `watcher`, `logger`, `hmr` | Reversible timers (timeouts, intervals, debounce, throttle), filesystem change detection, structured namespaced logging, hot module replacement |
@@ -143,7 +143,7 @@ uv run mypy src
 ```
 
 * `tests/unit/anima/`: Mirrors `src/` 1:1 — core, events, loader, CLI, server, HTTP, timer, watcher, and every other module.
-* `tests/integration/`: End-to-end multi-plugin agent pipeline, cascade disposal, subagent isolation, and extension seams.
+* `tests/integration/`: End-to-end multi-component agent pipeline, cascade disposal, subagent isolation, and extension seams.
 
 See [AGENTS.md](AGENTS.md) for the full engineering standards.
 
@@ -152,7 +152,7 @@ See [AGENTS.md](AGENTS.md) for the full engineering standards.
 ## Documentation
 
 * [AGENTS.md](AGENTS.md) — agent guidelines and engineering standards.
-* [CONTEXT.md](CONTEXT.md) — canonical vocabulary: context, service, plugin entrypoint, waterfall, disposer.
+* [CONTEXT.md](CONTEXT.md) — canonical vocabulary: context, service, component entrypoint, waterfall, disposer.
 * [docs/adr/](docs/adr/) — architecture decision records (waterfall pipeline, disposer callables, hierarchical contexts).
 * [docs/agents/](docs/agents/) — domain docs, issue tracker, and triage labels.
 

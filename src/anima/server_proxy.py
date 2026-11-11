@@ -31,7 +31,7 @@ class ProxyConfig:
 
 @inject("http", "server")
 class ServerProxy:
-    """Reverse proxy plugin mounting wildcard proxying onto ServerService."""
+    """Reverse proxy component mounting wildcard proxying onto ServerService."""
 
     name = "server:proxy"
     inject: ClassVar[list[str]] = ["http", "server"]
@@ -204,5 +204,5 @@ def apply(
     config: ProxyConfig | dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> ServerProxy:
-    """Mount ServerProxy plugin onto context."""
+    """Mount ServerProxy component onto context."""
     return ServerProxy(ctx, config, **kwargs)

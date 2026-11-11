@@ -59,7 +59,7 @@ async def test_timeout_as_sleep_and_cancellation():
     # Sleep cancelled via fiber effect unload
     sleep_task_done = False
 
-    def sleeper_plugin(c: Context):
+    def sleeper_component(c: Context):
         async def _run():
             nonlocal sleep_task_done
             try:
@@ -70,11 +70,11 @@ async def test_timeout_as_sleep_and_cancellation():
 
         asyncio.create_task(_run())
 
-    fib = ctx.plugin(sleeper_plugin)
+    fib = ctx.use(sleeper_component)
     await ctx.flush()
     await asyncio.sleep(0.01)
 
-    # Unload plugin -> should cancel active sleep
+    # Unload component -> should cancel active sleep
     await fib.dispose()
     await asyncio.sleep(0.02)
     assert not sleep_task_done

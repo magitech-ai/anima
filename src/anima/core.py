@@ -4,7 +4,7 @@ Complete specification implementing:
 - Context: Service registry, isolation realms, intercept configurations, and child scopes
 - Service: Base class for pluggable, dependency-injected capabilities
 - Fiber: Runtime state machine, config validation, reversible effects, and introspection
-- Registry: Live plugin tree introspection and dependency diagnostics
+- Registry: Live component tree introspection and dependency diagnostics
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ class FiberState(str, Enum):
 
 
 class Fiber:
-    """The runtime handle and lifecycle manager for a loaded plugin instance."""
+    """The runtime handle and lifecycle manager for a loaded component instance."""
 
     def __init__(
         self,
@@ -146,7 +146,7 @@ class Fiber:
             self._runner_epoch = ""
         else:
             # Uids come from the owning registry's counter, so the first
-            # plugin fiber on a context is 1 and the root never consumes one.
+            # component fiber on a context is 1 and the root never consumes one.
             self.uid = ctx.registry.counter
             self.state = FiberState.PENDING
             self._runner_epoch = "__INACTIVE__"
@@ -160,7 +160,7 @@ class Fiber:
         self.store: dict[str, Any] | None = None
         # In-flight load/unload transition (asyncio.Future or None)
         self.inertia: asyncio.Future[None] | None = None
-        # The plugin instance produced by the last successful load.
+        # The component instance produced by the last successful load.
         self._instance: Any = None
         # True once a reload has started for this fiber; await_settle()
         # drives a load only for a fiber that never attempted one, so a
@@ -182,7 +182,7 @@ class Fiber:
             self.inject_config = getattr(target, "inject_config", None)
 
     def _validate_config_value(self, config: Any) -> Any:
-        """Validate a config value against the plugin's declared schema.
+        """Validate a config value against the component's declared schema.
 
         Synchronous validation used by _resolve_config at activation time.
         Returns the validated config; raises on failure.
@@ -208,9 +208,9 @@ class Fiber:
         return all(self.ctx.has(service) for service in self.inject)
 
     async def load(self) -> Any:
-        """Mount and activate the plugin, joining any in-flight transition.
+        """Mount and activate the component, joining any in-flight transition.
 
-        Returns the plugin instance when ACTIVE, else None. A plugin
+        Returns the component instance when ACTIVE, else None. A component
         failure does not raise here; it is stored on the fiber and
         rethrown by await_settle().
         """
@@ -259,7 +259,7 @@ class Fiber:
         self._updateState(self._unload_complete)
 
     async def dispose(self) -> None:
-        """Unload the plugin and mark it permanently as DISPOSED.
+        """Unload the component and mark it permanently as DISPOSED.
 
         Disposing the root fiber restarts it instead. A dispose issued
         while a load is in flight joins that transition; the fiber is
@@ -289,7 +289,7 @@ class Fiber:
             await self.inertia
 
     async def restart(self) -> None:
-        """Unload and re-mount the plugin via the epoch machine."""
+        """Unload and re-mount the component via the epoch machine."""
         self.assertActive()
         for name in self.inject:
             self._checkImpl(name)
@@ -300,12 +300,12 @@ class Fiber:
             self._updateState(lambda: None)
 
     async def _reload(self, epoch: str) -> None:
-        """Execute the plugin body directly, with a staleness checkpoint.
+        """Execute the component body directly, with a staleness checkpoint.
 
         `epoch` is the epoch this reload was started for, captured when the
         transition was decided; the checkpoint compares it against the
         current epoch so a reload superseded before it ran never executes
-        the plugin body. A plugin failure is logged and stored on the
+        the component body. A component failure is logged and stored on the
         fiber, not raised; await_settle() rethrows it.
         """
         self.store = dict(self._store)
@@ -319,14 +319,14 @@ class Fiber:
                 self.error = None
         except Exception as e:
             logger.exception(
-                "Plugin %s (uid %s) failed during reload", self.name, self.uid
+                "Component %s (uid %s) failed during reload", self.name, self.uid
             )
             self.error = e
             self._setCurrentEpoch("__INACTIVE__")
         self._updateState(lambda: self._reload_complete(old_epoch))
 
     async def _resolve_config(self, config: Any) -> Any:
-        """Resolve plugin config through the internal/config waterfall.
+        """Resolve component config through the internal/config waterfall.
 
         Runs the waterfall hook, then applies schema validation if
         declared. Validation is synchronous; the waterfall stays async.
@@ -366,7 +366,7 @@ class Fiber:
             return None
 
     def _call_with_config(self, fn: Callable[..., Any], config: Any) -> Any:
-        """Call a plugin entry point with as many leading args as it accepts.
+        """Call a component entry point with as many leading args as it accepts.
 
         The entry point is invoked with (ctx, config); shorter signatures
         receive fewer arguments, matching the JS call convention where
@@ -408,14 +408,14 @@ class Fiber:
         return fn()
 
     async def _execute(self, epoch: str) -> None:
-        """Run the plugin body and collect its effect."""
+        """Run the component body and collect its effect."""
         token = _current_fiber.set(self)
         try:
             target = self.target
             config = self.config
 
             # 1. Target is a class: construct, then run init hooks and init.
-            # Class plugins never call apply().
+            # Class components never call apply().
             if inspect.isclass(target):
                 target_cls = cast(type[Any], target)
                 instance = self._call_with_config(target_cls, config)
@@ -444,7 +444,7 @@ class Fiber:
                     result = await result
                 self._instance = target
                 await self._collect_effect(result, epoch)
-            # 3. Target is a callable / function plugin
+            # 3. Target is a callable / function component
             elif callable(target):
                 result = self._call_with_config(target, config)
                 if inspect.isawaitable(result):
@@ -453,13 +453,13 @@ class Fiber:
                 await self._collect_effect(result, epoch)
             else:
                 raise ValueError(
-                    f"Plugin target {target} must be a callable or class with apply(ctx)"
+                    f"Component target {target} must be a callable or class with apply(ctx)"
                 )
         finally:
             _current_fiber.reset(token)
 
     async def _collect_effect(self, result: Any, epoch: str) -> None:
-        """Collect the plugin body's return value as an effect disposer."""
+        """Collect the component body's return value as an effect disposer."""
         if result is None:
             return
         if callable(result):
@@ -490,7 +490,7 @@ class Fiber:
         raise TypeError("Invalid effect")
 
     async def replace(self, new_target: Any) -> None:
-        """Replace plugin target and reload fiber with updated target."""
+        """Replace component target and reload fiber with updated target."""
         if self.state in (FiberState.UNLOADING, FiberState.DISPOSED):
             return
 
@@ -513,7 +513,7 @@ class Fiber:
         await self.restart()
 
     async def update(self, config: dict[str, Any], no_save: bool = False) -> None:
-        """Update plugin configuration with live lifecycle hooks.
+        """Update component configuration with live lifecycle hooks.
 
         Raises on a disposed fiber, and raises the validation error when
         the new config fails validation on an ACTIVE fiber (the fiber
@@ -1070,7 +1070,7 @@ class Context:
         self._filter_predicate: Callable[[Context], bool] | None = filter_predicate
         # Anima context brand for Context.is() checks
         object.__setattr__(self, _CONTEXT_BRAND, True)
-        # baseUrl used to resolve relative plugin/module specifiers
+        # baseUrl used to resolve relative component/module specifiers
         self.baseUrl: str | None = None
 
         # Lazily imported to avoid circular imports
@@ -1212,7 +1212,7 @@ class Context:
         return fibers
 
     async def flush(self) -> None:
-        """Wait for all pending plugin load and event tasks to settle."""
+        """Wait for all pending component load and event tasks to settle."""
         while self._pending_tasks:
             tasks = list(self._pending_tasks)
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -1257,16 +1257,16 @@ class Context:
             return self._parent.get(name, default)  # pragma: no cover
         return default  # pragma: no cover
 
-    def plugin(self, plugin: Any, config: Any = None, **kwargs: Any) -> Fiber:
-        """Context.plugin(plugin, config?) - Load a plugin in this context."""
+    def use(self, component: Any, config: Any = None, **kwargs: Any) -> Fiber:
+        """Context.use(component, config?) - Load a component in this context."""
         if kwargs:
             config = {**(config or {}), **kwargs}
         # Validate target before delegating (our error message for backward compat)
-        if not callable(plugin) and not hasattr(plugin, "apply"):
+        if not callable(component) and not hasattr(component, "apply"):
             raise ValueError(
-                f"Plugin target {plugin} must be a callable or class with apply(ctx)"
+                f"Component target {component} must be a callable or class with apply(ctx)"
             )
-        fiber = self.registry.plugin(plugin, config)
+        fiber = self.registry.use(component, config)
         # Also track in context's fiber list for direct access
         if fiber not in self._fibers:  # pragma: no cover
             self._fibers.append(fiber)  # pragma: no cover
@@ -1531,7 +1531,7 @@ class Context:
         )
 
     def dump_tree(self) -> dict[str, Any]:
-        """Dump the full runtime hierarchy of plugins and services for introspection."""
+        """Dump the full runtime hierarchy of components and services for introspection."""
         return {
             "services": list(self.services.keys()),
             "isolated": list(self._isolated_services),
@@ -1548,7 +1548,7 @@ class CoreService(Service):
 
 
 def inject(*deps: str, **dep_configs: Any) -> Callable[[Any], Any]:
-    """Declare service dependencies and configuration constraints on a plugin or service."""
+    """Declare service dependencies and configuration constraints on a component or service."""
 
     def decorator(target: Any) -> Any:
         existing = getattr(target, "inject", None)

@@ -17,16 +17,16 @@ class _StrictConfig(BaseModel):
     num: int
 
 
-def _strict_plugin_class():
-    """A plugin class with a validated config, built fresh per test."""
+def _strict_component_class():
+    """A component class with a validated config, built fresh per test."""
 
-    class StrictPlugin:
+    class StrictComponent:
         Config = _StrictConfig
 
         def __init__(self, c: Context, config=None):
             self.config = config
 
-    return StrictPlugin
+    return StrictComponent
 
 
 @pytest.mark.asyncio
@@ -35,10 +35,10 @@ async def test_reload_reruns_body_on_active_fiber():
     ctx = Context()
     runs = []
 
-    def plugin(c):
+    def component(c):
         runs.append("ran")
 
-    fib = ctx.plugin(plugin)
+    fib = ctx.use(component)
     await ctx.flush()
     assert runs == ["ran"]
     assert fib.state == FiberState.ACTIVE
@@ -54,16 +54,16 @@ async def test_reentrant_load_joins():
     ctx = Context()
     runs = []
 
-    class SlowPlugin:
+    class SlowComponent:
         async def init(self):
             await asyncio.sleep(0.01)
             runs.append("ran")
 
-    fib = Fiber(ctx, SlowPlugin, (), {})
+    fib = Fiber(ctx, SlowComponent, (), {})
     first, second = await asyncio.gather(fib.load(), fib.load())
     assert runs == ["ran"]
     assert first is second
-    assert isinstance(first, SlowPlugin)
+    assert isinstance(first, SlowComponent)
     assert fib.state == FiberState.ACTIVE
 
 
@@ -75,12 +75,12 @@ async def test_dispose_during_load_never_resurrects():
     release = asyncio.Event()
     runs = []
 
-    async def slow_plugin(c):
+    async def slow_component(c):
         started.set()
         await release.wait()
         runs.append("ran")
 
-    fib = Fiber(ctx, slow_plugin, (), {})
+    fib = Fiber(ctx, slow_component, (), {})
     load_task = asyncio.create_task(fib.load())
     await started.wait()
     dispose_task = asyncio.create_task(fib.dispose())
@@ -99,10 +99,10 @@ async def test_reload_staleness_checkpoint_skips_body():
     ctx = Context()
     runs = []
 
-    def plugin(c):
+    def component(c):
         runs.append("ran")
 
-    fib = Fiber(ctx, plugin, (), {})
+    fib = Fiber(ctx, component, (), {})
     fib._setEpoch("")
     fib._setEpoch("__INACTIVE__")
     await fib.await_settle()
@@ -114,8 +114,8 @@ async def test_reload_staleness_checkpoint_skips_body():
 async def test_failed_fiber_recovers_via_update():
     """A FAILED fiber recovers to ACTIVE when update() supplies a valid config."""
     ctx = Context()
-    StrictPlugin = _strict_plugin_class()
-    fib = ctx.plugin(StrictPlugin, num="not_an_int")
+    StrictComponent = _strict_component_class()
+    fib = ctx.use(StrictComponent, num="not_an_int")
     await ctx.flush()
     assert fib.state == FiberState.FAILED
 
@@ -129,7 +129,7 @@ async def test_failed_fiber_recovers_via_update():
 async def test_await_fiber_returns_fiber():
     """await fiber settles the lifecycle and returns the fiber itself."""
     ctx = Context()
-    fib = ctx.plugin(lambda c: None)
+    fib = ctx.use(lambda c: None)
     result = await fib
     assert result is fib
     assert fib.state == FiberState.ACTIVE
@@ -139,7 +139,7 @@ async def test_await_fiber_returns_fiber():
 async def test_await_alias_returns_fiber():
     """await_() is an alias for await_settle()."""
     ctx = Context()
-    fib = ctx.plugin(lambda c: None)
+    fib = ctx.use(lambda c: None)
     result = await fib.await_()
     assert result is fib
     assert fib.state == FiberState.ACTIVE
@@ -147,7 +147,7 @@ async def test_await_alias_returns_fiber():
 
 @pytest.mark.asyncio
 async def test_await_fiber_rethrows_startup_error():
-    """await fiber rethrows the plugin's startup error."""
+    """await fiber rethrows the component's startup error."""
 
     def failing(c):
         raise RuntimeError("boom")
@@ -165,7 +165,7 @@ async def test_internal_status_two_args():
     ctx = Context()
     events = []
     ctx.on("internal/status", lambda f, old: events.append((f, old)))
-    fib = ctx.plugin(lambda c: None)
+    fib = ctx.use(lambda c: None)
     await ctx.flush()
     assert events == [
         (fib, FiberState.PENDING),
@@ -197,7 +197,7 @@ async def test_root_fiber_uid_zero_and_dispose_restarts():
 async def test_load_on_disposed_returns_none():
     """load() on a DISPOSED fiber returns None."""
     ctx = Context()
-    fib = ctx.plugin(lambda c: None)
+    fib = ctx.use(lambda c: None)
     await ctx.flush()
     await fib.dispose()
     assert await fib.load() is None
@@ -208,7 +208,7 @@ async def test_load_on_disposed_returns_none():
 async def test_dispose_idempotent():
     """Disposing twice is a no-op the second time."""
     ctx = Context()
-    fib = ctx.plugin(lambda c: None)
+    fib = ctx.use(lambda c: None)
     await ctx.flush()
     await fib.dispose()
     await fib.dispose()
@@ -233,12 +233,12 @@ async def test_dispose_fiber_not_in_runtime():
     """Disposing a fiber its runtime does not list leaves the runtime alone."""
     ctx = Context()
 
-    def plugin(c):
+    def component(c):
         pass
 
-    registered = ctx.plugin(plugin)
+    registered = ctx.use(component)
     await ctx.flush()
-    direct = Fiber(ctx, plugin, (), {})
+    direct = Fiber(ctx, component, (), {})
     await direct.load()
     assert direct.state == FiberState.ACTIVE
     await direct.dispose()
@@ -259,7 +259,7 @@ async def test_dispose_after_replace():
         def __init__(self, c):
             pass
 
-    fib = ctx.plugin(V1)
+    fib = ctx.use(V1)
     await ctx.flush()
     await fib.replace(V2)
     assert fib.state == FiberState.ACTIVE
@@ -318,7 +318,7 @@ def test_notify_schedules_load_for_pending_fiber():
         runs.append("ran")
 
     needs_db.inject = ["db"]
-    fib = ctx.plugin(needs_db)
+    fib = ctx.use(needs_db)
     assert fib.state == FiberState.PENDING
     ctx.reflect.provide("db", "connected")
     assert fib.state == FiberState.ACTIVE
@@ -331,11 +331,11 @@ async def test_call_with_config_signature_fallback():
     ctx = Context()
     calls = []
 
-    def plugin(c, config):
+    def component(c, config):
         calls.append(config)
 
-    plugin.__signature__ = 123
-    fib = ctx.plugin(plugin, key="val")
+    component.__signature__ = 123
+    fib = ctx.use(component, key="val")
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     assert calls == [{"key": "val"}]
@@ -368,8 +368,8 @@ async def test_init_hooks_list_and_single():
 
     setattr(SingleHook, symbols["initHooks"], single_hook)
 
-    ctx.plugin(ListHooks)
-    ctx.plugin(SingleHook)
+    ctx.use(ListHooks)
+    ctx.use(SingleHook)
     await ctx.flush()
     assert calls == ["sync", "async", "single"]
 
@@ -392,7 +392,7 @@ async def test_symbol_init_preferred_over_plain_init():
         calls.append("symbol")
 
     setattr(SymbolInit, symbols["init"], symbol_init)
-    fib = ctx.plugin(SymbolInit)
+    fib = ctx.use(SymbolInit)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     assert calls == ["symbol"]
@@ -400,9 +400,9 @@ async def test_symbol_init_preferred_over_plain_init():
 
 @pytest.mark.asyncio
 async def test_invalid_target_value_error():
-    """A non-callable plugin target fails the fiber with a ValueError."""
+    """A non-callable component target fails the fiber with a ValueError."""
     ctx = Context()
-    fib = Fiber(ctx, "not_a_valid_plugin", (), {})
+    fib = Fiber(ctx, "not_a_valid_component", (), {})
     assert await fib.load() is None
     assert fib.state == FiberState.FAILED
     assert isinstance(fib.error, ValueError)
@@ -410,14 +410,14 @@ async def test_invalid_target_value_error():
 
 @pytest.mark.asyncio
 async def test_effect_disposer_returned():
-    """A function plugin may return a disposer; it runs on dispose."""
+    """A function component may return a disposer; it runs on dispose."""
     ctx = Context()
     calls = []
 
-    def plugin(c):
+    def component(c):
         return lambda: calls.append("cleaned")
 
-    fib = ctx.plugin(plugin)
+    fib = ctx.use(component)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     assert len(fib.effects) == 1
@@ -427,17 +427,17 @@ async def test_effect_disposer_returned():
 
 @pytest.mark.asyncio
 async def test_effect_awaitable():
-    """A function plugin may return an awaitable resolving to a disposer."""
+    """A function component may return an awaitable resolving to a disposer."""
     ctx = Context()
     calls = []
 
     async def inner():
         return lambda: calls.append("cleaned")
 
-    async def plugin(c):
+    async def component(c):
         return inner()
 
-    fib = ctx.plugin(plugin)
+    fib = ctx.use(component)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     assert len(fib.effects) == 1
@@ -447,7 +447,7 @@ async def test_effect_awaitable():
 
 @pytest.mark.asyncio
 async def test_effect_async_iterable():
-    """A function plugin may return an async iterable of disposers."""
+    """A function component may return an async iterable of disposers."""
     ctx = Context()
     calls = []
 
@@ -455,10 +455,10 @@ async def test_effect_async_iterable():
         yield lambda: calls.append("d1")
         yield lambda: calls.append("d2")
 
-    def plugin(c):
+    def component(c):
         return gen()
 
-    fib = ctx.plugin(plugin)
+    fib = ctx.use(component)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     assert len(fib.effects) == 2
@@ -477,10 +477,10 @@ async def test_effect_async_iterable_staleness():
         c.fiber._setEpoch("__INACTIVE__")
         yield lambda: calls.append("d2")
 
-    def plugin(c):
+    def component(c):
         return gen(c)
 
-    fib = ctx.plugin(plugin)
+    fib = ctx.use(component)
     await ctx.flush()
     await fib.await_settle()
     assert fib.state == FiberState.PENDING
@@ -493,10 +493,10 @@ async def test_effect_iterable_with_none():
     ctx = Context()
     calls = []
 
-    def plugin(c):
+    def component(c):
         return [lambda: calls.append("d1"), None, lambda: calls.append("d2")]
 
-    fib = ctx.plugin(plugin)
+    fib = ctx.use(component)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     assert len(fib.effects) == 2
@@ -508,11 +508,11 @@ async def test_effect_iterable_with_none():
 async def test_effect_invalid():
     """A non-callable, non-iterable effect fails the fiber with a TypeError."""
 
-    def plugin(c):
+    def component(c):
         return 42
 
     ctx = Context()
-    fib = ctx.plugin(plugin)
+    fib = ctx.use(component)
     await ctx.flush()
     assert fib.state == FiberState.FAILED
     assert isinstance(fib.error, TypeError)
@@ -522,11 +522,11 @@ async def test_effect_invalid():
 async def test_effect_invalid_iterable_item():
     """An iterable effect containing a non-callable fails with a TypeError."""
 
-    def plugin(c):
+    def component(c):
         return [42]
 
     ctx = Context()
-    fib = ctx.plugin(plugin)
+    fib = ctx.use(component)
     await ctx.flush()
     assert fib.state == FiberState.FAILED
     assert isinstance(fib.error, TypeError)
@@ -544,7 +544,7 @@ async def test_update_no_save_skips_commit():
         def __init__(self, c, config=None):
             load_counts.append((config or {}).get("val", 0))
 
-    fib = ctx.plugin(P, val=1)
+    fib = ctx.use(P, val=1)
     await ctx.flush()
     await fib.update({"val": 2}, no_save=True)
     assert committed == []
@@ -565,13 +565,13 @@ async def test_validate_config_non_dict():
     def upper_config(value):
         return value.upper() if isinstance(value, str) else value
 
-    class UpperPlugin:
+    class UpperComponent:
         Config = upper_config
 
         def __init__(self, c, config=None):
             self.config = config
 
-    fib = ctx.plugin(UpperPlugin)
+    fib = ctx.use(UpperComponent)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     assert fib.config == "UPPER_ME"

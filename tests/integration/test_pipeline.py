@@ -63,9 +63,9 @@ async def test_end_to_end_agent_pipeline():
     ctx = Context()
 
     # 1. Mount provider and tool registry
-    _provider_fib = ctx.plugin(MockModelProvider, model_name="anima-core-v1")
-    _tools_fib = ctx.plugin(MockToolRegistry)
-    agent_fib = ctx.plugin(MockAgent)
+    _provider_fib = ctx.use(MockModelProvider, model_name="anima-core-v1")
+    _tools_fib = ctx.use(MockToolRegistry)
+    agent_fib = ctx.use(MockAgent)
 
     await ctx.flush()
 
@@ -106,9 +106,9 @@ async def test_agent_cascade_disposal_and_recovery():
     """Verify cascading unload when an upstream dependency is unmounted, and recovery on re-mount."""
     ctx = Context()
 
-    provider_fib = ctx.plugin(MockModelProvider)
-    _tools_fib = ctx.plugin(MockToolRegistry)
-    agent_fib = ctx.plugin(MockAgent)
+    provider_fib = ctx.use(MockModelProvider)
+    _tools_fib = ctx.use(MockToolRegistry)
+    agent_fib = ctx.use(MockAgent)
     await ctx.flush()
 
     assert agent_fib.state == FiberState.ACTIVE
@@ -121,7 +121,7 @@ async def test_agent_cascade_disposal_and_recovery():
     assert agent_fib.state == FiberState.PENDING
 
     # Re-mount a new provider instance -> the original agent recovers
-    _new_provider_fib = ctx.plugin(MockModelProvider, model_name="anima-v2")
+    _new_provider_fib = ctx.use(MockModelProvider, model_name="anima-v2")
     await ctx.flush()
     await agent_fib.await_settle()
 
@@ -136,8 +136,8 @@ async def test_subagent_service_isolation_realms():
     parent_ctx = Context()
 
     # Root services
-    parent_ctx.plugin(MockModelProvider, model_name="global-llm")
-    parent_ctx.plugin(MockToolRegistry)
+    parent_ctx.use(MockModelProvider, model_name="global-llm")
+    parent_ctx.use(MockToolRegistry)
     await parent_ctx.flush()
 
     parent_ctx.tools.register("global_tool", lambda: "global_tool_output")
@@ -149,7 +149,7 @@ async def test_subagent_service_isolation_realms():
     assert not subagent_ctx.has("tools")
 
     # Subagent gets its own tools service
-    subagent_ctx.plugin(MockToolRegistry)
+    subagent_ctx.use(MockToolRegistry)
     await subagent_ctx.flush()
 
     assert subagent_ctx.has("tools")
@@ -218,7 +218,7 @@ async def test_full_microkernel_ecosystem_integration(tmp_path: Path):
 
     profile_data = {
         "env": {"TEST_INTERVAL": "0.01", "CUSTOM_LABEL": "eco_test"},
-        "plugins": [
+        "components": [
             {"id": "log_svc", "target": "logger"},
             {"id": "time_svc", "target": "timer"},
             {"id": "watch_svc", "target": "watcher"},
@@ -227,7 +227,7 @@ async def test_full_microkernel_ecosystem_integration(tmp_path: Path):
                 "target": "group",
                 "entries": [
                     {
-                        "id": "group_plugin",
+                        "id": "group_component",
                         "target": "tests.integration.test_pipeline:MockToolRegistry",
                     }
                 ],
@@ -285,11 +285,11 @@ async def test_full_microkernel_ecosystem_integration(tmp_path: Path):
 
     # Dynamic group disable and re-enable
     group_entry = loader.fibers["work_group"].target
-    assert "group_plugin" in group_entry.entries
-    await group_entry.disable("group_plugin")
-    assert group_entry.entries["group_plugin"].disabled is True
-    await group_entry.enable("group_plugin")
-    assert group_entry.entries["group_plugin"].disabled is False
+    assert "group_component" in group_entry.entries
+    await group_entry.disable("group_component")
+    assert group_entry.entries["group_component"].disabled is True
+    await group_entry.enable("group_component")
+    assert group_entry.entries["group_component"].disabled is False
 
     # Unload and clean up root
     await ctx.root.flush()
@@ -300,8 +300,8 @@ async def test_extended_ecosystem_network_cli_and_schema_integration(tmp_path: P
     """End-to-end integration scenario across Schema, Include, Server, HTTP, CLI, and IoC."""
     import asyncio
 
-    # 1. Config Schema Validation on Plugin
-    class SecureGatewayPlugin:
+    # 1. Config Schema Validation on Component
+    class SecureGatewayComponent:
         name = "secure_gateway"
         Config = z.object(
             {
@@ -318,9 +318,9 @@ async def test_extended_ecosystem_network_cli_and_schema_integration(tmp_path: P
     ctx = Context()
 
     # Valid config (validation is lazy, so flush before reading defaults)
-    fib_valid = ctx.plugin(SecureGatewayPlugin, port=9000, api_key="secret-key-123")
+    fib_valid = ctx.use(SecureGatewayComponent, port=9000, api_key="secret-key-123")
     # Invalid config (missing required field api_key causes fiber to enter FAILED state)
-    fib_invalid = ctx.plugin(SecureGatewayPlugin, port=9000)
+    fib_invalid = ctx.use(SecureGatewayComponent, port=9000)
     await ctx.flush()
     assert fib_valid.config["port"] == 9000
     assert fib_valid.config["api_key"] == "secret-key-123"

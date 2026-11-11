@@ -45,7 +45,7 @@ class MockLogger(Service):
 @pytest.mark.asyncio
 async def test_service_registration_and_root():
     ctx = Context()
-    fiber = ctx.plugin(MockGreeter)
+    fiber = ctx.use(MockGreeter)
     await fiber.load()
 
     assert ctx.has("greeter")
@@ -65,7 +65,7 @@ async def test_missing_service_attribute_error():
 
 
 @pytest.mark.asyncio
-async def test_plugin_target_variations():
+async def test_component_target_variations():
     ctx = Context()
     records = []
 
@@ -86,29 +86,29 @@ async def test_plugin_target_variations():
             records.append("object_apply_ran")
 
     # 3. Target as a callable / function
-    def func_plugin(c: Context):
-        records.append("func_plugin_ran")
+    def func_component(c: Context):
+        records.append("func_component_ran")
 
-    f1 = ctx.plugin(ClassWithInit)
-    f2 = ctx.plugin(ObjectTarget())
-    f3 = ctx.plugin(func_plugin)
+    f1 = ctx.use(ClassWithInit)
+    f2 = ctx.use(ObjectTarget())
+    f3 = ctx.use(func_component)
     await ctx.flush()
 
-    assert records == ["class_init_ran", "object_apply_ran", "func_plugin_ran"]
+    assert records == ["class_init_ran", "object_apply_ran", "func_component_ran"]
     assert f1.state == FiberState.ACTIVE
     assert f2.state == FiberState.ACTIVE
     assert f3.state == FiberState.ACTIVE
 
     # 4. Target that is invalid (neither callable nor has apply)
     with pytest.raises(ValueError, match="must be a callable or class"):
-        invalid_fib = ctx.plugin("not_a_valid_plugin")
+        invalid_fib = ctx.use("not_a_valid_component")
         await invalid_fib.load()
 
 
 @pytest.mark.asyncio
-async def test_plugin_load_and_dispose_reentrant():
+async def test_component_load_and_dispose_reentrant():
     ctx = Context()
-    fiber = ctx.plugin(MockGreeter)
+    fiber = ctx.use(MockGreeter)
     await fiber.load()
     assert fiber.state == FiberState.ACTIVE
 
@@ -130,14 +130,14 @@ async def test_child_fiber_nested_disposal():
     ctx = Context()
     actions = []
 
-    def parent_plugin(p_ctx: Context):
-        def child_plugin(c_ctx: Context):
+    def parent_component(p_ctx: Context):
+        def child_component(c_ctx: Context):
             c_ctx.effect(lambda: lambda: actions.append("child_disposed"))
 
-        p_ctx.plugin(child_plugin)
+        p_ctx.use(child_component)
         p_ctx.effect(lambda: lambda: actions.append("parent_disposed"))
 
-    parent_fib = ctx.plugin(parent_plugin)
+    parent_fib = ctx.use(parent_component)
     await ctx.flush()
 
     assert len(parent_fib.child_fibers) == 1
@@ -155,13 +155,13 @@ async def test_child_fiber_nested_disposal():
 async def test_disposer_exception_handled():
     ctx = Context()
 
-    def bad_disposer_plugin(c: Context):
+    def bad_disposer_component(c: Context):
         def failing_disposer():
             raise RuntimeError("Disposer failure")
 
         c.effect(lambda: failing_disposer)
 
-    fiber = ctx.plugin(bad_disposer_plugin)
+    fiber = ctx.use(bad_disposer_component)
     await ctx.flush()
 
     # Disposal should not raise or abort
@@ -174,12 +174,12 @@ async def test_manual_effect_cleanup_call():
     ctx = Context()
     cleaned = []
 
-    def my_plugin(c: Context):
+    def my_component(c: Context):
         disposer = c.effect(lambda: lambda: cleaned.append(1))
-        # Call disposer manually before plugin unload
+        # Call disposer manually before component unload
         disposer()
 
-    fiber = ctx.plugin(my_plugin)
+    fiber = ctx.use(my_component)
     await ctx.flush()
     assert cleaned == [1]
 
@@ -191,7 +191,7 @@ async def test_manual_effect_cleanup_call():
 @pytest.mark.asyncio
 async def test_context_extend_and_inheritance():
     root = Context()
-    root.plugin(MockGreeter)
+    root.use(MockGreeter)
     await root.flush()
 
     child = root.extend()
@@ -201,7 +201,7 @@ async def test_context_extend_and_inheritance():
     assert child.greeter.greet("Child") == "Hello, Child!"
 
     # Child can register its own service
-    child.plugin(MockLogger)
+    child.use(MockLogger)
     await child.flush()
 
     assert child.has("logger")
@@ -211,8 +211,8 @@ async def test_context_extend_and_inheritance():
 @pytest.mark.asyncio
 async def test_context_isolate_realms():
     root = Context()
-    root.plugin(MockGreeter)
-    root.plugin(MockLogger)
+    root.use(MockGreeter)
+    root.use(MockLogger)
     await root.flush()
 
     # Isolate greeter
@@ -229,7 +229,7 @@ async def test_context_isolate_realms():
         def greet(self, name: str) -> str:
             return f"Isolated {name}"
 
-    isolated.plugin(ChildGreeter)
+    isolated.use(ChildGreeter)
     await isolated.flush()
 
     assert isolated.greeter.greet("Bob") == "Isolated Bob"
@@ -244,20 +244,20 @@ async def test_config_validation_with_pydantic():
         host: str
         port: int = 8000
 
-    class ServerPlugin:
+    class ServerComponent:
         Config = ServerConfig
 
         def __init__(self, c: Context, **cfg):
             self.cfg = cfg
 
     # Valid kwargs
-    f_ok = ctx.plugin(ServerPlugin, host="localhost", port=3000)
+    f_ok = ctx.use(ServerComponent, host="localhost", port=3000)
     await ctx.flush()
     assert f_ok.state == FiberState.ACTIVE
     assert f_ok.config.port == 3000
 
     # Invalid kwargs
-    f_err = ctx.plugin(ServerPlugin, port="invalid_int")
+    f_err = ctx.use(ServerComponent, port="invalid_int")
     await ctx.flush()
     assert f_err.state == FiberState.FAILED
     assert isinstance(f_err.error, PydanticValidationError)
@@ -268,13 +268,13 @@ async def test_dependency_unregistration_cascade():
     ctx = Context()
     disposed_items = []
 
-    def dependent_plugin(c: Context):
+    def dependent_component(c: Context):
         c.effect(lambda: lambda: disposed_items.append("dependent_cleaned"))
 
-    dependent_plugin.inject = ["greeter"]
+    dependent_component.inject = ["greeter"]
 
-    g_fiber = ctx.plugin(MockGreeter)
-    d_fiber = ctx.plugin(dependent_plugin)
+    g_fiber = ctx.use(MockGreeter)
+    d_fiber = ctx.use(dependent_component)
     await ctx.flush()
 
     assert g_fiber.state == FiberState.ACTIVE
@@ -289,7 +289,7 @@ async def test_dependency_unregistration_cascade():
     assert disposed_items == ["dependent_cleaned"]
 
     # Re-providing the service reloads the dependent.
-    ctx.plugin(MockGreeter)
+    ctx.use(MockGreeter)
     await ctx.flush()
     await d_fiber.await_settle()
     assert d_fiber.state == FiberState.ACTIVE
@@ -298,7 +298,7 @@ async def test_dependency_unregistration_cascade():
 @pytest.mark.asyncio
 async def test_dump_tree_and_status():
     ctx = Context()
-    ctx.plugin(MockGreeter)
+    ctx.use(MockGreeter)
     await ctx.flush()
 
     tree = ctx.dump_tree()
@@ -316,11 +316,11 @@ async def test_fiber_load_failure():
     """Test Fiber.load() failure transitions to FAILED state (lines 259-264)."""
     ctx = Context()
 
-    def failing_plugin(c: Context):
+    def failing_component(c: Context):
         raise RuntimeError("boom")
 
-    fiber = Fiber(ctx, failing_plugin, (), {})
-    # load() does not raise on plugin failure; the error is stored and
+    fiber = Fiber(ctx, failing_component, (), {})
+    # load() does not raise on component failure; the error is stored and
     # rethrown by await_settle().
     assert await fiber.load() is None
     assert fiber.state == FiberState.FAILED
@@ -344,10 +344,10 @@ class TestFiberLifecycleInternals:
         """Test await_settle() rethrows stored startup error."""
         ctx = Context()
 
-        def failing_plugin(c: Context):
+        def failing_component(c: Context):
             raise ValueError("startup failed")
 
-        fiber = Fiber(ctx, failing_plugin, (), {})
+        fiber = Fiber(ctx, failing_component, (), {})
         assert await fiber.load() is None
         assert fiber.state == FiberState.FAILED
         with pytest.raises(ValueError, match="startup failed"):
@@ -573,7 +573,7 @@ async def test_fiber_load_with_unsatisfied_dependencies():
 
 
 @pytest.mark.asyncio
-async def test_async_object_and_callable_plugin_and_async_disposer():
+async def test_async_object_and_callable_component_and_async_disposer():
     ctx = Context()
     events = []
 
@@ -582,7 +582,7 @@ async def test_async_object_and_callable_plugin_and_async_disposer():
         async def apply(self, c: Context):
             events.append("async_obj_applied")
 
-    # Async callable plugin (line 130)
+    # Async callable component (line 130)
     async def async_func(c: Context):
         events.append("async_func_applied")
 
@@ -593,8 +593,8 @@ async def test_async_object_and_callable_plugin_and_async_disposer():
 
         c.effect(lambda: async_cleanup)
 
-    _f_obj = ctx.plugin(AsyncObj())
-    f_func = ctx.plugin(async_func)
+    _f_obj = ctx.use(AsyncObj())
+    f_func = ctx.use(async_func)
     await ctx.flush()
 
     assert "async_obj_applied" in events
@@ -605,9 +605,9 @@ async def test_async_object_and_callable_plugin_and_async_disposer():
 
 
 def test_sync_schedule_task_fallback():
-    # Calling ctx.plugin outside of a running asyncio loop triggers RuntimeError -> asyncio.run fallback (lines 236-238)
+    # Calling ctx.use outside of a running asyncio loop triggers RuntimeError -> asyncio.run fallback (lines 236-238)
     ctx = Context()
-    fiber = ctx.plugin(MockGreeter)
+    fiber = ctx.use(MockGreeter)
     assert ctx.has("greeter")
     assert fiber.state == FiberState.ACTIVE
 
@@ -615,8 +615,8 @@ def test_sync_schedule_task_fallback():
 @pytest.mark.asyncio
 async def test_private_attribute_and_isolated_services_dict():
     root = Context()
-    root.plugin(MockGreeter)
-    root.plugin(MockLogger)
+    root.use(MockGreeter)
+    root.use(MockLogger)
     await root.flush()
 
     # Private nonexistent attribute lookup raises AttributeError via super().__getattribute__ (line 260)
@@ -668,18 +668,18 @@ async def test_context_parallel_and_bail_delegation():
 
 
 @pytest.mark.asyncio
-async def test_class_plugin_sync_apply_and_disposer_idempotent():
+async def test_class_component_sync_apply_and_disposer_idempotent():
     ctx = Context()
 
-    # Synchronous apply on class plugin (branch 118->135)
-    class SyncClassPlugin:
+    # Synchronous apply on class component (branch 118->135)
+    class SyncClassComponent:
         def __init__(self, c: Context):
             pass
 
         def apply(self, c: Context):
             return "sync_done"
 
-    f = ctx.plugin(SyncClassPlugin)
+    f = ctx.use(SyncClassComponent)
     await ctx.flush()
     assert f.state == FiberState.ACTIVE
 
@@ -716,11 +716,11 @@ async def test_fiber_resolve_config_waterfall():
         lambda cfg, next: config_holder.update(cfg) or next(cfg),
     )
 
-    class ConfigPlugin:
+    class ConfigComponent:
         def __init__(self, c: Context, **cfg):
             self.cfg = cfg
 
-    fib = ctx.plugin(ConfigPlugin, foo="bar")
+    fib = ctx.use(ConfigComponent, foo="bar")
     await ctx.flush()
 
     assert fib.state == FiberState.ACTIVE
@@ -741,7 +741,7 @@ async def test_context_intercept_and_resolve():
         def config(self):
             return self.resolve_intercept()
 
-    ctx.plugin(InterceptableService)
+    ctx.use(InterceptableService)
     await ctx.flush()
 
     assert ctx.target.config() == {}
@@ -767,7 +767,7 @@ async def test_context_intercept_custom_merge():
                 tags.extend(cfg.get("tags", []))
             return {"tags": tags}
 
-    ctx.plugin(CustomMergeService)
+    ctx.use(CustomMergeService)
     await ctx.flush()
 
     child = ctx.intercept("custom_svc", {"tags": ["root"]}).intercept(
@@ -806,26 +806,26 @@ async def test_inject_decorator():
     from anima.core import inject as inject_dec
 
     @inject_dec("db", auth={"roles": ["admin"]})
-    class DecoratedPlugin:
+    class DecoratedComponent:
         def __init__(self, ctx: Context):
             self.ctx = ctx
 
-    assert "db" in DecoratedPlugin.inject
-    assert "auth" in DecoratedPlugin.inject
-    assert DecoratedPlugin.inject_config == {"auth": {"roles": ["admin"]}}
+    assert "db" in DecoratedComponent.inject
+    assert "auth" in DecoratedComponent.inject
+    assert DecoratedComponent.inject_config == {"auth": {"roles": ["admin"]}}
 
     # Decorator on target that already has inject list
     @inject_dec("cache")
-    class AnotherPlugin:
+    class AnotherComponent:
         inject: ClassVar[list[str]] = ["db"]
 
-    assert AnotherPlugin.inject == ["db", "cache"]
+    assert AnotherComponent.inject == ["db", "cache"]
 
     # Decorator with no existing inject or invalid existing
-    class PlainPlugin:
+    class PlainComponent:
         inject = 123  # not a sequence
 
-    decorated = inject_dec("svc")(PlainPlugin)
+    decorated = inject_dec("svc")(PlainComponent)
     assert decorated.inject == ["svc"]
 
 
@@ -835,13 +835,13 @@ async def test_fiber_restart_and_update():
     load_counts = []
     received_updates = []
 
-    class UpdatablePlugin:
+    class UpdatableComponent:
         def __init__(self, c: Context, config: dict[str, Any] | None = None):
             self.c = c
             self.cfg = dict(config or {})
             load_counts.append(self.cfg.get("val", 0))
 
-    fib = ctx.plugin(UpdatablePlugin, val=1)
+    fib = ctx.use(UpdatableComponent, val=1)
     await ctx.flush()
     assert load_counts == [1]
 
@@ -851,7 +851,7 @@ async def test_fiber_restart_and_update():
     assert load_counts == [1, 1]
 
     # Restart on a disposed fiber raises
-    disposed_fib = ctx.plugin(lambda c: None)
+    disposed_fib = ctx.use(lambda c: None)
     await ctx.flush()
     await disposed_fib.dispose()
     with pytest.raises(AnimaError):
@@ -884,13 +884,13 @@ async def test_fiber_restart_and_update():
     class StrictConfig(BaseModel):
         num: int
 
-    class StrictPlugin:
+    class StrictComponent:
         Config = StrictConfig
 
         def __init__(self, c: Context, config: dict[str, Any] | None = None):
             pass
 
-    strict_fib = ctx.plugin(StrictPlugin, num=10)
+    strict_fib = ctx.use(StrictComponent, num=10)
     await ctx.flush()
     assert strict_fib.state == FiberState.ACTIVE
 
@@ -901,7 +901,7 @@ async def test_fiber_restart_and_update():
 
     # A FAILED fiber recovers via update() with a good config; a bad
     # config keeps it FAILED without raising (deferred resolution).
-    bad_fib = ctx.plugin(StrictPlugin, num="not_an_int")
+    bad_fib = ctx.use(StrictComponent, num="not_an_int")
     await ctx.flush()
     assert bad_fib.state == FiberState.FAILED
 
@@ -920,7 +920,7 @@ async def test_fiber_restart_and_update():
         pass
 
     needs_service.inject = ["special_svc"]
-    pending_fib = ctx.plugin(needs_service, val=5)
+    pending_fib = ctx.use(needs_service, val=5)
     await ctx.flush()
     assert pending_fib.state == FiberState.PENDING
 
@@ -954,11 +954,11 @@ async def test_default_restart_on_unhandled_update():
     ctx = Context()
     reloads = []
 
-    class SimpleReloadPlugin:
+    class SimpleReloadComponent:
         def __init__(self, c: Context, config: dict[str, Any] | None = None):
             reloads.append((config or {}).get("tag", "initial"))
 
-    fib = ctx.plugin(SimpleReloadPlugin, tag="v1")
+    fib = ctx.use(SimpleReloadComponent, tag="v1")
     await ctx.flush()
     assert reloads == ["v1"]
 
@@ -980,7 +980,7 @@ async def test_bound_service_and_intercept_edge_cases():
         def __call__(self, x: int) -> int:
             return x + self.value
 
-    ctx.plugin(CallableService)
+    ctx.use(CallableService)
     await ctx.flush()
 
     bound = ctx.callable_svc
@@ -1010,9 +1010,9 @@ async def test_bound_service_and_intercept_edge_cases():
 
             c_ctx.effect(lambda: async_disposer)
 
-        p_ctx.plugin(inner_child)
+        p_ctx.use(inner_child)
 
-    p_fib = ctx.plugin(parent_with_child)
+    p_fib = ctx.use(parent_with_child)
     await ctx.flush()
     await p_fib.restart()
     assert "child_unloaded" in async_unloads
@@ -1020,13 +1020,13 @@ async def test_bound_service_and_intercept_edge_cases():
     # Service with dict inject
     results = []
 
-    class DictInjectPlugin:
+    class DictInjectComponent:
         inject: ClassVar[dict[str, Any]] = {"callable_svc": {"override": True}}
 
         def __init__(self, c: Context):
             results.append(c.resolve_intercept("callable_svc"))
 
-    ctx.plugin(DictInjectPlugin)
+    ctx.use(DictInjectComponent)
     await ctx.flush()
     assert results == [{"override": True}]
 
@@ -1037,13 +1037,13 @@ async def test_bound_service_and_intercept_edge_cases():
     assert bound.merge_intercept("invalid_cfg") == {}
 
     # Disposer exception in _unload handled safely
-    def failing_disposer_plugin(c: Context):
+    def failing_disposer_component(c: Context):
         def bad():
             raise RuntimeError("unload error")
 
         c.effect(lambda: bad)
 
-    fail_fib = ctx.plugin(failing_disposer_plugin)
+    fail_fib = ctx.use(failing_disposer_component)
     await ctx.flush()
     await fail_fib.restart()
     assert fail_fib.state == FiberState.ACTIVE
@@ -1053,7 +1053,7 @@ async def test_bound_service_and_intercept_edge_cases():
         pass
 
     pending_target.inject = ["callable_svc"]
-    f_pend = ctx.plugin(pending_target)
+    f_pend = ctx.use(pending_target)
     await ctx.flush()
     f_pend.state = FiberState.PENDING
     await f_pend.update({})
@@ -1061,19 +1061,19 @@ async def test_bound_service_and_intercept_edge_cases():
     assert f_pend.state == FiberState.ACTIVE
 
     # Synchronous disposer in _unload
-    def sync_disposer_plugin(c: Context):
+    def sync_disposer_component(c: Context):
         c.effect(lambda: lambda: None)
 
-    f_sync = ctx.plugin(sync_disposer_plugin)
+    f_sync = ctx.use(sync_disposer_component)
     await ctx.flush()
     await f_sync.restart()
 
     # Restart when dependencies unsatisfied
-    def dep_restart_plugin(c: Context):
+    def dep_restart_component(c: Context):
         pass
 
-    dep_restart_plugin.inject = ["missing_dep"]
-    f_missing = ctx.plugin(dep_restart_plugin)
+    dep_restart_component.inject = ["missing_dep"]
+    f_missing = ctx.use(dep_restart_component)
     f_missing.state = FiberState.ACTIVE
     await f_missing.restart()
     assert f_missing.state == FiberState.PENDING
@@ -1092,26 +1092,26 @@ async def test_bound_service_and_intercept_edge_cases():
             edge_results.append(c.resolve_intercept("callable_svc"))
             edge_results.append(c.resolve_intercept("not_in_config"))
 
-    ctx.plugin(InjectConfigEdgeCases)
+    ctx.use(InjectConfigEdgeCases)
     await ctx.flush()
     assert edge_results == [{}, {}]
 
     # Fiber with None inject_config calling resolve_intercept
-    class NoConfigPlugin:
+    class NoConfigComponent:
         def __init__(self, c: Context):
             _ = c.resolve_intercept("callable_svc")
 
-    ctx.plugin(NoConfigPlugin)
+    ctx.use(NoConfigComponent)
     await ctx.flush()
 
     # Decorator when key in dep_configs is already in deps
     from anima.core import inject as inject_dec
 
     @inject_dec("existing_key", existing_key={"k": "v"})
-    class PreExistingKeyPlugin:
+    class PreExistingKeyComponent:
         pass
 
-    assert PreExistingKeyPlugin.inject == ["existing_key"]
+    assert PreExistingKeyComponent.inject == ["existing_key"]
 
 
 @pytest.mark.asyncio
@@ -1123,27 +1123,27 @@ async def test_fiber_replace_and_context_all_fibers():
 
     events = []
 
-    class PluginV1:
+    class ComponentV1:
         inject: ClassVar[list[str]] = ["test_svc"]
 
         def __init__(self, c: Context):
             events.append("v1_init")
 
-    class PluginV2:
+    class ComponentV2:
         inject: ClassVar[dict[str, Any]] = {"test_svc": {"mode": "fast"}}
 
         def __init__(self, c: Context):
             events.append("v2_init")
 
-    class PluginV3:
+    class ComponentV3:
         # No inject
         def __init__(self, c: Context):
             events.append("v3_init")
 
     ctx.provide("test_svc", "active")
 
-    fib1 = ctx.plugin(PluginV1)
-    fib2 = child_ctx.plugin(PluginV3)
+    fib1 = ctx.use(ComponentV1)
+    fib2 = child_ctx.use(ComponentV3)
     await ctx.flush()
 
     assert events == ["v1_init", "v3_init"]
@@ -1151,26 +1151,26 @@ async def test_fiber_replace_and_context_all_fibers():
     assert fib1 in all_f
     assert fib2 in all_f
 
-    # Replace PluginV1 with PluginV2 (dict inject)
-    await fib1.replace(PluginV2)
+    # Replace ComponentV1 with ComponentV2 (dict inject)
+    await fib1.replace(ComponentV2)
     assert events == ["v1_init", "v3_init", "v2_init"]
-    assert fib1.name == "PluginV2"
+    assert fib1.name == "ComponentV2"
     assert fib1.inject == ["test_svc"]
     assert fib1.inject_config == {"test_svc": {"mode": "fast"}}
 
-    # Replace with PluginV3 (no inject)
-    await fib1.replace(PluginV3)
+    # Replace with ComponentV3 (no inject)
+    await fib1.replace(ComponentV3)
     assert events == ["v1_init", "v3_init", "v2_init", "v3_init"]
     assert fib1.inject == []
 
-    # Replace with PluginV1 (list inject)
-    await fib1.replace(PluginV1)
+    # Replace with ComponentV1 (list inject)
+    await fib1.replace(ComponentV1)
     assert fib1.inject == ["test_svc"]
     assert events == ["v1_init", "v3_init", "v2_init", "v3_init", "v1_init"]
 
     # Replace on disposed fiber is no-op
     await fib1.dispose()
-    await fib1.replace(PluginV1)
+    await fib1.replace(ComponentV1)
     assert events == ["v1_init", "v3_init", "v2_init", "v3_init", "v1_init"]
 
 
@@ -1190,14 +1190,14 @@ async def test_context_fiber_scope_and_filtering():
     raw_child = Context(parent=ctx)
     assert raw_child.fiber is root_fiber
 
-    # 3. Inside plugin load, ctx.fiber is the plugin fiber
+    # 3. Inside component load, ctx.fiber is the component fiber
     observed_fibers = []
 
-    def sample_plugin(c: Context):
+    def sample_component(c: Context):
         observed_fibers.append(c.fiber)
         assert c.scope is c.fiber
 
-    p_fib = ctx.plugin(sample_plugin)
+    p_fib = ctx.use(sample_component)
     await ctx.flush()
     assert len(observed_fibers) == 1
     assert observed_fibers[0] is p_fib
@@ -1261,7 +1261,7 @@ async def test_bound_service_async_method_and_call():
             prefix = resolved.get("prefix", "")
             return f"{prefix}call:{val}"
 
-    ctx.plugin(AsyncService)
+    ctx.use(AsyncService)
     await ctx.flush()
 
     child = ctx.intercept("async_svc", {"prefix": "intercepted:"})
@@ -1285,13 +1285,13 @@ async def test_bound_service_async_method_and_call():
 async def test_fiber_non_callable_config():
     ctx = Context()
 
-    class NonCallableConfigPlugin:
+    class NonCallableConfigComponent:
         Config = 12345
 
         def __init__(self, c: Context):
             pass
 
-    fib = ctx.plugin(NonCallableConfigPlugin)
+    fib = ctx.use(NonCallableConfigComponent)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
 
@@ -1342,7 +1342,7 @@ class TestIsJsExpr:
 class TestFiberEffect:
     def test_fiber_effect_basic(self):
         ctx = Context()
-        fib = ctx.plugin(CoreService)
+        fib = ctx.use(CoreService)
         assert fib.state == FiberState.ACTIVE
 
         result = []
@@ -1352,7 +1352,7 @@ class TestFiberEffect:
 
     def test_fiber_effect_stores_metadata(self):
         ctx = Context()
-        fib = ctx.plugin(CoreService)
+        fib = ctx.use(CoreService)
 
         wrapper = fib.effect(lambda: None, label="my_effect")
         meta = getattr(wrapper, symbols["effect"], None)
@@ -1362,7 +1362,7 @@ class TestFiberEffect:
 
     def test_fiber_get_effects(self):
         ctx = Context()
-        fib = ctx.plugin(CoreService)
+        fib = ctx.use(CoreService)
 
         fib.effect(lambda: None, label="effect1")
         fib.effect(lambda: None, label="effect2")
@@ -1376,7 +1376,7 @@ class TestFiberEffect:
     async def test_fiber_effect_wrapper_called_on_dispose(self):
         """Test that effect wrapper is called when fiber is disposed."""
         ctx = Context()
-        fib = ctx.plugin(CoreService)
+        fib = ctx.use(CoreService)
 
         wrapper_called = []
         fib.effect(
@@ -1447,11 +1447,11 @@ class TestFiberValidateSchema:
         """Test Schema instance as Config goes through isinstance branch."""
         ctx = Context()
 
-        class SchemaConfigPlugin:
+        class SchemaConfigComponent:
             name = "schema_config"
             Config = Schema.string().required()
 
-        fib = ctx.plugin(SchemaConfigPlugin)
+        fib = ctx.use(SchemaConfigComponent)
         await ctx.flush()
         # Schema.string().required() validates raw_config={} which fails
         assert fib.state == FiberState.FAILED
@@ -1464,13 +1464,13 @@ class TestFiberValidateConfigSchema:
     async def test_fiber_validate_config_schema_failure(self):
         ctx = Context()
 
-        class BadConfigPlugin:
+        class BadConfigComponent:
             name = "bad_config"
 
             class Config(BaseModel):
                 required_field: str
 
-        fib = ctx.plugin(BadConfigPlugin)
+        fib = ctx.use(BadConfigComponent)
         await ctx.flush()
         assert fib.state == FiberState.FAILED
         assert fib.error is not None
@@ -1479,7 +1479,7 @@ class TestFiberValidateConfigSchema:
 class TestFiberEffectException:
     def test_fiber_effect_exception(self):
         ctx = Context()
-        fib = ctx.plugin(CoreService)
+        fib = ctx.use(CoreService)
 
         def raising_effect():
             raise RuntimeError("effect error")
@@ -1600,14 +1600,14 @@ class TestFiberValidateSchemaSuccess:
         """Test Schema validation success path (line 167 return)."""
         ctx = Context()
 
-        class GoodSchemaPlugin:
+        class GoodSchemaComponent:
             name = "good_schema"
             Config = Schema.object({"name": Schema.string()})
 
             def __init__(self, c: Context, **cfg):
                 self.c = c
 
-        fib = ctx.plugin(GoodSchemaPlugin, name="hello")
+        fib = ctx.use(GoodSchemaComponent, name="hello")
         await ctx.flush()
         assert fib.state == FiberState.ACTIVE
 
@@ -1615,7 +1615,7 @@ class TestFiberValidateSchemaSuccess:
 class TestFiberAssertActive:
     def test_fiber_assert_active_raises(self):
         ctx = Context()
-        fib = ctx.plugin(CoreService)
+        fib = ctx.use(CoreService)
         # Manually set uid to None to simulate disposed fiber
         fib.uid = None
         with pytest.raises(AnimaError):
@@ -1857,7 +1857,7 @@ class TestContextGetSet:
         assert ctx.get("renamed_svc") is svc
 
 
-class TestCliEnvPlugin:
+class TestCliEnvComponent:
     def test_cli_env_load_cascade(self):
         """Test cli_env.load_env_cascade function."""
         import os
@@ -1872,11 +1872,11 @@ class TestCliEnvPlugin:
             assert merged["HELLO"] == "world"
             assert merged["FOO"] == "bar"
 
-    def test_cli_env_plugin_mount(self):
-        """Test CliEnv plugin mounting."""
+    def test_cli_env_component_mount(self):
+        """Test CliEnv component mounting."""
 
         ctx = Context()
-        fiber = ctx.plugin(CliEnv)
+        fiber = ctx.use(CliEnv)
         assert fiber.state == FiberState.ACTIVE
         assert ctx.env is not None
         assert ctx.env == os.environ
@@ -2075,8 +2075,8 @@ class TestServiceInit:
                 init_called.append("init_called")
                 return "init_result"
 
-        fib = ctx.plugin(InitService)
-        # Manually trigger load since plugin() may not auto-load in test context
+        fib = ctx.use(InitService)
+        # Manually trigger load since use() may not auto-load in test context
         import asyncio
 
         asyncio.run(fib.load())
@@ -2095,7 +2095,7 @@ class TestServiceInit:
                 init_called.append("async_init_called")
                 return "async_init_result"
 
-        fib = ctx.plugin(AsyncInitService)
+        fib = ctx.use(AsyncInitService)
         import asyncio
 
         asyncio.run(fib.load())
@@ -2109,7 +2109,7 @@ class TestServiceInit:
             def __init__(self, c: Context):
                 super().__init__(c, "no_init_svc")
 
-        fib = ctx.plugin(NoInitService)
+        fib = ctx.use(NoInitService)
         import asyncio
 
         asyncio.run(fib.load())
@@ -2117,15 +2117,15 @@ class TestServiceInit:
 
 
 @pytest.mark.asyncio
-async def test_fiber_load_context_as_plugin():
-    """Mounting a Context as a plugin must load to ACTIVE, not recurse.
+async def test_fiber_load_context_as_component():
+    """Mounting a Context as a component must load to ACTIVE, not recurse.
 
     Regression: Fiber.load probes getattr(instance, "init", None); a Context
     instance has no "init", and the reflect special-property branch re-entered
     Context.__getattr__ forever (RecursionError), marking the fiber FAILED.
     """
     ctx = Context()
-    fiber = ctx.plugin(Context)
+    fiber = ctx.use(Context)
     await fiber.load()
     assert fiber.state == FiberState.ACTIVE
 

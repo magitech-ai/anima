@@ -13,7 +13,7 @@ from anima.watcher import WatchEntry, WatcherService
 @pytest.mark.asyncio
 async def test_watcher_service_directory_lifecycle(tmp_path: Path):
     ctx = Context()
-    ctx.plugin(WatcherService)
+    ctx.use(WatcherService)
     await ctx.flush()
     watcher: WatcherService = ctx.watcher
 
@@ -260,7 +260,7 @@ async def test_watcher_error_handling_and_edge_cases(tmp_path: Path):
 
     # Context disposal effect triggers watcher.stop
     new_ctx = Context()
-    fib = new_ctx.plugin(WatcherService)
+    fib = new_ctx.use(WatcherService)
     await new_ctx.flush()
     watcher_instance: WatcherService = new_ctx.watcher
     watcher_instance.watch(test_file, interval=0.01)

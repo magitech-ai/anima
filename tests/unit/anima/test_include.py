@@ -39,7 +39,7 @@ def test_resolve_single_and_nested_includes(tmp_path: Path):
 
     main_path = tmp_path / "main.yaml"
     main_path.write_text(
-        "plugins:\n  - $include: ./modules/worker.yaml\n  - name: timer\n",
+        "components:\n  - $include: ./modules/worker.yaml\n  - name: timer\n",
         encoding="utf-8",
     )
 
@@ -48,7 +48,7 @@ def test_resolve_single_and_nested_includes(tmp_path: Path):
 
     resolved = inc.resolve(main_path)
     assert resolved == {
-        "plugins": [
+        "components": [
             {
                 "name": "worker_service",
                 "config": {
@@ -129,16 +129,16 @@ def test_diff_entries_and_journal():
 
 def test_apply_patch():
     base_entries = [
-        {"id": "plugin-1", "name": "logger", "config": {"level": "info"}},
-        {"id": "plugin-2", "name": "watcher", "disabled": True},
+        {"id": "component-1", "name": "logger", "config": {"level": "info"}},
+        {"id": "component-2", "name": "watcher", "disabled": True},
         {"name": "entry_without_id"},
     ]
 
     patches = [
-        {"id": "plugin-1", "config": {"level": "debug"}},
-        {"id": "plugin-2", "disabled": False},
-        {"insert": [{"id": "plugin-3", "name": "timer"}, "invalid_non_dict"]},
-        {"id": "plugin-nonexistent", "name": "ignored"},
+        {"id": "component-1", "config": {"level": "debug"}},
+        {"id": "component-2", "disabled": False},
+        {"insert": [{"id": "component-3", "name": "timer"}, "invalid_non_dict"]},
+        {"id": "component-nonexistent", "name": "ignored"},
         {"other_key": "ignored_patch"},
     ]
 

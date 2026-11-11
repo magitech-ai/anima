@@ -16,7 +16,7 @@ def is_nullable(value: Any) -> bool:
 
 
 def unwrap_exports(exports: Any) -> Any:
-    """Get the plugin exported by a module namespace.
+    """Get the component exported by a module namespace.
 
     Mirrors unwrapExports: handles CommonJS (module.exports),
     ES modules (__es_module + default), and plain values.

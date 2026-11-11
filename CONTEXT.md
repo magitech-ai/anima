@@ -18,8 +18,8 @@ _Avoid_: Sub-scope, local environment, child container
 A reusable singleton instance mounted onto a context accessible by name.
 _Avoid_: Component, manager, module
 
-**Plugin Entrypoint**:
-The standard `apply(ctx)` callable exported by an Anima plugin module to mount services and event bindings onto a context.
+**Component Entrypoint**:
+The standard `apply(ctx)` callable exported by an Anima component module to mount services and event bindings onto a context.
 _Avoid_: Setup hook, loader, init function
 
 ### Event Pipelines

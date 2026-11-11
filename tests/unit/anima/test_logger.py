@@ -285,7 +285,7 @@ async def test_logger_exception_unwrapping():
 @pytest.mark.asyncio
 async def test_logger_intercept_scoped_name_and_level():
     ctx = Context()
-    ctx.plugin(LoggerService)
+    ctx.use(LoggerService)
     await ctx.flush()
 
     messages = []

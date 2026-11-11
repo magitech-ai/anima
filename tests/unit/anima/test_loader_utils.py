@@ -21,14 +21,14 @@ def test_unwrap_exports_nullable():
 
 def test_unwrap_exports_plain_value():
     """A non-module value is returned as-is."""
-    assert unwrap_exports("plugin") == "plugin"
+    assert unwrap_exports("component") == "component"
     assert unwrap_exports(42) == 42
 
 
 def test_unwrap_exports_no_es_module():
     """A namespace without __es_module returns its default or itself."""
-    ns = SimpleNamespace(default="my-plugin", other="value")
-    assert unwrap_exports(ns) == "my-plugin"
+    ns = SimpleNamespace(default="my-component", other="value")
+    assert unwrap_exports(ns) == "my-component"
 
     ns_no_default = SimpleNamespace(other="value")
     assert unwrap_exports(ns_no_default) is ns_no_default
@@ -36,8 +36,8 @@ def test_unwrap_exports_no_es_module():
 
 def test_unwrap_exports_with_es_module():
     """A namespace with __es_module returns its default export, or itself."""
-    ns = SimpleNamespace(default="esm-plugin", __es_module=True)
-    assert unwrap_exports(ns) == "esm-plugin"
+    ns = SimpleNamespace(default="esm-component", __es_module=True)
+    assert unwrap_exports(ns) == "esm-component"
 
     # No default export: anima returns the namespace itself (?? fallback)
     ns_no_default = SimpleNamespace(__es_module=True)
@@ -90,15 +90,15 @@ def test_get_module_jobs_unknown_url():
 
 def test_unwrap_exports_es_module_with_default():
     """__es_module + default returns the default (line 33 branch)."""
-    ns = SimpleNamespace(default="my-plugin", __es_module=True)
-    assert unwrap_exports(ns) == "my-plugin"
+    ns = SimpleNamespace(default="my-component", __es_module=True)
+    assert unwrap_exports(ns) == "my-component"
 
 
 def test_unwrap_exports_nested_default():
     """Nested __es_module: inner namespace's default is returned (line 33)."""
-    inner = SimpleNamespace(default="inner-plugin", __es_module=True)
+    inner = SimpleNamespace(default="inner-component", __es_module=True)
     ns = SimpleNamespace(default=inner, __es_module=True)
-    assert unwrap_exports(ns) == "inner-plugin"
+    assert unwrap_exports(ns) == "inner-component"
 
 
 def test_module_wrap():

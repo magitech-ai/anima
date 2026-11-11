@@ -24,7 +24,7 @@ from anima.loader import (
     LoaderService,
     interpolate_env,
     load_profile,
-    resolve_plugin_target,
+    resolve_component_target,
     save_profile,
 )
 from anima.logger import (
@@ -114,8 +114,8 @@ __all__ = [
     "interpolate_env",
     "is_bailed",
     "load_profile",
+    "resolve_component_target",
     "resolve_inject",
-    "resolve_plugin_target",
     "save_profile",
     "z",
 ]

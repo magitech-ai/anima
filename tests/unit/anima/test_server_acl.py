@@ -95,7 +95,7 @@ async def raw_ws_try(port: int, path: str, host_header: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_acl_plugin_level():
+async def test_acl_component_level():
     ctx = Context()
     HttpService(ctx)
     srv = ServerService(ctx)

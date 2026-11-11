@@ -208,7 +208,7 @@ async def test_provide_service_mounts_without_config():
         def __init__(self, c: Context, config: dict | None = None) -> None:
             super().__init__(c)
 
-    fib = ctx.plugin(ProvidedService)
+    fib = ctx.use(ProvidedService)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     svc = ctx.get("provided_svc")
@@ -259,7 +259,7 @@ async def test_call_with_config_guard_rejects_non_config_param():
         def __init__(self, c: Context, name: str = "named") -> None:
             super().__init__(c, name)
 
-    fib = ctx.plugin(NameTakingService, {"name": "renamed"})
+    fib = ctx.use(NameTakingService, {"name": "renamed"})
     await ctx.flush()
     assert fib.state == FiberState.FAILED
     assert isinstance(fib.error, TypeError)
@@ -275,7 +275,7 @@ async def test_call_with_config_guard_allows_ctx_only_service():
         def __init__(self, c: Context) -> None:
             super().__init__(c, "ctx_only")
 
-    fib = ctx.plugin(CtxOnlyService)
+    fib = ctx.use(CtxOnlyService)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
 
@@ -284,7 +284,7 @@ async def test_call_with_config_guard_allows_ctx_only_service():
 async def test_call_with_config_guard_allows_config_service():
     """A Service taking (ctx, config) mounts with the config dict."""
     ctx = Context()
-    fib = ctx.plugin(CoreService, {"name": "custom_core"})
+    fib = ctx.use(CoreService, {"name": "custom_core"})
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     svc = ctx.get("custom_core")

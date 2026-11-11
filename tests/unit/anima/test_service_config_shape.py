@@ -1,10 +1,10 @@
 """Service constructors take (ctx, config) under the F16 invocation shape.
 
-Every Service subclass must mount via ctx.plugin with the config dict
+Every Service subclass must mount via ctx.use with the config dict
 arriving as a single positional argument — a second constructor
 parameter of any other meaning silently corrupts the service (the
 config dict lands in it). These tests mount each service through the
-plugin path and assert the parameter values actually land.
+component path and assert the parameter values actually land.
 """
 
 from pathlib import Path
@@ -21,9 +21,9 @@ from anima.server import ServerService
 
 
 @pytest.mark.asyncio
-async def test_cli_service_mounts_via_plugin_with_default_name():
+async def test_cli_service_mounts_via_component_with_default_name():
     ctx = Context()
-    await ctx.plugin(CliService)
+    await ctx.use(CliService)
     await ctx.flush()
 
     svc = ctx.get("cli")
@@ -33,9 +33,9 @@ async def test_cli_service_mounts_via_plugin_with_default_name():
 
 
 @pytest.mark.asyncio
-async def test_cli_service_mounts_via_plugin_with_config_name():
+async def test_cli_service_mounts_via_component_with_config_name():
     ctx = Context()
-    await ctx.plugin(CliService, {"name": "custom_cli"})
+    await ctx.use(CliService, {"name": "custom_cli"})
     await ctx.flush()
 
     svc = ctx.get("custom_cli")
@@ -44,9 +44,9 @@ async def test_cli_service_mounts_via_plugin_with_config_name():
 
 
 @pytest.mark.asyncio
-async def test_http_service_mounts_via_plugin():
+async def test_http_service_mounts_via_component():
     ctx = Context()
-    await ctx.plugin(HttpService)
+    await ctx.use(HttpService)
     await ctx.flush()
 
     svc = ctx.get("http")
@@ -55,9 +55,9 @@ async def test_http_service_mounts_via_plugin():
 
 
 @pytest.mark.asyncio
-async def test_server_service_mounts_via_plugin():
+async def test_server_service_mounts_via_component():
     ctx = Context()
-    await ctx.plugin(ServerService)
+    await ctx.use(ServerService)
     await ctx.flush()
 
     svc = ctx.get("server")
@@ -66,9 +66,9 @@ async def test_server_service_mounts_via_plugin():
 
 
 @pytest.mark.asyncio
-async def test_include_service_mounts_via_plugin():
+async def test_include_service_mounts_via_component():
     ctx = Context()
-    await ctx.plugin(IncludeService)
+    await ctx.use(IncludeService)
     await ctx.flush()
 
     svc = ctx.get("include")
@@ -77,9 +77,9 @@ async def test_include_service_mounts_via_plugin():
 
 
 @pytest.mark.asyncio
-async def test_logger_service_mounts_via_plugin_with_default_buffer():
+async def test_logger_service_mounts_via_component_with_default_buffer():
     ctx = Context()
-    await ctx.plugin(LoggerService)
+    await ctx.use(LoggerService)
     await ctx.flush()
 
     svc = ctx.get("logger")
@@ -91,9 +91,9 @@ async def test_logger_service_mounts_via_plugin_with_default_buffer():
 
 
 @pytest.mark.asyncio
-async def test_logger_service_mounts_via_plugin_with_config_buffer_size():
+async def test_logger_service_mounts_via_component_with_config_buffer_size():
     ctx = Context()
-    await ctx.plugin(LoggerService, {"buffer_size": 3})
+    await ctx.use(LoggerService, {"buffer_size": 3})
     await ctx.flush()
 
     svc = ctx.get("logger")
@@ -106,14 +106,14 @@ async def test_logger_service_mounts_via_plugin_with_config_buffer_size():
 
 
 @pytest.mark.asyncio
-async def test_loader_service_mounts_via_plugin_with_config_filename(
+async def test_loader_service_mounts_via_component_with_config_filename(
     tmp_path: Path,
 ):
     profile = tmp_path / "profile.yaml"
     profile.write_text("name: test\n", encoding="utf-8")
 
     ctx = Context()
-    await ctx.plugin(LoaderService, {"filename": str(profile)})
+    await ctx.use(LoaderService, {"filename": str(profile)})
     await ctx.flush()
 
     svc = ctx.get("loader")
@@ -122,9 +122,9 @@ async def test_loader_service_mounts_via_plugin_with_config_filename(
 
 
 @pytest.mark.asyncio
-async def test_loader_service_mounts_via_plugin_without_filename():
+async def test_loader_service_mounts_via_component_without_filename():
     ctx = Context()
-    await ctx.plugin(LoaderService)
+    await ctx.use(LoaderService)
     await ctx.flush()
 
     svc = ctx.get("loader")
