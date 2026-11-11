@@ -130,13 +130,10 @@ async def test_hmr_on_file_change_filtering(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_hmr_reload_class_plugin(tmp_path: Path):
-    ctx = Context()
-    ctx.plugin(WatcherService)
-    ctx.plugin(HmrService, root=tmp_path, interval=0.01)
-    await ctx.flush()
-
-    hmr: HmrService = ctx.hmr
-
+    # Write version 1 before the watcher starts, so its initial scan
+    # records it silently (ignore_initial) and only the version 2 change
+    # triggers a reload. Otherwise a watcher reload of version 1 can race
+    # the explicit reload and emit a second lifecycle cycle.
     mod_file = tmp_path / "sample_plugin.py"
     mod_file.write_text(
         "class MyPlugin:\n"
@@ -144,6 +141,13 @@ async def test_hmr_reload_class_plugin(tmp_path: Path):
         "    def __init__(self, ctx):\n"
         "        self.v = 1\n"
     )
+
+    ctx = Context()
+    ctx.plugin(WatcherService)
+    ctx.plugin(HmrService, root=tmp_path, interval=0.01)
+    await ctx.flush()
+
+    hmr: HmrService = ctx.hmr
 
     mod_name = "sample_plugin"
     spec = importlib.util.spec_from_file_location(mod_name, str(mod_file))
