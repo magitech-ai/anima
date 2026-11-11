@@ -150,7 +150,7 @@ def load_env_cascade(
 
 
 class CliEnv:
-    """Cascading dotenv loader plugin registering ctx.env and updating os.environ."""
+    """Cascading dotenv loader component registering ctx.env and updating os.environ."""
 
     name = "cli:env"
 
@@ -198,5 +198,5 @@ def apply(
     ctx: Context,
     config: dict[str, Any] | None = None,
 ) -> CliEnv:
-    """Mount CliEnv plugin onto context."""
+    """Mount CliEnv component onto context."""
     return CliEnv(ctx, config)

@@ -91,7 +91,7 @@ def test_expand_variables_unresolved():
 
 
 @pytest.mark.asyncio
-async def test_cli_env_plugin(tmp_path: Path, monkeypatch):
+async def test_cli_env_component(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("EXISTING_KEY", "original_value")
     monkeypatch.delenv("NEW_KEY", raising=False)
 
@@ -101,7 +101,7 @@ async def test_cli_env_plugin(tmp_path: Path, monkeypatch):
     )
 
     ctx = Context()
-    fiber = ctx.plugin(CliEnv, base_dir=tmp_path)
+    fiber = ctx.use(CliEnv, base_dir=tmp_path)
     await fiber.load()
 
     # 1. Check ctx.env

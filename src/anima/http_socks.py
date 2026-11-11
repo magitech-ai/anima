@@ -252,7 +252,7 @@ class SocksProxyHandler:
 
 @inject("http")
 class HttpSocks:
-    """Plugin registering SOCKS proxy connectors with HttpService."""
+    """Component registering SOCKS proxy connectors with HttpService."""
 
     name = "http:socks"
     inject: ClassVar[list[str]] = ["http"]
@@ -268,5 +268,5 @@ class HttpSocks:
 
 
 def apply(ctx: Context, config: dict[str, Any] | None = None) -> HttpSocks:
-    """Mount HttpSocks plugin onto context."""
+    """Mount HttpSocks component onto context."""
     return HttpSocks(ctx)

@@ -58,7 +58,7 @@ class AclConfig:
 
 @inject("server")
 class ServerAcl:
-    """Access control list plugin enforcing allowed host header restrictions."""
+    """Access control list component enforcing allowed host header restrictions."""
 
     name = "server:acl"
     inject: ClassVar[list[str]] = ["server"]
@@ -87,7 +87,7 @@ class ServerAcl:
         """Register route-check listener onto server."""
 
         def _on_route_check(req: ServerRequest, route: Route) -> bool | None:
-            # Route options take precedence, then plugin configuration
+            # Route options take precedence, then component configuration
             allowed = route.options.get(
                 "allowed_hosts",
                 route.options.get("allowedHosts", self.allowed_hosts),
@@ -105,5 +105,5 @@ def apply(
     config: AclConfig | dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> ServerAcl:
-    """Mount ServerAcl plugin onto context."""
+    """Mount ServerAcl component onto context."""
     return ServerAcl(ctx, config, **kwargs)

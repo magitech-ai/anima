@@ -54,7 +54,7 @@ class StaticConfig:
 
 @inject("server")
 class ServerStatic:
-    """Static file server plugin mounting directory delivery onto ServerService."""
+    """Static file server component mounting directory delivery onto ServerService."""
 
     name = "server:static"
     inject: ClassVar[list[str]] = ["server"]
@@ -208,5 +208,5 @@ def apply(
     config: StaticConfig | dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> ServerStatic:
-    """Mount ServerStatic plugin onto context."""
+    """Mount ServerStatic component onto context."""
     return ServerStatic(ctx, config, **kwargs)

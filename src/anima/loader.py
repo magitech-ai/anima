@@ -75,8 +75,8 @@ def interpolate_env(value: Any, env: Mapping[str, str] | None = None) -> Any:
     return value
 
 
-def resolve_plugin_target(target_str: str) -> Any:
-    """Resolve a plugin target from a module path, dot-string, or builtin alias."""
+def resolve_component_target(target_str: str) -> Any:
+    """Resolve a component target from a module path, dot-string, or builtin alias."""
     if target_str in _BUILTIN_ALIASES:
         target_str = _BUILTIN_ALIASES[target_str]
 
@@ -98,7 +98,7 @@ def resolve_plugin_target(target_str: str) -> Any:
 
 
 def save_profile(path: Path | str, entries: list[dict[str, Any]]) -> None:
-    """Save plugin configuration entries to a YAML file."""
+    """Save component configuration entries to a YAML file."""
     p = Path(path).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
@@ -106,7 +106,7 @@ def save_profile(path: Path | str, entries: list[dict[str, Any]]) -> None:
 
 
 class LoaderService(Service):
-    """Configuration-driven loader service managing plugin lifecycles and persistence."""
+    """Configuration-driven loader service managing component lifecycles and persistence."""
 
     def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
@@ -123,7 +123,7 @@ class LoaderService(Service):
         *,
         env: dict[str, str] | None = None,
     ) -> None:
-        """Parse configuration, interpolate environment variables, and mount plugins."""
+        """Parse configuration, interpolate environment variables, and mount components."""
         if isinstance(config_source, (str, Path)):
             path = Path(config_source).resolve()
             if not path.exists():
@@ -139,7 +139,7 @@ class LoaderService(Service):
             if "env" in raw_data and isinstance(raw_data["env"], dict):
                 custom_env = dict(env) if env else dict(os.environ)
                 custom_env.update({str(k): str(v) for k, v in raw_data["env"].items()})
-            entries_data = raw_data.get("plugins", [])
+            entries_data = raw_data.get("components", [])
         elif isinstance(raw_data, list):
             entries_data = raw_data
         else:
@@ -147,7 +147,7 @@ class LoaderService(Service):
 
         interpolated_entries = interpolate_env(entries_data, env=custom_env)
         if not isinstance(interpolated_entries, list):
-            raise TypeError("Profile configuration plugins must resolve to a list")
+            raise TypeError("Profile configuration components must resolve to a list")
 
         for item in interpolated_entries:
             if isinstance(item, str):
@@ -191,12 +191,12 @@ class LoaderService(Service):
 
         if name == "group" or "entries" in item:
             nested_entries = item.get("entries", [])
-            group_cls = resolve_plugin_target("group")
+            group_cls = resolve_component_target("group")
             group_inst = group_cls(entry_ctx, entries=nested_entries, name=eid)
-            fib = entry_ctx.plugin(group_inst)
+            fib = entry_ctx.use(group_inst)
         else:
-            target = resolve_plugin_target(str(name))
-            fib = entry_ctx.plugin(target, **config)
+            target = resolve_component_target(str(name))
+            fib = entry_ctx.use(target, **config)
 
         self.fibers[eid] = fib
 
@@ -240,7 +240,7 @@ class LoaderService(Service):
         save_profile(target_path, self.entries)
 
     def _on_commit(self, fiber: Fiber, config: dict[str, Any]) -> None:
-        """Handle internal/commit event when a plugin's configuration changes."""
+        """Handle internal/commit event when a component's configuration changes."""
         for item in self.entries:
             eid = str(item.get("id") or item.get("name") or item.get("target"))
             if eid in self.fibers and self.fibers[eid] is fiber:
@@ -259,7 +259,7 @@ def load_profile(
     *,
     env: dict[str, str] | None = None,
 ) -> LoaderService:
-    """Load a profile of plugin configurations into a Context."""
+    """Load a profile of component configurations into a Context."""
     filename = config_source if isinstance(config_source, (str, Path)) else None
     loader = LoaderService(ctx, {"filename": filename})
     loader.load(config_source, env=env)

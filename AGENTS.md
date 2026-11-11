@@ -6,8 +6,8 @@
 - **Repository Role**: `anima` is the foundational asynchronous micro-kernel and event pipeline engine. It provides:
   - Asynchronous event waterfalls (`ctx.waterfall()`) with middleware delegation.
   - Hierarchical execution contexts with dependency injection.
-  - Dynamic plugin and lifecycle management.
-- **Capability Seam Symmetry**: Every extensible feature consists of a **Service Definition** (protocol), **Service Provider** (plugin implementation), and **Consumer** (downstream listener or turn loop).
+  - Dynamic component and lifecycle management.
+- **Capability Seam Symmetry**: Every extensible feature consists of a **Service Definition** (protocol), **Service Provider** (component implementation), and **Consumer** (downstream listener or turn loop).
 - **Registrations are Effects**: Every registration returns an explicit disposer closure; teardown must clean up completely.
 - **Waterfall Discipline**: Waterfall event interceptors must await `next_fn(payload)` to delegate down the chain; returning without awaiting short-circuits execution.
 - **Fail-Loud Configuration**: Misconfiguration must fail loud at initialization rather than silently falling back or skipping missing referents.

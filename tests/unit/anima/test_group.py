@@ -17,21 +17,21 @@ async def test_group_lifecycle_and_status():
     ctx = Context()
     active_runs = []
 
-    def plugin_a(c: Context, config: dict | None = None):
+    def component_a(c: Context, config: dict | None = None):
         active_runs.append(f"a_{(config or {}).get('val', 0)}")
 
-    def plugin_b(c: Context, **cfg):
+    def component_b(c: Context, **cfg):
         active_runs.append("b")
 
     group = Group(
         ctx,
         entries=[
-            {"id": "p_a", "target": plugin_a, "config": {"val": 10}},
-            {"id": "p_b", "target": plugin_b, "disabled": True},
+            {"id": "p_a", "target": component_a, "config": {"val": 10}},
+            {"id": "p_b", "target": component_b, "disabled": True},
         ],
     )
 
-    fib = ctx.plugin(group)
+    fib = ctx.use(group)
     await ctx.flush()
 
     assert active_runs == ["a_10"]
@@ -78,22 +78,22 @@ async def test_group_reconciliation_and_updates():
     ctx = Context()
     load_events = []
 
-    class TrackedPlugin:
+    class TrackedComponent:
         def __init__(self, c: Context, config: dict | None = None):
             load_events.append(f"loaded_{(config or {}).get('tag', 'v0')}")
 
     entries = [
-        {"id": "t1", "target": TrackedPlugin, "config": {"tag": "v1"}},
-        {"id": "t2", "target": TrackedPlugin, "config": {"tag": "v2"}},
+        {"id": "t1", "target": TrackedComponent, "config": {"tag": "v1"}},
+        {"id": "t2", "target": TrackedComponent, "config": {"tag": "v2"}},
     ]
 
     group = Group(ctx, entries=entries)
-    ctx.plugin(group)
+    ctx.use(group)
     await ctx.flush()
     assert load_events == ["loaded_v1", "loaded_v2"]
 
     # Reconcile: update t1, disable t2, add t3
-    def plugin_three(c: Context):
+    def component_three(c: Context):
         load_events.append("loaded_v3")
 
     next_called = []
@@ -105,9 +105,13 @@ async def test_group_reconciliation_and_updates():
     await group._on_update(
         {
             "entries": [
-                {"id": "t1", "target": TrackedPlugin, "config": {"tag": "v1_updated"}},
-                {"id": "t2", "target": TrackedPlugin, "disabled": True},
-                {"id": "t3", "target": plugin_three},
+                {
+                    "id": "t1",
+                    "target": TrackedComponent,
+                    "config": {"tag": "v1_updated"},
+                },
+                {"id": "t2", "target": TrackedComponent, "disabled": True},
+                {"id": "t3", "target": component_three},
             ]
         },
         next_fn=async_next,
@@ -120,10 +124,10 @@ async def test_group_reconciliation_and_updates():
     # Reconcile with list directly, re-enabling t2 and removing t3
     await group._on_update(
         [
-            {"id": "t1", "target": TrackedPlugin, "config": {"tag": "v1_final"}},
+            {"id": "t1", "target": TrackedComponent, "config": {"tag": "v1_final"}},
             {
                 "id": "t2",
-                "target": TrackedPlugin,
+                "target": TrackedComponent,
                 "config": {"tag": "v2_restored"},
                 "disabled": False,
             },
@@ -137,9 +141,9 @@ async def test_group_reconciliation_and_updates():
     # Call _on_update without next_fn and add disabled new entry
     res = await group._on_update(
         [
-            {"id": "t1", "target": TrackedPlugin, "config": {"tag": "v1_final"}},
-            {"id": "t2", "target": TrackedPlugin, "disabled": True},
-            {"id": "t4_disabled", "target": TrackedPlugin, "disabled": True},
+            {"id": "t1", "target": TrackedComponent, "config": {"tag": "v1_final"}},
+            {"id": "t2", "target": TrackedComponent, "disabled": True},
+            {"id": "t4_disabled", "target": TrackedComponent, "disabled": True},
         ]
     )
     assert res is None
@@ -148,8 +152,8 @@ async def test_group_reconciliation_and_updates():
     # Reconcile keeping t4_disabled disabled (entry.fiber is None, new_disabled == entry.disabled)
     await group.reconcile(
         [
-            {"id": "t1", "target": TrackedPlugin, "config": {"tag": "v1_final"}},
-            {"id": "t4_disabled", "target": TrackedPlugin, "disabled": True},
+            {"id": "t1", "target": TrackedComponent, "config": {"tag": "v1_final"}},
+            {"id": "t4_disabled", "target": TrackedComponent, "disabled": True},
         ]
     )
     assert "t2" not in group.entries
@@ -158,8 +162,8 @@ async def test_group_reconciliation_and_updates():
     group.entries["t1"].fiber = None
     await group.reconcile(
         [
-            {"id": "t1", "target": TrackedPlugin, "disabled": True},
-            {"id": "t4_disabled", "target": TrackedPlugin, "disabled": True},
+            {"id": "t1", "target": TrackedComponent, "disabled": True},
+            {"id": "t4_disabled", "target": TrackedComponent, "disabled": True},
         ]
     )
     assert group.entries["t1"].disabled is True
@@ -169,7 +173,7 @@ async def test_group_reconciliation_and_updates():
     group.entries["t1"].fiber = None
     await group.disable("t1")  # not entry.disabled is True, but fiber is None
     group.entries["t1"].disabled = True
-    group.entries["t1"].fiber = ctx.plugin(lambda c: None)
+    group.entries["t1"].fiber = ctx.use(lambda c: None)
     await group.enable("t1")  # entry.disabled is True, but fiber is not None
 
 

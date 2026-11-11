@@ -11,26 +11,26 @@ from anima.loader import (
     LoaderService,
     interpolate_env,
     load_profile,
-    resolve_plugin_target,
+    resolve_component_target,
     save_profile,
 )
 
 
-def test_resolve_plugin_target_colon_syntax():
-    target = resolve_plugin_target("anima.events:EventBus")
+def test_resolve_component_target_colon_syntax():
+    target = resolve_component_target("anima.events:EventBus")
     from anima.events import EventBus
 
     assert target is EventBus
 
 
-def test_resolve_plugin_target_dot_syntax():
-    target = resolve_plugin_target("anima.core.Context")
+def test_resolve_component_target_dot_syntax():
+    target = resolve_component_target("anima.core.Context")
     from anima.core import Context as CoreContext
 
     assert target is CoreContext
 
 
-def test_resolve_plugin_target_builtin_aliases():
+def test_resolve_component_target_builtin_aliases():
     from anima.group import Group
     from anima.hmr import HmrService
     from anima.logger import LoggerService
@@ -38,29 +38,29 @@ def test_resolve_plugin_target_builtin_aliases():
     from anima.timer import TimerService
     from anima.watcher import WatcherService
 
-    assert resolve_plugin_target("group") is Group
-    assert resolve_plugin_target("logger") is LoggerService
-    assert resolve_plugin_target("timer") is TimerService
-    assert resolve_plugin_target("watcher") is WatcherService
-    assert resolve_plugin_target("hmr") is HmrService
-    assert resolve_plugin_target("pkg") is PkgService
+    assert resolve_component_target("group") is Group
+    assert resolve_component_target("logger") is LoggerService
+    assert resolve_component_target("timer") is TimerService
+    assert resolve_component_target("watcher") is WatcherService
+    assert resolve_component_target("hmr") is HmrService
+    assert resolve_component_target("pkg") is PkgService
 
 
-def test_resolve_plugin_target_module_with_apply(monkeypatch):
-    dummy_mod = types.ModuleType("dummy_plugin_mod")
+def test_resolve_component_target_module_with_apply(monkeypatch):
+    dummy_mod = types.ModuleType("dummy_component_mod")
 
     def apply_fn(ctx):
         return "applied"
 
     dummy_mod.apply = apply_fn
-    monkeypatch.setitem(sys.modules, "dummy_plugin_mod", dummy_mod)
+    monkeypatch.setitem(sys.modules, "dummy_component_mod", dummy_mod)
 
-    target = resolve_plugin_target("dummy_plugin_mod")
+    target = resolve_component_target("dummy_component_mod")
     assert target is apply_fn
 
 
-def test_resolve_plugin_target_module_without_apply():
-    target = resolve_plugin_target("anima")
+def test_resolve_component_target_module_without_apply():
+    target = resolve_component_target("anima")
     import anima
 
     assert target is anima
@@ -118,7 +118,7 @@ async def test_load_profile_from_list_and_dict_entries(monkeypatch):
     ctx = Context()
     loaded = []
 
-    dummy_plugin = types.ModuleType("custom_agent_plugin")
+    dummy_component = types.ModuleType("custom_agent_component")
 
     class SampleService:
         def __init__(self, c: Context, config: dict | None = None):
@@ -126,19 +126,19 @@ async def test_load_profile_from_list_and_dict_entries(monkeypatch):
             self.token = (config or {}).get("token", "default")
             loaded.append(self.token)
 
-    dummy_plugin.SampleService = SampleService
-    monkeypatch.setitem(sys.modules, "custom_agent_plugin", dummy_plugin)
+    dummy_component.SampleService = SampleService
+    monkeypatch.setitem(sys.modules, "custom_agent_component", dummy_component)
 
     entries = [
         # Non-str, non-dict entry (skipped)
         12345,
         # String entry
-        "custom_agent_plugin:SampleService",
+        "custom_agent_component:SampleService",
         # Dict entry without config
-        {"name": "custom_agent_plugin:SampleService"},
+        {"name": "custom_agent_component:SampleService"},
         # Dict entry with config
         {
-            "name": "custom_agent_plugin:SampleService",
+            "name": "custom_agent_component:SampleService",
             "config": {"token": "secret_xyz"},
         },
         # Dict entry without name (skipped)
@@ -160,15 +160,15 @@ async def test_load_profile_from_yaml_file(tmp_path: Path, monkeypatch):
 
     dummy_mod = types.ModuleType("profile_mod")
 
-    def sample_plugin(c: Context, config: dict | None = None):
+    def sample_component(c: Context, config: dict | None = None):
         calls.append((config or {}).get("mode", "fast"))
 
-    dummy_mod.sample_plugin = sample_plugin
+    dummy_mod.sample_component = sample_component
     monkeypatch.setitem(sys.modules, "profile_mod", dummy_mod)
 
     yaml_data = [
-        "profile_mod:sample_plugin",
-        {"name": "profile_mod:sample_plugin", "config": {"mode": "turbo"}},
+        "profile_mod:sample_component",
+        {"name": "profile_mod:sample_component", "config": {"mode": "turbo"}},
     ]
 
     yaml_file = tmp_path / "profile.yaml"
@@ -206,7 +206,7 @@ async def test_loader_service_isolation_intercept_and_groups():
     try:
         profile = {
             "env": {"MODE": "special"},
-            "plugins": [
+            "components": [
                 {
                     "id": "entry_isolated",
                     "name": "intercept_mod:MockInterceptedService",
@@ -317,6 +317,6 @@ def test_load_profile_error_handling(tmp_path: Path):
     with pytest.raises(TypeError, match="must be a list or dict"):
         LoaderService(ctx).load(12345)  # type: ignore[arg-type]
 
-    # Plugins not a list
-    with pytest.raises(TypeError, match="plugins must resolve to a list"):
-        LoaderService(ctx).load({"plugins": "not_a_list"})
+    # Components not a list
+    with pytest.raises(TypeError, match="components must resolve to a list"):
+        LoaderService(ctx).load({"components": "not_a_list"})

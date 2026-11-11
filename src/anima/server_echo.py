@@ -17,7 +17,7 @@ class EchoConfig:
 
 @inject("server")
 class ServerEcho:
-    """Echo plugin mounting POST and WebSocket echo endpoints at root."""
+    """Echo component mounting POST and WebSocket echo endpoints at root."""
 
     name = "server:echo"
     inject: ClassVar[list[str]] = ["server"]
@@ -53,5 +53,5 @@ def apply(
     config: EchoConfig | dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> ServerEcho:
-    """Mount ServerEcho plugin onto context."""
+    """Mount ServerEcho component onto context."""
     return ServerEcho(ctx, config, **kwargs)

@@ -1,6 +1,6 @@
 """
-Group plugin for composite lifecycle management in Anima.
-Enables hierarchical grouping of plugins with collective start, stop, toggle,
+Group component for composite lifecycle management in Anima.
+Enables hierarchical grouping of components with collective start, stop, toggle,
 and configuration reconciliation.
 """
 
@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from anima.core import Context, Fiber, FiberState
-from anima.loader import resolve_plugin_target
+from anima.loader import resolve_component_target
 
 
 @dataclass
@@ -24,7 +24,7 @@ class GroupEntry:
 
 
 class Group:
-    """Composite plugin container managing a set of child plugins."""
+    """Composite component container managing a set of child components."""
 
     def __init__(
         self,
@@ -52,7 +52,7 @@ class Group:
         if target_spec is None:
             raise ValueError(f"Group entry {item} must specify 'name' or 'target'")
         target = (
-            resolve_plugin_target(target_spec)
+            resolve_component_target(target_spec)
             if isinstance(target_spec, str)
             else target_spec
         )
@@ -67,7 +67,7 @@ class Group:
         ctx.effect(lambda: self.stop)
         for entry in list(self.entries.values()):
             if not entry.disabled and entry.fiber is None:
-                entry.fiber = self.scope.plugin(entry.target, **entry.config)
+                entry.fiber = self.scope.use(entry.target, **entry.config)
         await self.scope.flush()
 
     async def _on_update(self, new_config: Any, next_fn: Any = None) -> Any:
@@ -103,13 +103,13 @@ class Group:
                             await entry.fiber.dispose()
                             entry.fiber = None
                     else:
-                        entry.fiber = self.scope.plugin(entry.target, **entry.config)
+                        entry.fiber = self.scope.use(entry.target, **entry.config)
                 elif entry.fiber is not None:
                     await entry.fiber.update(new_cfg)
             else:
                 entry = self._add_entry_from_dict(item)
                 if not entry.disabled:
-                    entry.fiber = self.scope.plugin(entry.target, **entry.config)
+                    entry.fiber = self.scope.use(entry.target, **entry.config)
 
         # Remove entries that no longer exist
         for eid in list(self.entries.keys()):
@@ -128,7 +128,7 @@ class Group:
             if entry.disabled:
                 entry.disabled = False
                 if entry.fiber is None:
-                    entry.fiber = self.scope.plugin(entry.target, **entry.config)
+                    entry.fiber = self.scope.use(entry.target, **entry.config)
                     await self.scope.flush()
 
     async def disable(self, entry_id: str) -> None:

@@ -10,9 +10,9 @@ from anima.pkg import PkgResult, PkgService
 
 
 @pytest.mark.asyncio
-async def test_pkg_service_init_and_plugin_mount():
+async def test_pkg_service_init_and_component_mount():
     ctx = Context()
-    ctx.plugin(PkgService, uv_path="/custom/bin/uv")
+    ctx.use(PkgService, uv_path="/custom/bin/uv")
     await ctx.flush()
 
     pkg: PkgService = ctx.pkg

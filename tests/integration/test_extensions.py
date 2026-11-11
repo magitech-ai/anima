@@ -1,7 +1,7 @@
 """Integration tests for the five auxiliary ecosystem extensions.
 
 Exercises server:acl, server:proxy, server:static, http:socks, and cli:env
-cooperating on their respective contexts, mirroring anima's explicit plugin
+cooperating on their respective contexts, mirroring anima's explicit component
 mounting model (each extension imported and applied explicitly).
 """
 
@@ -51,7 +51,7 @@ async def test_aux_extensions_integration(tmp_path: Path):
 
     # --- Context A: cli:env + server:static + server:acl ---
     ctx_a = Context()
-    env_fib = ctx_a.plugin(CliEnv, base_dir=tmp_path)
+    env_fib = ctx_a.use(CliEnv, base_dir=tmp_path)
     await env_fib.load()
     HttpService(ctx_a)
     srv_a = ServerService(ctx_a)

@@ -204,7 +204,7 @@ def test_schema_json_schema_generation():
 async def test_schema_fiber_config_validation():
     ctx = Context()
 
-    class ConfiguredPlugin:
+    class ConfiguredComponent:
         Config = Schema.object(
             {
                 "host": Schema.string().default("127.0.0.1"),
@@ -216,14 +216,14 @@ async def test_schema_fiber_config_validation():
             self.cfg = cfg
 
     # 1. Valid config with defaults filled
-    fib = ctx.plugin(ConfiguredPlugin, port=8080)
+    fib = ctx.use(ConfiguredComponent, port=8080)
     await ctx.flush()
     assert fib.state == FiberState.ACTIVE
     assert fib.config == {"host": "127.0.0.1", "port": 8080}
 
     # 2. Invalid config transitions fiber to FAILED (validation is lazy,
     # so the failure lands when the async load runs)
-    fib_bad = ctx.plugin(ConfiguredPlugin, port="invalid_port")
+    fib_bad = ctx.use(ConfiguredComponent, port="invalid_port")
     await ctx.flush()
     assert fib_bad.state == FiberState.FAILED
     assert isinstance(fib_bad.error, SchemaError)

@@ -185,7 +185,7 @@ async def test_custom_type_definition():
 @pytest.mark.asyncio
 async def test_run_command_profile_integration(tmp_path: Path):
     profile_path = tmp_path / "test_profile.yaml"
-    profile_path.write_text("plugins:\n  - timer\n", encoding="utf-8")
+    profile_path.write_text("components:\n  - timer\n", encoding="utf-8")
 
     ctx = Context()
     cli = CliService(ctx)

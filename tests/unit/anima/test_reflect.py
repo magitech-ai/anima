@@ -400,7 +400,7 @@ class TestReflectServiceGetImpl:
             pass
 
         needs_missing.inject = ["missing_dep"]
-        pending_fib = ctx.plugin(needs_missing)
+        pending_fib = ctx.use(needs_missing)
         child = Context(parent=ctx, fiber=pending_fib)
         rs = ReflectService(child)
         rs.provide("my_svc", "hello")
@@ -493,7 +493,7 @@ class TestReflectServiceProvideInactive:
             pass
 
         needs_missing.inject = ["missing_dep"]
-        pending_fib = ctx.plugin(needs_missing)
+        pending_fib = ctx.use(needs_missing)
         child = Context(parent=ctx, fiber=pending_fib)
         child_rs = ReflectService(child)
         disposer = child_rs.provide("my_svc", "hello")
@@ -533,8 +533,8 @@ class TestReflectServiceNotifyWithFibers:
         rs.provide("my_svc", "hello")
 
         # Create a fiber that injects "my_svc"
-        class TestPlugin:
-            name = "test_plugin"
+        class TestComponent:
+            name = "test_component"
 
             def __init__(self, ctx):
                 self.ctx = ctx
@@ -543,7 +543,7 @@ class TestReflectServiceNotifyWithFibers:
                 pass
 
         reg = ctx.registry
-        fiber = reg.plugin(TestPlugin)
+        fiber = reg.use(TestComponent)
         # Manually add "my_svc" to fiber.inject
         fiber.inject = ["my_svc"]
 
@@ -611,8 +611,8 @@ class TestReflectServiceNotifyNoMatch:
         rs = ReflectService(ctx)
         rs.provide("my_svc", "hello")
 
-        class TestPlugin:
-            name = "test_plugin"
+        class TestComponent:
+            name = "test_component"
 
             def __init__(self, ctx):
                 self.ctx = ctx
@@ -621,7 +621,7 @@ class TestReflectServiceNotifyNoMatch:
                 pass
 
         reg = ctx.registry
-        reg.plugin(TestPlugin)
+        reg.use(TestComponent)
         # Fiber.inject is empty, so notify should not match
         rs.notify(["my_svc"])
 
@@ -631,8 +631,8 @@ class TestReflectServiceNotifyNoMatch:
         rs = ReflectService(ctx)
         rs.provide("my_svc", "hello")
 
-        class TestPlugin:
-            name = "test_plugin"
+        class TestComponent:
+            name = "test_component"
 
             def __init__(self, ctx):
                 self.ctx = ctx
@@ -641,7 +641,7 @@ class TestReflectServiceNotifyNoMatch:
                 pass
 
         reg = ctx.registry
-        fiber = reg.plugin(TestPlugin)
+        fiber = reg.use(TestComponent)
         fiber.inject = ["my_svc"]
 
         # Filter returns False, so the fiber should be skipped (line 135-136)
@@ -652,7 +652,7 @@ class TestReflectServiceNotifyNoMatch:
         ctx = Context()
         rs = ReflectService(ctx)
 
-        # Add a non-PluginRuntime object to _internal - it won't have 'fibers'
+        # Add a non-ComponentRuntime object to _internal - it won't have 'fibers'
         ctx.registry._internal["fake_key"] = object()
 
         # Should not raise
@@ -664,8 +664,8 @@ class TestReflectServiceNotifyNoMatch:
         rs = ReflectService(ctx)
         rs.provide("my_svc", "hello")
 
-        class TestPlugin:
-            name = "test_plugin"
+        class TestComponent:
+            name = "test_component"
 
             def __init__(self, ctx):
                 self.ctx = ctx
@@ -674,7 +674,7 @@ class TestReflectServiceNotifyNoMatch:
                 pass
 
         reg = ctx.registry
-        fiber = reg.plugin(TestPlugin)
+        fiber = reg.use(TestComponent)
         fiber.inject = ["my_svc"]
 
         # Remove the impl from the store so _get_impl returns None
@@ -835,7 +835,7 @@ class TestReflectSpecialPropertyRecursion:
     getattr/setattr/hasattr on the Context for reserved words (init, check,
     config, invoke). A missing reserved word re-entered Context.__getattr__
     forever (RecursionError), which broke Fiber.load's init probe when a
-    Context itself was mounted as a plugin.
+    Context itself was mounted as a component.
     """
 
     @pytest.mark.parametrize("prop", ["init", "check", "config", "invoke"])

@@ -15,8 +15,8 @@ from anima.watcher import WatcherService
 @pytest.mark.asyncio
 async def test_hmr_service_lifecycle_and_start_stop(tmp_path: Path):
     ctx = Context()
-    ctx.plugin(WatcherService)
-    ctx.plugin(HmrService, root=tmp_path, interval=0.01)
+    ctx.use(WatcherService)
+    ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
 
     hmr: HmrService = ctx.hmr
@@ -129,27 +129,27 @@ async def test_hmr_on_file_change_filtering(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_hmr_reload_class_plugin(tmp_path: Path):
+async def test_hmr_reload_class_component(tmp_path: Path):
     # Write version 1 before the watcher starts, so its initial scan
     # records it silently (ignore_initial) and only the version 2 change
     # triggers a reload. Otherwise a watcher reload of version 1 can race
     # the explicit reload and emit a second lifecycle cycle.
-    mod_file = tmp_path / "sample_plugin.py"
+    mod_file = tmp_path / "sample_component.py"
     mod_file.write_text(
-        "class MyPlugin:\n"
+        "class MyComponent:\n"
         "    version = 1\n"
         "    def __init__(self, ctx):\n"
         "        self.v = 1\n"
     )
 
     ctx = Context()
-    ctx.plugin(WatcherService)
-    ctx.plugin(HmrService, root=tmp_path, interval=0.01)
+    ctx.use(WatcherService)
+    ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
 
     hmr: HmrService = ctx.hmr
 
-    mod_name = "sample_plugin"
+    mod_name = "sample_component"
     spec = importlib.util.spec_from_file_location(mod_name, str(mod_file))
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
@@ -164,8 +164,8 @@ async def test_hmr_reload_class_plugin(tmp_path: Path):
     ctx.on("hmr/reload", lambda name, p: events.append(("reload", name)))
 
     try:
-        # Mount plugin
-        fib = ctx.plugin(mod.MyPlugin)
+        # Mount component
+        fib = ctx.use(mod.MyComponent)
         await ctx.flush()
         assert fib.state == FiberState.ACTIVE
 
@@ -174,7 +174,7 @@ async def test_hmr_reload_class_plugin(tmp_path: Path):
         import time
 
         mod_file.write_text(
-            "class MyPlugin:\n"
+            "class MyComponent:\n"
             "    version = 2\n"
             "    def __init__(self, ctx):\n"
             "        self.v = 2\n"
@@ -183,7 +183,7 @@ async def test_hmr_reload_class_plugin(tmp_path: Path):
 
         reloaded = await hmr.reload_module(mod_name, path=mod_file)
         assert reloaded is not None
-        assert reloaded.MyPlugin.version == 2
+        assert reloaded.MyComponent.version == 2
         assert fib.target.version == 2
 
         assert [e[0] for e in events] == ["before", "after", "reload"]
@@ -209,10 +209,10 @@ async def test_hmr_reload_concurrent_deduped(tmp_path: Path):
     ctx = Context()
     hmr = HmrService(ctx, {"root": tmp_path})
 
-    mod_file = tmp_path / "dedup_plugin.py"
+    mod_file = tmp_path / "dedup_component.py"
     mod_file.write_text("VALUE = 1\n")
 
-    mod_name = "dedup_plugin"
+    mod_name = "dedup_component"
     spec = importlib.util.spec_from_file_location(mod_name, str(mod_file))
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
@@ -248,22 +248,22 @@ async def test_hmr_reload_concurrent_deduped(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_hmr_reload_instance_and_function_plugins(tmp_path: Path):
+async def test_hmr_reload_instance_and_function_components(tmp_path: Path):
     ctx = Context()
-    ctx.plugin(WatcherService)
+    ctx.use(WatcherService)
     hmr = HmrService(ctx, {"root": tmp_path})
 
-    mod_file = tmp_path / "variants_plugin.py"
+    mod_file = tmp_path / "variants_component.py"
     mod_file.write_text(
         "class ServiceObj:\n"
         "    val = 1\n"
         "    def apply(self, ctx):\n"
         "        pass\n"
-        "def func_plugin(ctx):\n"
+        "def func_component(ctx):\n"
         "    pass\n"
     )
 
-    mod_name = "variants_plugin"
+    mod_name = "variants_component"
     spec = importlib.util.spec_from_file_location(mod_name, str(mod_file))
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
@@ -274,16 +274,16 @@ async def test_hmr_reload_instance_and_function_plugins(tmp_path: Path):
 
     try:
         instance_target = mod.ServiceObj()
-        fib_inst = ctx.plugin(instance_target)
-        fib_func = ctx.plugin(mod.func_plugin)
+        fib_inst = ctx.use(instance_target)
+        fib_func = ctx.use(mod.func_component)
 
         # Disposed fiber should be ignored
-        fib_disposed = ctx.plugin(lambda c: None)
+        fib_disposed = ctx.use(lambda c: None)
         await ctx.flush()
         await fib_disposed.dispose()
 
         # Modify fib_func target __name__ so it is not in reloaded module (triggers fallback restart)
-        mod.func_plugin.__name__ = "non_existent_func"
+        mod.func_component.__name__ = "non_existent_func"
 
         # Reload with target removed in new code (falls back to restart)
         mod_file.write_text(
@@ -291,7 +291,7 @@ async def test_hmr_reload_instance_and_function_plugins(tmp_path: Path):
             "    val = 2\n"
             "    def apply(self, ctx):\n"
             "        pass\n"
-            "# func_plugin deleted\n"
+            "# func_component deleted\n"
         )
 
         reloaded = await hmr.reload_module(mod_name, mod=mod, path=mod_file)
@@ -322,10 +322,10 @@ async def test_hmr_reload_error_handling(tmp_path: Path):
         sys.modules.pop("synthetic_mod", None)
 
     # Syntax error during reload
-    mod_file = tmp_path / "broken_plugin.py"
+    mod_file = tmp_path / "broken_component.py"
     mod_file.write_text("VALID = 1\n")
 
-    mod_name = "broken_plugin"
+    mod_name = "broken_component"
     spec = importlib.util.spec_from_file_location(mod_name, str(mod_file))
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
@@ -359,15 +359,15 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
     (which would return version 1); it waits, then reloads version 2.
     """
     ctx = Context()
-    ctx.plugin(WatcherService)
-    ctx.plugin(HmrService, root=tmp_path, interval=0.01)
+    ctx.use(WatcherService)
+    ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
 
     hmr: HmrService = ctx.hmr
-    mod_file = tmp_path / "sample_plugin.py"
+    mod_file = tmp_path / "sample_component.py"
     mod_file.write_text(
         "import asyncio\n"
-        "class MyPlugin:\n"
+        "class MyComponent:\n"
         "    version = 1\n"
         "    def __init__(self, ctx):\n"
         "        self.v = 1\n"
@@ -375,7 +375,7 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
         "    async def _slow_disposer(self):\n"
         "        await asyncio.sleep(0.5)\n"
     )
-    mod_name = "sample_plugin"
+    mod_name = "sample_component"
     spec = importlib.util.spec_from_file_location(mod_name, str(mod_file))
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
@@ -385,7 +385,7 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
     spec.loader.exec_module(mod)
 
     try:
-        fib = ctx.plugin(mod.MyPlugin)
+        fib = ctx.use(mod.MyComponent)
         await ctx.flush()
         assert fib.state == FiberState.ACTIVE
 
@@ -399,7 +399,7 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
         import time
 
         mod_file.write_text(
-            "class MyPlugin:\n"
+            "class MyComponent:\n"
             "    version = 2\n"
             "    def __init__(self, ctx):\n"
             "        self.v = 2\n"
@@ -408,7 +408,7 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
 
         reloaded = await hmr.reload_module(mod_name, path=mod_file)
         assert reloaded is not None
-        assert reloaded.MyPlugin.version == 2
+        assert reloaded.MyComponent.version == 2
         assert fib.target.version == 2
         assert await first is not None
     finally:
@@ -419,8 +419,8 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
 async def test_hmr_reload_missing_file_returns_none(tmp_path: Path):
     """reload_module on a missing file returns None instead of raising."""
     ctx = Context()
-    ctx.plugin(WatcherService)
-    ctx.plugin(HmrService, root=tmp_path, interval=0.01)
+    ctx.use(WatcherService)
+    ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
     hmr: HmrService = ctx.hmr
     assert await hmr.reload_module("missing_mod", path=tmp_path / "nope.py") is None

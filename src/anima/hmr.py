@@ -48,7 +48,7 @@ class HmrService(Service):
         self.ctx.effect(lambda: self.stop)
 
     def init(self) -> None:
-        """Lifecycle hook when mounted as a plugin."""
+        """Lifecycle hook when mounted as a component."""
         self.start()
 
     def start(self) -> None:
