@@ -221,7 +221,9 @@ async def test_schema_fiber_config_validation():
     assert fib.state == FiberState.ACTIVE
     assert fib.config == {"host": "127.0.0.1", "port": 8080}
 
-    # 2. Invalid config transitions fiber to FAILED
+    # 2. Invalid config transitions fiber to FAILED (validation is lazy,
+    # so the failure lands when the async load runs)
     fib_bad = ctx.plugin(ConfiguredPlugin, port="invalid_port")
+    await ctx.flush()
     assert fib_bad.state == FiberState.FAILED
     assert isinstance(fib_bad.error, SchemaError)

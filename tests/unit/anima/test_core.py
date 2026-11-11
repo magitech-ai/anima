@@ -69,10 +69,13 @@ async def test_plugin_target_variations():
     ctx = Context()
     records = []
 
-    # 1. Target as a class with async apply
-    class ClassWithApply:
+    # 1. Target as a class: init runs, apply is never called for classes
+    class ClassWithInit:
         def __init__(self, c: Context):
             self.c = c
+
+        def init(self):
+            records.append("class_init_ran")
 
         async def apply(self, c: Context):
             records.append("class_apply_ran")
@@ -86,12 +89,12 @@ async def test_plugin_target_variations():
     def func_plugin(c: Context):
         records.append("func_plugin_ran")
 
-    f1 = ctx.plugin(ClassWithApply)
+    f1 = ctx.plugin(ClassWithInit)
     f2 = ctx.plugin(ObjectTarget())
     f3 = ctx.plugin(func_plugin)
     await ctx.flush()
 
-    assert records == ["class_apply_ran", "object_apply_ran", "func_plugin_ran"]
+    assert records == ["class_init_ran", "object_apply_ran", "func_plugin_ran"]
     assert f1.state == FiberState.ACTIVE
     assert f2.state == FiberState.ACTIVE
     assert f3.state == FiberState.ACTIVE
@@ -277,12 +280,19 @@ async def test_dependency_unregistration_cascade():
     assert g_fiber.state == FiberState.ACTIVE
     assert d_fiber.state == FiberState.ACTIVE
 
-    # Unregister greeter
+    # Unregister greeter: the dependent unloads to PENDING (recoverable),
+    # running its effect disposers instead of being disposed.
     await g_fiber.dispose()
-    await ctx.flush()
+    await d_fiber.await_settle()
 
-    assert d_fiber.state == FiberState.DISPOSED
+    assert d_fiber.state == FiberState.PENDING
     assert disposed_items == ["dependent_cleaned"]
+
+    # Re-providing the service reloads the dependent.
+    ctx.plugin(MockGreeter)
+    await ctx.flush()
+    await d_fiber.await_settle()
+    assert d_fiber.state == FiberState.ACTIVE
 
 
 @pytest.mark.asyncio
@@ -302,16 +312,6 @@ async def test_dump_tree_and_status():
 
 
 @pytest.mark.asyncio
-async def test_fiber_set_state_idempotent():
-    ctx = Context()
-    fiber = ctx.plugin(lambda c: None)
-    await ctx.flush()
-    # Setting same state is a no-op (line 89)
-    fiber._set_state(fiber.state)
-    assert fiber.state == FiberState.ACTIVE
-
-
-@pytest.mark.asyncio
 async def test_fiber_load_failure():
     """Test Fiber.load() failure transitions to FAILED state (lines 259-264)."""
     ctx = Context()
@@ -320,10 +320,13 @@ async def test_fiber_load_failure():
         raise RuntimeError("boom")
 
     fiber = Fiber(ctx, failing_plugin, (), {})
-    with pytest.raises(RuntimeError, match="boom"):
-        await fiber.load()
+    # load() does not raise on plugin failure; the error is stored and
+    # rethrown by await_settle().
+    assert await fiber.load() is None
     assert fiber.state == FiberState.FAILED
     assert isinstance(fiber.error, RuntimeError)
+    with pytest.raises(RuntimeError, match="boom"):
+        await fiber.await_settle()
 
 
 class TestFiberLifecycleInternals:
@@ -345,8 +348,8 @@ class TestFiberLifecycleInternals:
             raise ValueError("startup failed")
 
         fiber = Fiber(ctx, failing_plugin, (), {})
-        with pytest.raises(ValueError, match="startup failed"):
-            await fiber.load()
+        assert await fiber.load() is None
+        assert fiber.state == FiberState.FAILED
         with pytest.raises(ValueError, match="startup failed"):
             await fiber.await_settle()
 
@@ -418,17 +421,11 @@ class TestFiberLifecycleInternals:
             def __init__(self, c: Context):
                 super().__init__(c, "tracked")
 
-        svc = TrackedService(ctx)
+        TrackedService(ctx)
         fiber.inject = ["tracked"]
-        fiber._store["tracked"] = svc
-        # Manually set epoch as _refresh would (bypassing async _setEpoch)
-        epoch = ""
-        for name in fiber.inject:
-            impl = fiber._store.get(name)
-            if impl is None:
-                epoch = "__INACTIVE__"
-                break
-            epoch += ":" + str(id(impl))
+        fiber._checkImpl("tracked")
+        fiber._refresh()
+        epoch = fiber._getCurrentEpoch()
         assert epoch != "__INACTIVE__"
         assert epoch != ""
 
@@ -458,15 +455,17 @@ class TestFiberLifecycleInternals:
         assert fiber._getCurrentEpoch() == "active"
 
     def test_set_epoch_inertia_blocks(self):
-        """Test _setEpoch() is blocked when inertia is set."""
+        """Test _setEpoch() stores the epoch but starts no transition when inertia is set."""
         ctx = Context()
         fiber = Fiber(ctx, lambda c: None, (), {})
         fiber._setCurrentEpoch("__INACTIVE__")
         loop = asyncio.new_event_loop()
         try:
             fiber.inertia = loop.create_future()
-            fiber._setEpoch("active")  # Should not trigger due to inertia
-            assert fiber._getCurrentEpoch() == "__INACTIVE__"
+            fiber._setEpoch("active")
+            # Epoch is stored; the in-flight transition chains the next one.
+            assert fiber._getCurrentEpoch() == "active"
+            assert fiber.state == FiberState.PENDING
         finally:
             loop.close()
 
@@ -714,7 +713,7 @@ async def test_fiber_resolve_config_waterfall():
 
     ctx.on(
         "internal/config",
-        lambda cfg, _default, next: config_holder.update(cfg) or next(cfg),
+        lambda cfg, next: config_holder.update(cfg) or next(cfg),
     )
 
     class ConfigPlugin:
@@ -837,10 +836,10 @@ async def test_fiber_restart_and_update():
     received_updates = []
 
     class UpdatablePlugin:
-        def __init__(self, c: Context, **cfg):
+        def __init__(self, c: Context, config: dict[str, Any] | None = None):
             self.c = c
-            self.cfg = cfg
-            load_counts.append(cfg.get("val", 0))
+            self.cfg = dict(config or {})
+            load_counts.append(self.cfg.get("val", 0))
 
     fib = ctx.plugin(UpdatablePlugin, val=1)
     await ctx.flush()
@@ -851,11 +850,12 @@ async def test_fiber_restart_and_update():
     await ctx.flush()
     assert load_counts == [1, 1]
 
-    # Restart disposed fiber is no-op
+    # Restart on a disposed fiber raises
     disposed_fib = ctx.plugin(lambda c: None)
     await ctx.flush()
     await disposed_fib.dispose()
-    await disposed_fib.restart()
+    with pytest.raises(AnimaError):
+        await disposed_fib.restart()
     assert disposed_fib.state == FiberState.DISPOSED
 
     # Update with internal/update intercepted (no restart)
@@ -874,10 +874,11 @@ async def test_fiber_restart_and_update():
     # load_counts didn't increment because update was accepted in-place
     assert load_counts == [1, 1]
 
-    # Update on DISPOSED fiber is no-op
-    await disposed_fib.update({"val": 99})
+    # Update on a DISPOSED fiber raises
+    with pytest.raises(AnimaError):
+        await disposed_fib.update({"val": 99})
 
-    # Update with validation error -> FAILED
+    # Update with validation error raises and keeps the old config
     from pydantic import BaseModel
 
     class StrictConfig(BaseModel):
@@ -886,19 +887,33 @@ async def test_fiber_restart_and_update():
     class StrictPlugin:
         Config = StrictConfig
 
-        def __init__(self, c: Context, **cfg):
+        def __init__(self, c: Context, config: dict[str, Any] | None = None):
             pass
 
     strict_fib = ctx.plugin(StrictPlugin, num=10)
     await ctx.flush()
     assert strict_fib.state == FiberState.ACTIVE
 
-    await strict_fib.update({"num": "not_an_int"}, no_save=True)
-    assert strict_fib.state == FiberState.FAILED
+    with pytest.raises(PydanticValidationError):
+        await strict_fib.update({"num": "not_an_int"}, no_save=True)
+    assert strict_fib.state == FiberState.ACTIVE
+    assert strict_fib.config.num == 10
 
-    # Calling update on FAILED fiber is a no-op
-    await strict_fib.update({"num": "still_bad"})
-    assert strict_fib.state == FiberState.FAILED
+    # A FAILED fiber recovers via update() with a good config; a bad
+    # config keeps it FAILED without raising (deferred resolution).
+    bad_fib = ctx.plugin(StrictPlugin, num="not_an_int")
+    await ctx.flush()
+    assert bad_fib.state == FiberState.FAILED
+
+    await bad_fib.update({"num": "still_bad"})
+    with pytest.raises(PydanticValidationError):
+        await bad_fib.await_settle()
+    assert bad_fib.state == FiberState.FAILED
+
+    await bad_fib.update({"num": 42})
+    await bad_fib.await_settle()
+    assert bad_fib.state == FiberState.ACTIVE
+    assert bad_fib.config.num == 42
 
     # Update on pending fiber
     def needs_service(c: Context, **cfg):
@@ -909,15 +924,18 @@ async def test_fiber_restart_and_update():
     await ctx.flush()
     assert pending_fib.state == FiberState.PENDING
 
-    # Updating pending fiber with dependencies unsatisfied remains pending
+    # Updating pending fiber with dependencies unsatisfied remains pending;
+    # the raw config is recorded, the effective config updates on activation.
     await pending_fib.update({"val": 10})
     assert pending_fib.state == FiberState.PENDING
-    assert pending_fib.config["val"] == 10
+    assert pending_fib.raw_config["val"] == 10
 
     # Provide dependency -> loads with latest config
     ctx.provide("special_svc", "ready")
     await ctx.flush()
+    await pending_fib.await_settle()
     assert pending_fib.state == FiberState.ACTIVE
+    assert pending_fib.config["val"] == 10
 
 
 @pytest.mark.asyncio
@@ -937,8 +955,8 @@ async def test_default_restart_on_unhandled_update():
     reloads = []
 
     class SimpleReloadPlugin:
-        def __init__(self, c: Context, **cfg):
-            reloads.append(cfg.get("tag", "initial"))
+        def __init__(self, c: Context, config: dict[str, Any] | None = None):
+            reloads.append((config or {}).get("tag", "initial"))
 
     fib = ctx.plugin(SimpleReloadPlugin, tag="v1")
     await ctx.flush()
@@ -1036,8 +1054,10 @@ async def test_bound_service_and_intercept_edge_cases():
 
     pending_target.inject = ["callable_svc"]
     f_pend = ctx.plugin(pending_target)
+    await ctx.flush()
     f_pend.state = FiberState.PENDING
     await f_pend.update({})
+    await f_pend.await_settle()
     assert f_pend.state == FiberState.ACTIVE
 
     # Synchronous disposer in _unload
@@ -1832,7 +1852,7 @@ class TestContextGetSet:
         assert ctx.get("core_svc") is svc
 
         # Create a new service and set it via Context.set
-        CoreService(ctx, "new_core_svc")
+        CoreService(ctx, {"name": "new_core_svc"})
         ctx.set("renamed_svc", svc)
         assert ctx.get("renamed_svc") is svc
 

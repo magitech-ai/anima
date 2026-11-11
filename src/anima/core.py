@@ -12,12 +12,19 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import (
+    AsyncIterable,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    Iterator,
+)
 from contextvars import ContextVar
 from enum import Enum
 from typing import Any, ClassVar, cast
 
-from anima.events import DisposableList, Disposer, EventBus, EventMode
+from anima.events import Disposer, EventBus, EventMode
 
 logger = logging.getLogger("anima")
 
@@ -55,13 +62,6 @@ _current_fiber: ContextVar[Fiber | None] = ContextVar("_current_fiber", default=
 _access_context: ContextVar[Context | None] = ContextVar(
     "_access_context", default=None
 )
-_fiber_uid_counter: int = 0
-
-
-def _next_uid() -> int:
-    global _fiber_uid_counter
-    _fiber_uid_counter += 1
-    return _fiber_uid_counter
 
 
 class AnimaErrorCode:
@@ -124,8 +124,9 @@ class Fiber:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         parent_fiber: Fiber | None = None,
+        *,
+        root: bool = False,
     ) -> None:
-        self.uid: int = _next_uid()
         self.ctx = ctx
         self.target = target
         self.args = args
@@ -134,24 +135,41 @@ class Fiber:
         self.parent_fiber = parent_fiber
         self.child_fibers: list[Fiber] = []
         self.effects: list[Disposer] = []
-        self.state: FiberState = FiberState.PENDING
+        self._is_root = root
+        self.uid: int | None
+        self.state: FiberState
+        self._runner_epoch: str
+        if root:
+            # The root fiber is uid 0 and starts ACTIVE with an empty epoch.
+            self.uid = 0
+            self.state = FiberState.ACTIVE
+            self._runner_epoch = ""
+        else:
+            # Uids come from the owning registry's counter, so the first
+            # plugin fiber on a context is 1 and the root never consumes one.
+            self.uid = ctx.registry.counter
+            self.state = FiberState.PENDING
+            self._runner_epoch = "__INACTIVE__"
         self.error: Exception | None = None
         self.name: str = getattr(
             target, "name", getattr(target, "__name__", str(target))
         )
-        # Anima fiber internals: service impl snapshot (Dict<Impl>)
+        # Service impl snapshot (Dict<Impl>)
         self._store: dict[str, Any] = {}
+        # Snapshot of _store taken when a reload starts; None while unloaded.
+        self.store: dict[str, Any] | None = None
         # In-flight load/unload transition (asyncio.Future or None)
         self.inertia: asyncio.Future[None] | None = None
-        # Effect disposables keyed by event name (DisposableList per event)
-        self._hooks: dict[str, DisposableList] = {}
-        # Combined disposables list (O(1) deletion by value)
-        self._disposables: DisposableList = DisposableList()
+        # The plugin instance produced by the last successful load.
+        self._instance: Any = None
+        # True once a reload has started for this fiber; await_settle()
+        # drives a load only for a fiber that never attempted one, so a
+        # fiber that deliberately settled to PENDING is not reloaded.
+        self._load_attempted: bool = False
 
-        # Validate config if plugin declares a Config schema (e.g. Pydantic or callable)
-        self._validate_config()
-
-        # Read inject dependencies
+        # Read inject dependencies. Validation is lazy: it runs in _reload
+        # at activation time, so a bad config leaves the fiber FAILED but
+        # recoverable via update().
         inject_decl = getattr(target, "inject", None)
         if isinstance(inject_decl, dict):
             self.inject: list[str] = list(inject_decl.keys())
@@ -163,227 +181,299 @@ class Fiber:
             self.inject = []
             self.inject_config = getattr(target, "inject_config", None)
 
-    def _validate_config(self) -> None:
+    def _validate_config_value(self, config: Any) -> Any:
+        """Validate a config value against the plugin's declared schema.
+
+        Synchronous validation used by _resolve_config at activation time.
+        Returns the validated config; raises on failure.
+        """
         config_schema = getattr(self.target, "Config", None)
         if config_schema is None:
             config_schema = getattr(self.target, "schema", None)
         if config_schema is None:
-            return
+            return config
 
-        from anima.schema import Schema, SchemaError
+        from anima.schema import Schema
 
         if isinstance(config_schema, Schema):
-            try:
-                self.config = config_schema.validate(self.raw_config)
-                return
-            except SchemaError as e:
-                self.error = e
-                self.state = FiberState.FAILED
-                logger.error(
-                    "Config validation failed for plugin %s (uid %d): %s",
-                    self.name,
-                    self.uid,
-                    e,
-                )
-                return
-
-        elif callable(config_schema):
-            try:
-                self.config = config_schema(**self.raw_config)
-            except Exception as e:  # noqa: BLE001
-                self.error = e
-                self.state = FiberState.FAILED
-                logger.error(
-                    "Config validation failed for plugin %s (uid %d): %s",
-                    self.name,
-                    self.uid,
-                    e,
-                )
-
-    def _set_state(self, new_state: FiberState, error: Exception | None = None) -> None:
-        old_state = self.state
-        if old_state == new_state:
-            return
-        self.state = new_state
-        self.error = error
-        self.ctx.emit("internal/status", self, old_state, new_state)
+            return config_schema.validate(config)
+        if callable(config_schema):
+            if isinstance(config, dict):
+                return config_schema(**config)
+            return config_schema(config)
+        return config
 
     def check_dependencies(self) -> bool:
         """Check if all required services exist on context."""
         return all(self.ctx.has(service) for service in self.inject)
 
     async def load(self) -> Any:
-        """Mount and activate the plugin."""
-        if self.state in (
-            FiberState.LOADING,
-            FiberState.ACTIVE,
-            FiberState.FAILED,
-            FiberState.DISPOSED,
-        ):
+        """Mount and activate the plugin, joining any in-flight transition.
+
+        Returns the plugin instance when ACTIVE, else None. A plugin
+        failure does not raise here; it is stored on the fiber and
+        rethrown by await_settle().
+        """
+        if self.state == FiberState.DISPOSED:
             return None
-
-        if not self.check_dependencies():
-            self._set_state(FiberState.PENDING)
+        if self.state == FiberState.ACTIVE:
+            return self._instance
+        if self.state == FiberState.FAILED:
             return None
-
-        self._set_state(FiberState.LOADING)
-        token = _current_fiber.set(self)
-        instance = None
-        try:
-            target = self.target
-
-            # 1. Target is a class (e.g. Service subclass or general plugin class)
-            if inspect.isclass(target):
-                target_cls = cast(type[Any], target)
-                instance = target_cls(self.ctx, *self.args, **self.raw_config)
-                # call init method if present (symbols.init parity)
-                init_method = getattr(instance, "init", None)
-                if init_method is not None and callable(init_method):
-                    res = init_method()
-                    if inspect.isawaitable(res):
-                        await res
-                if hasattr(instance, "apply") and callable(instance.apply):
-                    res = instance.apply(self.ctx)
-                    if inspect.isawaitable(res):
-                        await res
-            # 2. Target is an object with an apply method
-            elif hasattr(target, "apply") and callable(target.apply):
-                res = target.apply(self.ctx, *self.args, **self.raw_config)
-                if inspect.isawaitable(res):
-                    await res
-                instance = target
-            # 3. Target is a callable / function plugin
-            elif callable(target):
-                res = target(self.ctx, *self.args, **self.raw_config)
-                if inspect.isawaitable(res):
-                    await res
-                instance = res
-            else:
-                raise ValueError(  # pragma: no cover
-                    f"Plugin target {target} must be a callable or class with apply(ctx)"
-                )
-
-            self._set_state(FiberState.ACTIVE)
-            return instance
-        except Exception as e:
-            self._set_state(FiberState.FAILED, error=e)
-            logger.exception(
-                "Plugin %s (uid %d) failed during load", self.name, self.uid
+        if self.inertia is not None:
+            await self.inertia
+            return self._instance if self.state == FiberState.ACTIVE else None
+        for name in self.inject:
+            self._checkImpl(name)
+        self._refresh()
+        if self.inertia is None and self._getCurrentEpoch() != "__INACTIVE__":
+            # The epoch went active while no loop was running, so no
+            # transition started; start the reload now that a loop exists.
+            self._updateState(
+                lambda: self._begin_transition(self._getCurrentEpoch(), "__INACTIVE__")
             )
-            raise
-        finally:
-            _current_fiber.reset(token)
+        if self.inertia is not None:
+            await self.inertia
+        return self._instance if self.state == FiberState.ACTIVE else None
 
     async def _unload(self) -> None:
         """Unwind child fibers and effect disposers in reverse order (LIFO)."""
-        self._set_state(FiberState.UNLOADING)
-
         # Dispose child fibers first
-        for child in reversed(self.child_fibers):
-            await child._unload()
-        self.child_fibers.clear()
-
-        # Run registered effect disposers in reverse order (LIFO)
-        for disposer in reversed(self.effects):
-            try:
-                res = disposer()
-                if inspect.isawaitable(res):
-                    await res
-            except Exception:
-                logger.exception(
-                    "Error during fiber %d (%s) effect unload", self.uid, self.name
-                )
-
-        self.effects.clear()
-
-    async def dispose(self) -> None:
-        """Unload plugin and mark permanently as DISPOSED."""
-        if self.state in (FiberState.UNLOADING, FiberState.DISPOSED):
-            return
-
-        self._set_state(FiberState.UNLOADING)
-
-        # Dispose child fibers first
-        for child in reversed(self.child_fibers):
+        for child in reversed(list(self.child_fibers)):
             await child.dispose()
         self.child_fibers.clear()
 
         # Run registered effect disposers in reverse order (LIFO)
-        for disposer in reversed(self.effects):
+        for disposer in reversed(list(self.effects)):
             try:
                 res = disposer()
                 if inspect.isawaitable(res):
                     await res
             except Exception:
                 logger.exception(
-                    "Error during fiber %d (%s) disposal", self.uid, self.name
+                    "Error during fiber %s (uid %s) effect unload", self.uid, self.name
                 )
 
         self.effects.clear()
-        self._set_state(FiberState.DISPOSED)
+        self.store = None
+        self._updateState(self._unload_complete)
+
+    async def dispose(self) -> None:
+        """Unload the plugin and mark it permanently as DISPOSED.
+
+        Disposing the root fiber restarts it instead. A dispose issued
+        while a load is in flight joins that transition; the fiber is
+        never resurrected afterwards.
+        """
+        if self._is_root:
+            await self.restart()
+            return
+        if self.uid is None:
+            return
+        if self.parent_fiber is not None and self in self.parent_fiber.child_fibers:
+            self.parent_fiber.child_fibers.remove(self)
+        runtime = self.ctx.registry.get(self.target)
+        if runtime is not None:
+            if self in runtime.fibers:
+                runtime.fibers.remove(self)
+            if not runtime.fibers:
+                self.ctx.registry._unregister(runtime)
+        self.uid = None
+        self.ctx.emit("internal/plugin", self)
+        self._setEpoch("__INACTIVE__")
+        if self.inertia is None:
+            # Epoch was already INACTIVE (e.g. a PENDING fiber), so no
+            # transition started; begin the unload directly.
+            self._updateState(self._begin_unload)
+        while self.inertia is not None:
+            await self.inertia
 
     async def restart(self) -> None:
-        """Unload active effects and re-mount plugin instance."""
-        if self.state in (FiberState.UNLOADING, FiberState.DISPOSED):
-            return
+        """Unload and re-mount the plugin via the epoch machine."""
+        self.assertActive()
+        for name in self.inject:
+            self._checkImpl(name)
+        self._setEpoch("__INACTIVE__")
+        self._refresh()
+        await self.await_settle()
+        if self.state != self._getState():
+            self._updateState(lambda: None)
 
-        await self._unload()
-        if self.check_dependencies():
-            await self.load()
-        else:
-            self._set_state(FiberState.PENDING)
+    async def _reload(self, epoch: str) -> None:
+        """Execute the plugin body directly, with a staleness checkpoint.
 
-    async def _reload(
-        self,
-    ) -> (
-        None
-    ):  # pragma: no cover - async transition path, hard to trigger in sync tests
-        """Reload the plugin with current config (fiber lifecycle parity).
-
-        Resolves config, executes the plugin callback, and updates state.
+        `epoch` is the epoch this reload was started for, captured when the
+        transition was decided; the checkpoint compares it against the
+        current epoch so a reload superseded before it ran never executes
+        the plugin body. A plugin failure is logged and stored on the
+        fiber, not raised; await_settle() rethrows it.
         """
-        old_epoch = self._getCurrentEpoch()
+        self.store = dict(self._store)
+        old_epoch = epoch
+        self._load_attempted = True
         try:
-            self.config = await self._resolve_config(self.raw_config)
-            await self.load()
-        except Exception as e:
-            self._set_state(FiberState.FAILED, error=e)
-            self._setCurrentEpoch("__INACTIVE__")
-            raise
-        finally:
+            await asyncio.sleep(0)
             if self._getCurrentEpoch() == old_epoch:
-                self.inertia = None
+                self.config = await self._resolve_config(self.raw_config)
+                await self._execute(old_epoch)
+                self.error = None
+        except Exception as e:
+            logger.exception(
+                "Plugin %s (uid %s) failed during reload", self.name, self.uid
+            )
+            self.error = e
+            self._setCurrentEpoch("__INACTIVE__")
+        self._updateState(lambda: self._reload_complete(old_epoch))
 
-    async def _resolve_config(
-        self, config: Any
-    ) -> Any:  # pragma: no cover - async waterfall path, hard to trigger in sync tests
-        """Resolve plugin config through internal/config waterfall parity.
+    async def _resolve_config(self, config: Any) -> Any:
+        """Resolve plugin config through the internal/config waterfall.
 
-        Runs the waterfall hook, then applies schema validation if declared.
+        Runs the waterfall hook, then applies schema validation if
+        declared. Validation is synchronous; the waterfall stays async.
         """
 
         async def _default(cfg: Any) -> Any:
             return cfg
 
-        resolved = await self.ctx.waterfall("internal/config", config, _default)
+        resolved = await self.ctx.waterfall(
+            "internal/config", config, default_handler=_default
+        )
+        return self._validate_config_value(resolved)
 
-        # Apply schema validation if declared
-        config_schema = getattr(self.target, "Config", None)
-        if config_schema is None:
-            config_schema = getattr(self.target, "schema", None)
-        if config_schema is not None:
-            from anima.schema import Schema
+    @staticmethod
+    def _safe_getattr(obj: Any, name: str) -> Any:
+        """getattr that returns None instead of raising.
 
-            if isinstance(config_schema, Schema):
-                resolved = config_schema.validate(resolved)
-            elif callable(config_schema):
-                resolved = (
-                    config_schema(**resolved)
-                    if isinstance(resolved, dict)
-                    else config_schema(resolved)
+        A Context instance raises AnimaError (not AttributeError) for
+        unknown names, so a plain getattr default does not apply.
+        """
+        try:
+            return getattr(obj, name)
+        except Exception:  # noqa: BLE001 - probe only; any failure means absent
+            return None
+
+    @staticmethod
+    def _safe_getattr_static(obj: Any, name: str) -> Any:
+        """getattr_static that returns None instead of raising.
+
+        Unlike getattr, this does not bind functions stored as class
+        attributes, so a single initHooks function stays a plain callable
+        instead of arriving as a bound method expecting self.
+        """
+        try:
+            return inspect.getattr_static(obj, name)
+        except Exception:  # noqa: BLE001 - probe only; any failure means absent
+            return None
+
+    def _call_with_config(self, fn: Callable[..., Any], config: Any) -> Any:
+        """Call a plugin entry point with as many leading args as it accepts.
+
+        The entry point is invoked with (ctx, config); shorter signatures
+        receive fewer arguments, matching the JS call convention where
+        extra arguments are dropped.
+        """
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return fn(self.ctx, config)
+        params = list(sig.parameters.values())
+        positional = [
+            p
+            for p in params
+            if p.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+        if has_varargs or len(positional) >= 2:
+            return fn(self.ctx, config)
+        if len(positional) == 1:
+            return fn(self.ctx)
+        return fn()
+
+    async def _execute(self, epoch: str) -> None:
+        """Run the plugin body and collect its effect."""
+        token = _current_fiber.set(self)
+        try:
+            target = self.target
+            config = self.config
+
+            # 1. Target is a class: construct, then run init hooks and init.
+            # Class plugins never call apply().
+            if inspect.isclass(target):
+                target_cls = cast(type[Any], target)
+                instance = self._call_with_config(target_cls, config)
+                hooks = self._safe_getattr_static(instance, symbols["initHooks"])
+                if hooks is not None:
+                    if not isinstance(hooks, (list, tuple)):
+                        hooks = [hooks]
+                    for hook in hooks:
+                        res = hook()
+                        if inspect.isawaitable(res):
+                            await res
+                init_fn = self._safe_getattr(instance, symbols["init"])
+                if init_fn is None:
+                    init_fn = self._safe_getattr(instance, "init")
+                result = None
+                if init_fn is not None and callable(init_fn):
+                    result = init_fn()
+                    if inspect.isawaitable(result):
+                        result = await result
+                self._instance = instance
+                await self._collect_effect(result, epoch)
+            # 2. Target is an object with an apply method
+            elif hasattr(target, "apply") and callable(target.apply):
+                result = self._call_with_config(target.apply, config)
+                if inspect.isawaitable(result):
+                    result = await result
+                self._instance = target
+                await self._collect_effect(result, epoch)
+            # 3. Target is a callable / function plugin
+            elif callable(target):
+                result = self._call_with_config(target, config)
+                if inspect.isawaitable(result):
+                    result = await result
+                self._instance = result
+                await self._collect_effect(result, epoch)
+            else:
+                raise ValueError(
+                    f"Plugin target {target} must be a callable or class with apply(ctx)"
                 )
+        finally:
+            _current_fiber.reset(token)
 
-        return resolved
+    async def _collect_effect(self, result: Any, epoch: str) -> None:
+        """Collect the plugin body's return value as an effect disposer."""
+        if result is None:
+            return
+        if callable(result):
+            self.effects.append(result)
+            return
+        if inspect.isawaitable(result):
+            await self._collect_effect(await result, epoch)
+            return
+        if isinstance(result, AsyncIterable):
+            async for item in result:
+                if self._getCurrentEpoch() != epoch:
+                    return
+                self._collect_item(item)
+            return
+        if isinstance(result, Iterable):
+            for item in result:
+                self._collect_item(item)
+            return
+        raise TypeError("Invalid effect")
+
+    def _collect_item(self, item: Any) -> None:
+        """Collect one item of an iterable effect."""
+        if item is None:
+            return
+        if callable(item):
+            self.effects.append(item)
+            return
+        raise TypeError("Invalid effect")
 
     async def replace(self, new_target: Any) -> None:
         """Replace plugin target and reload fiber with updated target."""
@@ -394,7 +484,6 @@ class Fiber:
         self.name = getattr(
             new_target, "name", getattr(new_target, "__name__", str(new_target))
         )
-        self._validate_config()
 
         inject_decl = getattr(new_target, "inject", None)
         if isinstance(inject_decl, dict):
@@ -410,32 +499,37 @@ class Fiber:
         await self.restart()
 
     async def update(self, config: dict[str, Any], no_save: bool = False) -> None:
-        """Update plugin configuration with live lifecycle hooks."""
-        if self.state == FiberState.DISPOSED:
-            return
+        """Update plugin configuration with live lifecycle hooks.
 
+        Raises on a disposed fiber, and raises the validation error when
+        the new config fails validation on an ACTIVE fiber (the fiber
+        keeps its old config). On a non-ACTIVE fiber resolution is
+        deferred: the error is cleared and the epoch machine drives a
+        fresh activation, which validates then.
+        """
+        self.assertActive()
         self.raw_config = dict(config)
-        self.config = dict(config)
-        self._validate_config()
 
-        if not no_save:
-            self.ctx.emit("internal/commit", self, config)
-
-        if self.state == FiberState.FAILED:
+        if self.state != FiberState.ACTIVE:
+            self.error = None
+            self._setEpoch("__INACTIVE__")
+            self._refresh()
             return
 
-        if self.state == FiberState.ACTIVE:
+        resolved = await self._resolve_config(config)
+        if not no_save:
+            self.ctx.emit("internal/commit", self, resolved)
 
-            async def _default_restart(cfg: Any) -> None:
-                await self.restart()
+        async def _default(cfg: Any) -> None:
+            self.config = cfg
+            self.error = None
+            await self.restart()
 
-            await self.ctx.waterfall(
-                "internal/update",
-                self.config,
-                default_handler=_default_restart,
-            )
-        elif self.state == FiberState.PENDING and self.check_dependencies():
-            await self.load()
+        await self.ctx.waterfall(
+            "internal/update",
+            resolved,
+            default_handler=_default,
+        )
 
     def status(self) -> dict[str, Any]:
         """Return diagnostic status snapshot of this fiber."""
@@ -449,51 +543,80 @@ class Fiber:
             "error": str(self.error) if self.error else None,
         }
 
-    async def await_settle(
-        self,
-    ) -> None:  # pragma: no cover - async wait path, hard to trigger in sync tests
+    async def await_settle(self) -> Fiber:
         """Wait for current lifecycle work and rethrow startup errors.
 
         Fiber.await() parity. Awaits any in-flight inertia (load/unload)
         transition, then rethrows any startup error stored on the fiber.
+        A PENDING fiber with no transition in flight drives its own load
+        first, so awaiting a fiber whose load was only scheduled still
+        settles it; a fiber that already completed a load cycle is left
+        alone, so awaiting a fiber that deliberately settled to PENDING
+        does not reload it. Returns the fiber so `await fiber` yields the
+        fiber itself.
         """
+        if (
+            self.state == FiberState.PENDING
+            and self.inertia is None
+            and not self._load_attempted
+        ):
+            await self.load()
         while self.inertia is not None:
             await self.inertia
         if self.error is not None:
             raise self.error
+        return self
 
-    async def await_(self) -> None:  # pragma: no cover - alias for await_settle
+    async def await_(self) -> Fiber:
         """Alias for await_settle() matching Fiber.await() parity."""
-        await self.await_settle()
+        return await self.await_settle()
+
+    def __await__(self) -> Iterator[Any]:
+        """Make the fiber awaitable: awaiting it settles the lifecycle."""
+        return self.await_settle().__await__()
 
     def _checkImpl(self, name: str) -> None:
         """Check if a required service implementation is available for this fiber.
 
         Fiber._checkImpl() parity. Removes the impl from _store if the
         service is no longer available or its check predicate fails.
+        Services registered directly on the context (Context.provide)
+        live outside the reflect store; they are represented by a
+        synthetic impl owned by the context's fiber.
         """
         impl = self.ctx.reflect._get_impl(name, strict=True)
         if impl is None:
+            if self.ctx.has(name):
+                from anima.reflect import Impl
+
+                self._store[name] = Impl(
+                    uid=0,
+                    name=name,
+                    value=self.ctx.get(name, strict=False),
+                    ctx=self.ctx,
+                    check=None,
+                    isolate=name,
+                    fiber=self.ctx._fiber,
+                )
+                return
             self._store.pop(name, None)
             return
         try:
             if impl.check is not None and not impl.check():
                 self._store.pop(name, None)
                 return
-        except Exception:  # noqa: BLE001 - defensive: check predicate may raise
-            self.ctx.logger.error(Exception(f"check failed for {name}"))
+        except Exception as e:  # noqa: BLE001 - defensive: check predicate may raise
+            self.ctx.logger.error("check failed for %s: %s", name, e)
             self._store.pop(name, None)
             return
         self._store[name] = impl
 
-    def _refresh(
-        self,
-    ) -> None:  # pragma: no cover - empty inject branch hard to cover in sync tests
+    def _refresh(self) -> None:
         """Recalculate the fiber's epoch from its inject dependencies.
 
         Fiber._refresh() parity. Builds an epoch string from the uids
-        of all required service implementations; sets INACTIVE if any dep
-        is missing.
+        of the fibers owning the required service implementations;
+        sets INACTIVE if any dep is missing.
         """
         epoch = ""
         for name in self.inject:
@@ -501,52 +624,88 @@ class Fiber:
             if impl is None:
                 epoch = "__INACTIVE__"
                 break
-            epoch += ":" + str(impl.uid if hasattr(impl, "uid") else id(impl))
+            provider = impl.fiber
+            epoch += ":" + str(provider.uid if provider is not None else impl.uid)
         self._setEpoch(epoch)
 
-    def _setEpoch(
-        self, epoch: str
-    ) -> (
-        None
-    ):  # pragma: no cover - async transition path, hard to trigger in sync tests
-        """Set the fiber's epoch and trigger load/unload transitions.
+    def _setEpoch(self, epoch: str) -> None:
+        """Store the fiber's epoch and drive the matching transition.
 
-        Fiber._setEpoch() parity. When epoch changes from INACTIVE to
-        active, starts _reload(); otherwise starts _unload().
+        Fiber._setEpoch() parity. When the epoch changes from INACTIVE
+        to active, starts _reload(); otherwise starts _unload(). A
+        transition already in flight leaves the stored epoch for the
+        in-flight transition to chain into.
         """
         old_epoch = self._getCurrentEpoch()
         if epoch == old_epoch:
             return
+        self._setCurrentEpoch(epoch)
         if self.inertia is not None:
             return
+        self._updateState(lambda: self._begin_transition(epoch, old_epoch))
 
-        def _transition() -> FiberState:
-            if epoch != "__INACTIVE__" and old_epoch == "__INACTIVE__":
-                asyncio.ensure_future(self._reload())
+    def _try_start(
+        self, coro_fn: Callable[[], Coroutine[Any, Any, None]]
+    ) -> asyncio.Task[None] | None:
+        """Start a lifecycle transition task, or None with no loop running.
+
+        The task is registered on the context's pending set so flush()
+        waits for notify-driven transitions too, not just scheduled loads.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        task = loop.create_task(coro_fn())
+        self.inertia = task
+        self.ctx._pending_tasks.add(task)
+        task.add_done_callback(self.ctx._pending_tasks.discard)
+        return task
+
+    def _begin_transition(self, epoch: str, old_epoch: str) -> FiberState:
+        """Start the transition for an epoch change; return the target state."""
+        if epoch != "__INACTIVE__" and old_epoch == "__INACTIVE__":
+            if self._try_start(lambda: self._reload(epoch)) is not None:
                 return FiberState.LOADING
-            else:
-                asyncio.ensure_future(self._unload())
-                return FiberState.UNLOADING
+            return self.state
+        return self._begin_unload()
 
-        self._updateState(_transition)
+    def _begin_unload(self) -> FiberState:
+        """Start the unload transition; return the target state."""
+        if self._try_start(self._unload) is not None:
+            return FiberState.UNLOADING
+        return self.state
+
+    def _reload_complete(self, old_epoch: str) -> FiberState | None:
+        """Finish a reload: clear inertia, or chain into an unload if the epoch moved."""
+        if self._getCurrentEpoch() == old_epoch:
+            self.inertia = None
+            return None
+        return self._begin_unload()
+
+    def _unload_complete(self) -> FiberState | None:
+        """Finish an unload: clear inertia, or chain into a reload if the epoch is active."""
+        if self._getCurrentEpoch() == "__INACTIVE__":
+            self.inertia = None
+            return None
+        if self._try_start(lambda: self._reload(self._getCurrentEpoch())) is not None:
+            return FiberState.LOADING
+        return self.state
 
     def _getCurrentEpoch(self) -> str:
         """Get the current epoch string from the runner."""
-        return getattr(self, "_runner_epoch", "__INACTIVE__")
+        return self._runner_epoch
 
     def _setCurrentEpoch(self, epoch: str) -> None:
         """Set the current epoch string on the runner."""
         self._runner_epoch = epoch
 
-    def _updateState(
-        self, callback: Any
-    ) -> (
-        None
-    ):  # pragma: no cover - state transition path, hard to trigger in sync tests
+    def _updateState(self, callback: Any) -> None:
         """Update fiber state and notify dependents of state changes.
 
-        Fiber._updateState() parity. Emits internal/status and, on
-        ACTIVE<->NON-ACTIVE transitions, notifies reflect of service changes.
+        Fiber._updateState() parity. Emits internal/status with the
+        fiber and the old state, and on ACTIVE<->NON-ACTIVE transitions
+        notifies reflect of service changes.
         """
         old_state = self.state
         new_state = callback()
@@ -556,18 +715,15 @@ class Fiber:
         if old_state == new_state:
             return
         self.ctx.emit("internal/status", self, old_state)
-
         # Only notify changes between ACTIVE and NON-ACTIVE states
         if old_state != FiberState.ACTIVE and new_state != FiberState.ACTIVE:
             return
         for impl in self.ctx.reflect.store.values():
-            if impl.ctx.fiber is not self:
+            if impl.fiber is not self:
                 continue
             self.ctx.reflect.notify([impl.name])
 
-    def _getState(
-        self,
-    ) -> FiberState:  # pragma: no cover - state determination path, hard to trigger all branches in sync tests
+    def _getState(self) -> FiberState:
         """Determine current fiber state from uid, error, and runner epoch."""
         if self.uid is None:
             return FiberState.DISPOSED
@@ -875,8 +1031,9 @@ class Context:
         self._services["registry"] = self.registry
         # Eagerly create root fiber and set ACTIVE state (anima parity)
         if self._parent is None:
-            self._fiber = Fiber(self, target=lambda c: None, args=(), kwargs={})
-            self._fiber.state = FiberState.ACTIVE
+            self._fiber = Fiber(
+                self, target=lambda c: None, args=(), kwargs={}, root=True
+            )
 
     # Context static symbols and methods
     @classmethod
@@ -924,7 +1081,7 @@ class Context:
         if self._parent is not None:
             return self._parent.fiber
         self._fiber = Fiber(
-            self, target=lambda c: None, args=(), kwargs={}
+            self, target=lambda c: None, args=(), kwargs={}, root=True
         )  # pragma: no cover
         return self._fiber  # pragma: no cover
 
@@ -1331,8 +1488,9 @@ class Context:
 class CoreService(Service):
     """Concrete Service subclass for testing (anima parity)."""
 
-    def __init__(self, ctx: Context, name: str = "core_svc") -> None:
-        super().__init__(ctx, name)
+    def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
+        cfg = dict(config or {})
+        super().__init__(ctx, cfg.get("name", "core_svc"))
 
 
 def inject(*deps: str, **dep_configs: Any) -> Callable[[Any], Any]:

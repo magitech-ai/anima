@@ -26,7 +26,7 @@ async def test_pkg_service_init_and_plugin_mount():
 @pytest.mark.asyncio
 async def test_pkg_run_command_success_and_failure():
     ctx = Context()
-    pkg = PkgService(ctx, uv_path="uv")
+    pkg = PkgService(ctx, {"uv_path": "uv"})
 
     mock_proc = MagicMock()
     mock_proc.returncode = 0
@@ -158,7 +158,7 @@ async def test_pkg_list_installed():
 @pytest.mark.asyncio
 async def test_pkg_error_handling_and_timeout():
     ctx = Context()
-    pkg = PkgService(ctx, uv_path="non_existent_binary")
+    pkg = PkgService(ctx, {"uv_path": "non_existent_binary"})
 
     # FileNotFoundError
     with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError):

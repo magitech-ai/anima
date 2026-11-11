@@ -17,8 +17,8 @@ async def test_group_lifecycle_and_status():
     ctx = Context()
     active_runs = []
 
-    def plugin_a(c: Context, **cfg):
-        active_runs.append(f"a_{cfg.get('val', 0)}")
+    def plugin_a(c: Context, config: dict | None = None):
+        active_runs.append(f"a_{(config or {}).get('val', 0)}")
 
     def plugin_b(c: Context, **cfg):
         active_runs.append("b")
@@ -79,8 +79,8 @@ async def test_group_reconciliation_and_updates():
     load_events = []
 
     class TrackedPlugin:
-        def __init__(self, c: Context, **cfg):
-            load_events.append(f"loaded_{cfg.get('tag', 'v0')}")
+        def __init__(self, c: Context, config: dict | None = None):
+            load_events.append(f"loaded_{(config or {}).get('tag', 'v0')}")
 
     entries = [
         {"id": "t1", "target": TrackedPlugin, "config": {"tag": "v1"}},

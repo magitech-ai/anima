@@ -26,11 +26,12 @@ class HmrService(Service):
     def __init__(
         self,
         ctx: Context,
-        *,
-        root: str | Path | None = None,
-        ignored: list[str] | None = None,
-        interval: float = 0.5,
+        config: dict[str, Any] | None = None,
     ) -> None:
+        cfg = dict(config or {})
+        root = cfg.get("root")
+        ignored = cfg.get("ignored")
+        interval = cfg.get("interval", 0.5)
         super().__init__(ctx, "hmr")
         self.root = Path(root).resolve() if root else Path.cwd().resolve()
         self.ignored = (
@@ -44,7 +45,7 @@ class HmrService(Service):
         self._inflight: dict[str, asyncio.Task[ModuleType | None]] = {}
         self.ctx.effect(lambda: self.stop)
 
-    async def apply(self, ctx: Context) -> None:
+    def init(self) -> None:
         """Lifecycle hook when mounted as a plugin."""
         self.start()
 

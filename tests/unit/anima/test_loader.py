@@ -121,10 +121,10 @@ async def test_load_profile_from_list_and_dict_entries(monkeypatch):
     dummy_plugin = types.ModuleType("custom_agent_plugin")
 
     class SampleService:
-        def __init__(self, c: Context, token: str = "default"):
+        def __init__(self, c: Context, config: dict | None = None):
             self.c = c
-            self.token = token
-            loaded.append(token)
+            self.token = (config or {}).get("token", "default")
+            loaded.append(self.token)
 
     dummy_plugin.SampleService = SampleService
     monkeypatch.setitem(sys.modules, "custom_agent_plugin", dummy_plugin)
@@ -160,8 +160,8 @@ async def test_load_profile_from_yaml_file(tmp_path: Path, monkeypatch):
 
     dummy_mod = types.ModuleType("profile_mod")
 
-    def sample_plugin(c: Context, mode: str = "fast"):
-        calls.append(mode)
+    def sample_plugin(c: Context, config: dict | None = None):
+        calls.append((config or {}).get("mode", "fast"))
 
     dummy_mod.sample_plugin = sample_plugin
     monkeypatch.setitem(sys.modules, "profile_mod", dummy_mod)

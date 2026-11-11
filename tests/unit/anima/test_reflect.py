@@ -395,12 +395,16 @@ class TestReflectServiceGetImpl:
 
     def test_get_impl_strict_inactive(self):
         ctx = Context()
-        rs = ReflectService(ctx)
+
+        def needs_missing(c):
+            pass
+
+        needs_missing.inject = ["missing_dep"]
+        pending_fib = ctx.plugin(needs_missing)
+        child = Context(parent=ctx, fiber=pending_fib)
+        rs = ReflectService(child)
         rs.provide("my_svc", "hello")
-        impl = rs._get_impl("my_svc", strict=True)
-        assert impl is not None
-        # Set fiber to non-active state
-        impl.ctx.fiber._set_state(FiberState.PENDING)
+        # Strict lookup hides impls whose owning fiber is not ACTIVE.
         assert rs._get_impl("my_svc", strict=True) is None
         assert rs._get_impl("my_svc", strict=False) is not None
 
@@ -482,14 +486,24 @@ class TestReflectServiceGetImplDependents:
 
 class TestReflectServiceProvideInactive:
     def test_provide_inactive_fiber(self):
-        """provide when fiber is not active - notify not called."""
+        """provide registers the impl without activating its owning fiber."""
         ctx = Context()
-        rs = ReflectService(ctx)
-        # Manually set fiber to non-active
-        ctx.fiber._set_state(FiberState.PENDING)
-        disposer = rs.provide("my_svc", "hello")
-        assert rs.get("my_svc") == "hello"
+
+        def needs_missing(c):
+            pass
+
+        needs_missing.inject = ["missing_dep"]
+        pending_fib = ctx.plugin(needs_missing)
+        child = Context(parent=ctx, fiber=pending_fib)
+        child_rs = ReflectService(child)
+        disposer = child_rs.provide("my_svc", "hello")
+        # The impl is registered but hidden from strict lookups while
+        # its owning fiber is PENDING; the disposer still works.
+        assert child_rs.get("my_svc", strict=False) == "hello"
+        assert child_rs.get("my_svc") is None
+        assert pending_fib.state == FiberState.PENDING
         disposer()
+        assert child_rs.get("my_svc", strict=False) is None
 
 
 class TestReflectServiceDisposerAlreadyRemoved:

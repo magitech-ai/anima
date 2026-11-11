@@ -38,7 +38,7 @@ async def test_hmr_service_lifecycle_and_start_stop(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_hmr_find_module_by_path(tmp_path: Path):
     ctx = Context()
-    hmr = HmrService(ctx, root=tmp_path)
+    hmr = HmrService(ctx, {"root": tmp_path})
 
     # Create a dynamic module
     mod_path = tmp_path / "dynamic_pkg" / "mod_a.py"
@@ -99,7 +99,7 @@ async def test_hmr_find_module_by_path(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_hmr_on_file_change_filtering(tmp_path: Path):
     ctx = Context()
-    hmr = HmrService(ctx, root=tmp_path)
+    hmr = HmrService(ctx, {"root": tmp_path})
 
     # Action not change or add
     await hmr._on_file_change("unlink", tmp_path / "foo.py")
@@ -203,7 +203,7 @@ async def test_hmr_reload_concurrent_deduped(tmp_path: Path):
     # event firing while an explicit reload is in flight) share one
     # in-flight reload: lifecycle events fire exactly once.
     ctx = Context()
-    hmr = HmrService(ctx, root=tmp_path)
+    hmr = HmrService(ctx, {"root": tmp_path})
 
     mod_file = tmp_path / "dedup_plugin.py"
     mod_file.write_text("VALUE = 1\n")
@@ -247,7 +247,7 @@ async def test_hmr_reload_concurrent_deduped(tmp_path: Path):
 async def test_hmr_reload_instance_and_function_plugins(tmp_path: Path):
     ctx = Context()
     ctx.plugin(WatcherService)
-    hmr = HmrService(ctx, root=tmp_path)
+    hmr = HmrService(ctx, {"root": tmp_path})
 
     mod_file = tmp_path / "variants_plugin.py"
     mod_file.write_text(
@@ -302,7 +302,7 @@ async def test_hmr_reload_instance_and_function_plugins(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_hmr_reload_error_handling(tmp_path: Path):
     ctx = Context()
-    hmr = HmrService(ctx, root=tmp_path)
+    hmr = HmrService(ctx, {"root": tmp_path})
 
     # Non-existent module
     assert await hmr.reload_module("non_existent_module_xyz") is None

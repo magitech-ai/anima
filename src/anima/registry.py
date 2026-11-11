@@ -10,7 +10,7 @@ import inspect
 from collections.abc import Callable, Iterable
 from typing import Any, cast
 
-from anima.core import Context, Fiber, FiberState
+from anima.core import Context, Fiber
 
 
 def Inject(name: str, config: Any = None) -> Callable[[Any], Any]:
@@ -231,8 +231,8 @@ class RegistryService:
             def __init__(self, ctx: Context) -> None:
                 self.ctx = ctx
 
-            async def apply(self, ctx: Context) -> Any:
-                res = callback(ctx)
+            async def init(self) -> Any:
+                res = callback(self.ctx)
                 if inspect.isawaitable(res):
                     return await res
                 return res
@@ -253,10 +253,12 @@ class RegistryService:
         config_dict = dict(config or {})
         fiber = Fiber(self.ctx, target, (), config_dict)
         runtime.fibers.append(fiber)
-        self.ctx.fiber.child_fibers.append(fiber)
+        parent_fiber = self.ctx.fiber
+        fiber.parent_fiber = parent_fiber
+        parent_fiber.child_fibers.append(fiber)
         self.ctx.emit("internal/plugin", fiber)
 
-        if fiber.state != FiberState.FAILED and fiber.check_dependencies():
+        if fiber.check_dependencies():
             try:
                 self.ctx._schedule_task(fiber.load())
             except RuntimeError:
