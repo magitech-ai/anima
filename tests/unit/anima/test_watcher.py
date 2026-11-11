@@ -1,4 +1,6 @@
 import asyncio
+import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -209,6 +211,18 @@ async def test_watcher_error_handling_and_edge_cases(tmp_path: Path):
 
     test_file = tmp_path / "throw.txt"
     test_file.write_text("v1")
+
+    # Rewrite with a strictly increasing mtime: _scan keys state on
+    # (st_mtime, st_size), and same-size writes in quick succession can
+    # share one mtime tick, so a change would go undetected and the
+    # branches below would never run.
+    mtime = [time.time() + 2]
+
+    def rewrite(content: str) -> None:
+        test_file.write_text(content)
+        mtime[0] += 1
+        os.utime(test_file, (mtime[0], mtime[0]))
+
     poll_entry = WatchEntry(
         target_path=test_file,
         callback=failing_cb,
@@ -217,13 +231,13 @@ async def test_watcher_error_handling_and_edge_cases(tmp_path: Path):
         ignore_initial=True,
     )
     await watcher._poll_once(poll_entry, initial=True)
-    test_file.write_text("v2")
+    rewrite("v2")
     # Shouldn't raise
     await watcher._poll_once(poll_entry, initial=False)
 
     # Context parallel raising exception
     with patch.object(ctx, "parallel", side_effect=RuntimeError("bus fail")):
-        test_file.write_text("v3")
+        rewrite("v3")
         await watcher._poll_once(poll_entry, initial=False)
 
     # Stopped midway through event emission
@@ -235,7 +249,7 @@ async def test_watcher_error_handling_and_edge_cases(tmp_path: Path):
         ignore_initial=True,
     )
     await watcher._poll_once(stop_entry, initial=True)
-    test_file.write_text("v4")
+    rewrite("v4")
     stop_entry.stopped = True
     await watcher._poll_once(stop_entry, initial=False)
 
