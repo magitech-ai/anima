@@ -193,10 +193,14 @@ class Fiber:
         if config_schema is None:
             return config
 
-        from anima.schema import Schema
+        from anima.schema import Schema, ValidationError
 
         if isinstance(config_schema, Schema):
-            return config_schema.validate(config)
+            result = getattr(config_schema, "~standard").validate(config)
+            issues = result.get("issues")
+            if issues:
+                raise ValidationError(issues)
+            return result["value"]
         if callable(config_schema):
             if isinstance(config, dict):
                 return config_schema(**config)

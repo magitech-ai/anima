@@ -75,7 +75,8 @@ def test_schema_object_and_nesting():
     # Missing required field
     with pytest.raises(SchemaError) as exc:
         user_schema.validate({"age": 25})
-    assert "missing required field 'name'" in str(exc.value)
+    assert str(exc.value) == "$.name missing required value"
+    assert exc.value.path == ["name"]
 
     # Non-dict value
     with pytest.raises(SchemaError):
@@ -142,9 +143,12 @@ def test_schema_additional_branches_and_json_schemas():
     with pytest.raises(SchemaError):
         num_bound.validate(60.0)
 
-    # 3. Object with optional field without default
+    # 3. Object with optional field without default: absent means omitted
     obj_opt = Schema.object({"opt_field": Schema.string()})
-    assert obj_opt.validate({}) == {"opt_field": None}
+    assert obj_opt.validate({}) == {}
+
+    # ... but an explicitly present null is kept as null
+    assert obj_opt.validate({"opt_field": None}) == {"opt_field": None}
 
     # Object with default dict validated on None
     obj_def = Schema.object({"name": Schema.string().default("auto")}).default({})
@@ -168,8 +172,10 @@ def test_schema_additional_branches_and_json_schemas():
     assert Schema.const("exact").to_json_schema() == {"const": "exact"}
     assert Schema.any().to_json_schema() == {}
 
-    # Unknown type fallback
-    assert Schema("unknown_type").validate("passthrough") == "passthrough"
+    # Unknown type fails loud instead of passing through
+    with pytest.raises(SchemaError) as exc:
+        Schema("unknown_type").validate("passthrough")
+    assert 'unsupported type "unknown_type"' in str(exc.value)
 
     # List, dict, object without inner/required in to_json_schema
     assert Schema("list").to_json_schema() == {"type": "array"}
