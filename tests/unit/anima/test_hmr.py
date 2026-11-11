@@ -344,3 +344,79 @@ async def test_hmr_reload_error_handling(tmp_path: Path):
 
     finally:
         sys.modules.pop(mod_name, None)
+
+
+@pytest.mark.asyncio
+async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
+    """A reload racing a stale in-flight reload returns the current content.
+
+    A slow effect disposer holds the first reload in flight; the file is
+    updated while it runs. The second reload must not join the stale one
+    (which would return version 1); it waits, then reloads version 2.
+    """
+    ctx = Context()
+    ctx.plugin(WatcherService)
+    ctx.plugin(HmrService, root=tmp_path, interval=0.01)
+    await ctx.flush()
+
+    hmr: HmrService = ctx.hmr
+    mod_file = tmp_path / "sample_plugin.py"
+    mod_file.write_text(
+        "import asyncio\n"
+        "class MyPlugin:\n"
+        "    version = 1\n"
+        "    def __init__(self, ctx):\n"
+        "        self.v = 1\n"
+        "        ctx.effect(lambda: self._slow_disposer)\n"
+        "    async def _slow_disposer(self):\n"
+        "        await asyncio.sleep(0.5)\n"
+    )
+    mod_name = "sample_plugin"
+    spec = importlib.util.spec_from_file_location(mod_name, str(mod_file))
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    mod.__spec__ = spec
+    sys.modules[mod_name] = mod
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    try:
+        fib = ctx.plugin(mod.MyPlugin)
+        await ctx.flush()
+        assert fib.state == FiberState.ACTIVE
+
+        # Start a reload of version 1; the slow disposer holds it in flight.
+        first = asyncio.create_task(hmr.reload_module(mod_name, path=mod_file))
+        await asyncio.sleep(0.1)
+        assert hmr._inflight.get(mod_name) is not None
+
+        # Update the file while the first reload is still running.
+        import os
+        import time
+
+        mod_file.write_text(
+            "class MyPlugin:\n"
+            "    version = 2\n"
+            "    def __init__(self, ctx):\n"
+            "        self.v = 2\n"
+        )
+        os.utime(mod_file, (time.time() + 2, time.time() + 2))
+
+        reloaded = await hmr.reload_module(mod_name, path=mod_file)
+        assert reloaded is not None
+        assert reloaded.MyPlugin.version == 2
+        assert fib.target.version == 2
+        assert await first is not None
+    finally:
+        sys.modules.pop(mod_name, None)
+
+
+@pytest.mark.asyncio
+async def test_hmr_reload_missing_file_returns_none(tmp_path: Path):
+    """reload_module on a missing file returns None instead of raising."""
+    ctx = Context()
+    ctx.plugin(WatcherService)
+    ctx.plugin(HmrService, root=tmp_path, interval=0.01)
+    await ctx.flush()
+    hmr: HmrService = ctx.hmr
+    assert await hmr.reload_module("missing_mod", path=tmp_path / "nope.py") is None
