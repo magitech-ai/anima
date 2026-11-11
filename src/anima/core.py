@@ -32,14 +32,11 @@ logger = logging.getLogger("anima")
 symbols = {
     # internal symbols
     "shadow": "anima.shadow",
-    "caller": "anima.caller",
     "receiver": "anima.receiver",
     "original": "anima.original",
-    "decorator": "anima.decorator",
     "initHooks": "anima.initHooks",
     "checkProto": "anima.checkProto",
     # context symbols
-    "root": "anima.root",
     "effect": "anima.effect",
     "filter": "anima.filter",
     "isolate": "anima.isolate",
@@ -47,10 +44,13 @@ symbols = {
     # service symbols
     "init": "anima.init",
     "check": "anima.check",
+    "config": "anima.config",
     "invoke": "anima.invoke",
     "metadata": "anima.metadata",
     "extend": "anima.extend",
     "tracker": "anima.tracker",
+    "resolveConfig": "anima.resolveConfig",
+    # anima-only intercept-chain machinery (no upstream counterpart)
     "mergeIntercept": "anima.mergeIntercept",
     "resolveIntercept": "anima.resolveIntercept",
 }
@@ -386,6 +386,20 @@ class Fiber:
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
             )
         ]
+        if (
+            len(positional) >= 2
+            and inspect.isclass(fn)
+            and issubclass(fn, Service)
+            and positional[1].name != "config"
+        ):
+            # Fail loud instead of misrouting the config dict into a
+            # non-config second parameter (a Service subclass mounted
+            # here must declare (ctx, config)).
+            raise TypeError(
+                f"Service {fn.__name__} declares __init__ with a "
+                f"non-config second parameter '{positional[1].name}'; "
+                "services mounted here must declare (ctx, config)"
+            )
         has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
         if has_varargs or len(positional) >= 2:
             return fn(self.ctx, config)
@@ -810,10 +824,24 @@ class _BoundService:
         svc = object.__getattribute__(self, "_svc")
         setattr(svc, key, value)
 
+    @staticmethod
+    def _is_async_call(svc: Service) -> bool:
+        """Whether calling ``svc`` produces an awaitable result.
+
+        ``Service.__call__`` itself is a plain function, so checking it
+        always answers False. The async-ness lives in the resolved
+        symbol-keyed invoke, or in a subclass ``__call__`` override.
+        """
+        invoke = getattr(svc, symbols["invoke"], None)
+        if invoke is not None:
+            return bool(inspect.iscoroutinefunction(invoke))
+        call = type(svc).__call__
+        return call is not Service.__call__ and bool(inspect.iscoroutinefunction(call))
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         svc = object.__getattribute__(self, "_svc")
         ctx = object.__getattribute__(self, "_ctx")
-        if callable(svc) and inspect.iscoroutinefunction(svc.__call__):
+        if self._is_async_call(svc):
 
             async def _async_call() -> Any:
                 token = _access_context.set(ctx)
@@ -841,22 +869,59 @@ class _BoundService:
         return repr(svc)
 
 
-class Service:
+class _ServiceMeta(type):
+    """Metaclass for Service: proxy-aware isinstance checks.
+
+    Mirrors the upstream Symbol.hasInstance walk: the check follows
+    the constructor chain, unwrapping bound-service facades so a
+    service accessed through another context still checks as its own
+    class. Defined on the metaclass because isinstance() only consults
+    __instancecheck__ there, never on the class itself.
+    """
+
+    def __instancecheck__(cls, instance: Any) -> bool:
+        if not instance:
+            return False
+        target = instance
+        if isinstance(target, _BoundService):
+            target = object.__getattribute__(target, "_svc")
+        return any(base is cls for base in type(target).__mro__)
+
+
+class Service(metaclass=_ServiceMeta):
     """Base class for named capabilities mounted onto Context."""
 
     # Symbol-based protocol (anima parity)
     __symbols__: ClassVar[dict[str, str]] = {
         "init": symbols["init"],
         "check": symbols["check"],
+        "config": symbols["config"],
         "invoke": symbols["invoke"],
         "metadata": symbols["metadata"],
         "extend": symbols["extend"],
         "tracker": symbols["tracker"],
+        "resolveConfig": symbols["resolveConfig"],
         "mergeIntercept": symbols["mergeIntercept"],
         "resolveIntercept": symbols["resolveIntercept"],
     }
 
-    def __init__(self, ctx: Context, name: str) -> None:
+    def __init__(self, ctx: Context, name: str | None = None) -> None:
+        """Register this service under ``name``.
+
+        ``name`` falls back to the ``provide`` class attribute when
+        omitted (``name ??= constructor['provide']``). A name must be
+        a string; anything else fails loud instead of corrupting the
+        registry with an unhashable key.
+        """
+        if name is None:
+            name = getattr(type(self), "provide", None)
+        if name is None:
+            raise TypeError(
+                f"{type(self).__name__} requires a service name or a "
+                "'provide' class attribute"
+            )
+        if not isinstance(name, str):
+            raise TypeError(f"Service name must be a string, got {type(name).__name__}")
         self.ctx = ctx
         self.name = name
         # register via reflect.provide with check symbol
@@ -869,28 +934,16 @@ class Service:
 
         ctx.effect(lambda: _unregister)
 
-    def __instancecheck__(self, instance: Any) -> bool:
-        """Symbol.hasInstance equivalent - walk prototype chain."""
-        if not instance:
-            return False
-        constructor = (
-            instance.__class__ if hasattr(instance, "__class__") else type(instance)
-        )
-        while constructor is not None:
-            if constructor is self:  # self IS the class in __instancecheck__
-                return True
-            bases = getattr(constructor, "__bases__", None)
-            if bases:
-                constructor = bases[0] if len(bases) == 1 else None  # pragma: no cover
-            else:
-                constructor = None  # pragma: no cover
-        return False
-
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """[symbols.invoke] - make service instances callable."""
-        invoke = getattr(type(self), "invoke", None)
+        """[symbols.invoke] - make service instances callable.
+
+        Dispatches to the callable stored under the declared symbol
+        key (``symbols["invoke"]``); a plain-named ``invoke``
+        attribute is not consulted.
+        """
+        invoke = getattr(self, symbols["invoke"], None)
         if invoke is not None and callable(invoke):
-            return invoke(self, *args, **kwargs)
+            return invoke(*args, **kwargs)
         raise TypeError(f"Service '{self.name}' is not callable")
 
     def resolve_intercept(self) -> dict[str, Any]:
@@ -943,18 +996,17 @@ class Service:
         return my_label == their_label
 
     def _extend(self, props: dict[str, Any] | None = None) -> Any:
-        """[symbols.extend] - create extended self with props."""
-        if self.__symbols__.get("invoke"):
-            # Create callable extension
-            obj = object.__new__(self.__class__)
-            obj.__dict__.update(self.__dict__)
-            obj.__dict__.update(props or {})
-            return obj
-        else:
-            obj = object.__new__(self.__class__)
-            obj.__dict__.update(self.__dict__)
-            obj.__dict__.update(props or {})
-            return obj
+        """[symbols.extend] - create extended self with props.
+
+        Python has no callable-vs-plain instance distinction: every
+        Service defines __call__, so the extension is always an
+        instance of the same class and callability follows the
+        symbol-keyed invoke either way.
+        """
+        obj = object.__new__(self.__class__)
+        obj.__dict__.update(self.__dict__)
+        obj.__dict__.update(props or {})
+        return obj
 
 
 class Context:
@@ -979,10 +1031,12 @@ class Context:
         "intercept": symbols["intercept"],
         "init": symbols["init"],
         "check": symbols["check"],
+        "config": symbols["config"],
         "invoke": symbols["invoke"],
         "metadata": symbols["metadata"],
         "extend": symbols["extend"],
         "tracker": symbols["tracker"],
+        "resolveConfig": symbols["resolveConfig"],
         "mergeIntercept": symbols["mergeIntercept"],
         "resolveIntercept": symbols["resolveIntercept"],
     }

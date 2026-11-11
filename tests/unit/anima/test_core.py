@@ -1643,14 +1643,14 @@ class TestServiceInstanceCheckEdgeCases:
             pass
 
         sub = SubService(ctx)
-        # Call __instancecheck__ directly since isinstance() uses metaclass lookup
-        result = CoreService.__instancecheck__(CoreService, sub)
+        # __instancecheck__ lives on the Service metaclass; isinstance()
+        # consults it there, never on the class itself.
+        result = type(CoreService).__instancecheck__(CoreService, sub)
         assert result is True
-        # Also verify isinstance works (uses default type.__instancecheck__)
         assert isinstance(sub, CoreService)
 
     def test_service_instancecheck_direct_call(self):
-        """Test direct __instancecheck__ call covering the while loop body."""
+        """Test direct __instancecheck__ call covering the MRO walk."""
         ctx = Context()
 
         class DeepSubService(CoreService):
@@ -1661,7 +1661,7 @@ class TestServiceInstanceCheckEdgeCases:
 
         subsub = DeepSubSubService(ctx)
         # Walk up: DeepSubSubService -> DeepSubService -> CoreService
-        result = CoreService.__instancecheck__(CoreService, subsub)
+        result = type(CoreService).__instancecheck__(CoreService, subsub)
         assert result is True
         assert isinstance(subsub, CoreService)
 
@@ -1697,17 +1697,17 @@ class TestServiceCall:
             svc()
 
     def test_service_call_invoke(self):
-        """Test Service.__call__ calls invoke method when defined."""
+        """Test Service.__call__ calls the symbol-keyed invoke when defined."""
         ctx = Context()
 
         class InvokableService(Service):
             def __init__(self, c: Context):
                 super().__init__(c, "invokable")
 
-            @classmethod
-            def invoke(cls, self_instance, *args, **kwargs):
+            def _invoke(self, *args: Any, **kwargs: Any) -> Any:
                 return args[0] if args else None
 
+        setattr(InvokableService, symbols["invoke"], InvokableService._invoke)
         svc = InvokableService(ctx)
         result = svc(42)
         assert result == 42
@@ -1809,7 +1809,7 @@ class TestContextContains:
 
 class TestServiceExtendElseBranch:
     def test_service_extend_without_invoke_flag(self):
-        """Test _extend else branch (covers lines 562-565)."""
+        """Test _extend for a service without a symbol-keyed invoke."""
         ctx = Context()
 
         class NoInvokeService(Service):
@@ -2021,14 +2021,19 @@ class TestReflectService:
 
 class TestInstanceCheckDirect:
     def test_instancecheck_none_instance(self):
-        """Test __instancecheck__ with None instance (covers line 520)."""
+        """Test __instancecheck__ with None instance."""
         ctx = Context()
         CoreService(ctx)
-        result = CoreService.__instancecheck__(CoreService, None)
+        result = type(CoreService).__instancecheck__(CoreService, None)
         assert result is False
 
     def test_instancecheck_multiple_bases(self):
-        """Test __instancecheck__ with multiple base classes (covers lines 531-532)."""
+        """Test __instancecheck__ with multiple base classes.
+
+        The MRO walk follows the full chain, so a diamond subclass
+        checks as an instance — unlike the old single-base walk, which
+        wrongly answered False here.
+        """
         ctx = Context()
 
         class Base1(CoreService):
@@ -2041,22 +2046,16 @@ class TestInstanceCheckDirect:
             pass
 
         subsub = MultiSub(ctx)
-        # MultiSub.__bases__ = (Base1, Base2) has len 2, so constructor becomes None
-        result = CoreService.__instancecheck__(CoreService, subsub)
-        assert result is False  # MultiSub doesn't directly inherit from CoreService
-        # But isinstance uses full MRO which includes CoreService:
+        result = type(CoreService).__instancecheck__(CoreService, subsub)
+        assert result is True
         assert isinstance(subsub, CoreService)
 
 
 class TestInstanceCheckObjectBase:
     def test_instancecheck_object_base(self):
-        """Test __instancecheck__ where base class has empty __bases__ (covers line 534).
-
-        object.__bases__ is (), which is falsy, so the `else: break` branch is taken.
-        """
+        """Test __instancecheck__ where the instance is a bare object."""
         Context()
-        # object.__bases__ is () - empty tuple, so bases is falsy
-        result = CoreService.__instancecheck__(CoreService, object())
+        result = type(CoreService).__instancecheck__(CoreService, object())
         assert result is False  # object is not an instance of CoreService
 
 
