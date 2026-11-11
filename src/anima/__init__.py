@@ -38,9 +38,16 @@ from anima.logger import (
 from anima.pkg import PkgResult, PkgService
 from anima.reflect import ReflectService
 from anima.registry import Inject, RegistryService, resolve_inject
-from anima.schema import Schema, SchemaError, z
+from anima.schema import Schema, SchemaError, ValidationError, z
 from anima.server import Route, ServerRequest, ServerResponse, ServerService, WebSocket
 from anima.timer import Scheduled, TimerService
+from anima.volatile import (
+    Volatile,
+    create_volatile,
+    is_volatile,
+    update_volatile,
+    volatile_entries,
+)
 from anima.watcher import WatchEntry, WatcherService
 
 # CLI symbols resolve lazily: importing anima.cli eagerly puts it in
@@ -105,17 +112,23 @@ __all__ = [
     "ServerService",
     "Service",
     "TimerService",
+    "ValidationError",
+    "Volatile",
     "WatchEntry",
     "WatcherService",
     "WebSocket",
     "apply_patch",
+    "create_volatile",
     "diff_entries",
     "inject",
     "interpolate_env",
     "is_bailed",
+    "is_volatile",
     "load_profile",
     "resolve_component_target",
     "resolve_inject",
     "save_profile",
+    "update_volatile",
+    "volatile_entries",
     "z",
 ]

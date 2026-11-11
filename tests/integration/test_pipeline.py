@@ -328,7 +328,9 @@ async def test_extended_ecosystem_network_cli_and_schema_integration(tmp_path: P
 
     assert fib_invalid.state == FiberState.FAILED
     assert isinstance(fib_invalid.error, SchemaError)
-    assert "missing required field 'api_key'" in str(fib_invalid.error)
+    assert str(fib_invalid.error) == (
+        "invalid config:\n  - $.api_key missing required value (at api_key)"
+    )
 
     # 2. Multi-File Configuration Resolution ($include and Journal)
     inc = IncludeService(ctx)
