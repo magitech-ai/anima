@@ -123,6 +123,12 @@ class HmrService(Service):
         Concurrent reloads of the same module share one in-flight reload:
         a file-watcher event racing an explicit reload must not reload the
         module twice or emit the lifecycle events twice.
+
+        Do not call this reentrantly from an HMR lifecycle handler
+        (``hmr/before-reload``, ``hmr/after-reload``, ``hmr/reload``,
+        ``hmr/error``) for the same module: the handler would await the
+        in-flight reload it is running inside, and deadlock. Reloading a
+        different module from a handler is safe.
         """
         existing = self._inflight.get(mod_name)
         if existing is not None:
