@@ -273,7 +273,7 @@ async def test_loader_persistence_and_commit(tmp_path: Path):
     ctx = Context()
     save_file = tmp_path / "saved_profile.yaml"
 
-    loader = LoaderService(ctx, filename=save_file)
+    loader = LoaderService(ctx, {"filename": save_file})
     loader.load(
         [
             {"id": "p1", "name": "anima.events:EventBus", "config": {"opt": 1}},

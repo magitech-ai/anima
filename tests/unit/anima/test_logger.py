@@ -193,7 +193,7 @@ def test_console_exporter_stream_output(monkeypatch):
 @pytest.mark.asyncio
 async def test_logger_service_buffer_and_filtering():
     ctx = Context()
-    svc = LoggerService(ctx, buffer_size=3)
+    svc = LoggerService(ctx, {"buffer_size": 3})
     ctx.provide("logger", svc)
 
     collected = []

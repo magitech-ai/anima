@@ -264,8 +264,9 @@ class CliCommand:
 class CliService(Service):
     """Subsystem for registering, parsing, and dispatching command-line interfaces."""
 
-    def __init__(self, ctx: Context, name: str = "cli") -> None:
-        super().__init__(ctx, name)
+    def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
+        cfg = dict(config or {})
+        super().__init__(ctx, cfg.get("name", "cli"))
         self.commands: list[CliCommand] = []
         self.aliases: dict[str, CliCommand] = {}
         self.types: dict[str, Callable[[str], Any]] = {}
