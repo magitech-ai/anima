@@ -10,8 +10,8 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 from anima.core import (
-    Context,
     AnimaError,
+    Context,
     FiberState,
     Service,
     _BoundService,
@@ -497,9 +497,7 @@ class ReflectService:
             object.__setattr__(target, prop, value)
             return True
 
-        error = AnimaError(
-            "set_error", f'cannot set property "{prop}" without provide'
-        )
+        error = AnimaError("set_error", f'cannot set property "{prop}" without provide')
 
         try:
             defn = target.reflect.props.get(prop)
