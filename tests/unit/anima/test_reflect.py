@@ -2,7 +2,7 @@
 
 import pytest
 
-from anima.core import Context, AnimaError, FiberState, Service, symbols
+from anima.core import AnimaError, Context, FiberState, Service, symbols
 from anima.reflect import Impl, Property, ReflectService
 
 
