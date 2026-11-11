@@ -5,6 +5,11 @@ import pytest
 from anima.core import Context
 from anima.timer import TimerService
 
+# Timing margins are deliberately generous: Windows timer granularity is
+# ~15.6ms, so sub-50ms delays plus a 1ms async hop routinely overrun tight
+# wait windows on Windows CI. The assertions (what fires, how often, in
+# what order) are unchanged; only the clocks are coarser.
+
 
 @pytest.mark.asyncio
 async def test_timeout_callback_and_disposal():
@@ -16,24 +21,24 @@ async def test_timeout_callback_and_disposal():
     async_runs = []
 
     # Sync callback timeout
-    timer.timeout(lambda: sync_runs.append("sync_done"), 0.01)
+    timer.timeout(lambda: sync_runs.append("sync_done"), 0.1)
 
     # Async callback timeout
     async def async_cb():
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0.01)
         async_runs.append("async_done")
 
-    timer.timeout(async_cb, 0.01)
+    timer.timeout(async_cb, 0.1)
 
-    await asyncio.sleep(0.03)
+    await asyncio.sleep(0.3)
     assert sync_runs == ["sync_done"]
     assert async_runs == ["async_done"]
 
     # Manual cancel before delay
     cancelled_runs = []
-    d = timer.timeout(lambda: cancelled_runs.append(True), 0.05)
+    d = timer.timeout(lambda: cancelled_runs.append(True), 0.5)
     d()
-    await asyncio.sleep(0.06)
+    await asyncio.sleep(0.6)
     assert cancelled_runs == []
 
 
@@ -82,15 +87,15 @@ async def test_interval_execution_and_disposal():
     sync_ticks = []
     async_ticks = []
 
-    d1 = timer.interval(lambda: sync_ticks.append(1), 0.01)
+    d1 = timer.interval(lambda: sync_ticks.append(1), 0.05)
 
     async def async_ticker():
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0.01)
         async_ticks.append(1)
 
-    d2 = timer.interval(async_ticker, 0.01)
+    d2 = timer.interval(async_ticker, 0.05)
 
-    await asyncio.sleep(0.035)
+    await asyncio.sleep(0.35)
     d1()
     d2()
 
@@ -100,7 +105,7 @@ async def test_interval_execution_and_disposal():
     assert count2 >= 2
 
     # Should not increase after disposal
-    await asyncio.sleep(0.02)
+    await asyncio.sleep(0.2)
     assert len(sync_ticks) == count1
     assert len(async_ticks) == count2
 
@@ -114,17 +119,17 @@ async def test_debounce_coalescing_and_cancellation():
     invocations = []
 
     async def debounced_target(x):
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0.01)
         invocations.append(x)
 
-    scheduled = timer.debounce(debounced_target, 0.02)
+    scheduled = timer.debounce(debounced_target, 0.1)
 
     # Rapid calls within delay window
     scheduled("first")
     scheduled("second")
     scheduled("final")
 
-    await asyncio.sleep(0.04)
+    await asyncio.sleep(0.4)
     assert invocations == ["final"]
 
     # Call after dispose does nothing
@@ -134,17 +139,17 @@ async def test_debounce_coalescing_and_cancellation():
 
     # Cancel pending debounce task via dispose
     pending_calls = []
-    deb = timer.debounce(lambda: pending_calls.append(1), 0.05)
+    deb = timer.debounce(lambda: pending_calls.append(1), 0.25)
     deb()
     deb.dispose()
-    await asyncio.sleep(0.06)
+    await asyncio.sleep(0.6)
     assert pending_calls == []
 
     # Sync callback in debounce
     sync_deb_calls = []
-    deb_sync = timer.debounce(lambda x: sync_deb_calls.append(x), 0.01)
+    deb_sync = timer.debounce(lambda x: sync_deb_calls.append(x), 0.05)
     deb_sync("sync_val")
-    await asyncio.sleep(0.02)
+    await asyncio.sleep(0.2)
     assert sync_deb_calls == ["sync_val"]
 
 
@@ -161,16 +166,16 @@ async def test_throttle_rate_limiting_and_trailing():
         calls_trailing.append(x)
 
     async def on_no_trailing(x):
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0.01)
         calls_no_trailing.append(x)
 
-    throttled1 = timer.throttle(on_trailing, 0.03, no_trailing=False)
-    throttled2 = timer.throttle(on_no_trailing, 0.03, no_trailing=True)
+    throttled1 = timer.throttle(on_trailing, 0.15, no_trailing=False)
+    throttled2 = timer.throttle(on_no_trailing, 0.15, no_trailing=True)
 
     # Call 1: runs immediately
     throttled1("a1")
     throttled2("b1")
-    await asyncio.sleep(0.005)
+    await asyncio.sleep(0.05)
     assert calls_trailing == ["a1"]
     assert calls_no_trailing == ["b1"]
 
@@ -179,7 +184,7 @@ async def test_throttle_rate_limiting_and_trailing():
     throttled2("b2")
 
     # Await trailing execution
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.5)
     assert calls_trailing == ["a1", "a2"]
     # No-trailing dropped b2
     assert calls_no_trailing == ["b1"]
@@ -193,38 +198,38 @@ async def test_throttle_rate_limiting_and_trailing():
 
     # Cancel trailing task on dispose
     trailing_cancelled = []
-    t_cancel = timer.throttle(lambda x: trailing_cancelled.append(x), 0.05)
+    t_cancel = timer.throttle(lambda x: trailing_cancelled.append(x), 0.25)
     t_cancel(1)
     t_cancel(2)  # trailing scheduled
     t_cancel.dispose()  # cancels trailing
-    await asyncio.sleep(0.06)
+    await asyncio.sleep(0.6)
     assert trailing_cancelled == [1]
 
     # Replacing trailing task with newer trailing call
     newer_trailing = []
-    t_replace = timer.throttle(lambda x: newer_trailing.append(x), 0.04)
+    t_replace = timer.throttle(lambda x: newer_trailing.append(x), 0.2)
     t_replace("first")
     t_replace("second")
     t_replace("third")
-    await asyncio.sleep(0.06)
+    await asyncio.sleep(0.6)
     assert newer_trailing == ["first", "third"]
 
     # Trailing task calling async callback
     async_trailing_calls = []
 
     async def async_trailing_cb(x):
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0.01)
         async_trailing_calls.append(x)
 
-    t_async_trail = timer.throttle(async_trailing_cb, 0.02)
+    t_async_trail = timer.throttle(async_trailing_cb, 0.1)
     t_async_trail("initial")
     t_async_trail("queued")
-    await asyncio.sleep(0.04)
+    await asyncio.sleep(0.4)
     assert async_trailing_calls == ["initial", "queued"]
 
     # Disposal before any invocation
-    d_uncalled = timer.debounce(lambda: None, 0.01)
+    d_uncalled = timer.debounce(lambda: None, 0.05)
     d_uncalled.dispose()
 
-    t_uncalled = timer.throttle(lambda: None, 0.01)
+    t_uncalled = timer.throttle(lambda: None, 0.05)
     t_uncalled.dispose()

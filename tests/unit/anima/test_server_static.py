@@ -17,20 +17,23 @@ def fixtures_dir(tmp_path: Path) -> Path:
     root = tmp_path / "static_fixtures"
     root.mkdir()
 
-    (root / "hello.html").write_text("<h1>Hello</h1>\n", encoding="utf-8")
-    (root / "noext").write_text("plain text\n", encoding="utf-8")
-    (root / "page").write_text("<h1>Page without extension</h1>\n", encoding="utf-8")
-    (root / "page.html").write_text("<h1>Page with extension</h1>\n", encoding="utf-8")
-    (root / "index.html").write_text("<h1>Index</h1>\n", encoding="utf-8")
+    # Fixtures are byte-exact: write_bytes (not write_text) so the on-disk
+    # bytes are identical on every platform. write_text translates "\n" to
+    # "\r\n" on Windows and the static server serves bytes verbatim.
+    (root / "hello.html").write_bytes(b"<h1>Hello</h1>\n")
+    (root / "noext").write_bytes(b"plain text\n")
+    (root / "page").write_bytes(b"<h1>Page without extension</h1>\n")
+    (root / "page.html").write_bytes(b"<h1>Page with extension</h1>\n")
+    (root / "index.html").write_bytes(b"<h1>Index</h1>\n")
     (root / ".secret").write_text("classified", encoding="utf-8")
 
     sub = root / "sub"
     sub.mkdir()
-    (sub / "index.html").write_text("<h1>Sub Index</h1>\n", encoding="utf-8")
+    (sub / "index.html").write_bytes(b"<h1>Sub Index</h1>\n")
 
     errors = root / "errors"
     errors.mkdir()
-    (errors / "404.html").write_text("<h1>Not Found</h1>\n", encoding="utf-8")
+    (errors / "404.html").write_bytes(b"<h1>Not Found</h1>\n")
 
     return root
 
