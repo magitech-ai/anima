@@ -335,6 +335,22 @@ def test_union_json_stringify_edges():
         union.validate(circular)
 
 
+def test_union_accepts_list_argument():
+    # A single list argument is unwrapped, matching the varargs form.
+    union = Schema.union([Schema.string(), Schema.integer()])
+    assert union.validate("a") == "a"
+    assert union.validate(2) == 2
+    with pytest.raises(SchemaError) as exc:
+        union.validate(3.14)
+    assert str(exc.value) == "expected string | integer but got 3.14"
+    # The list form of the enum idiom.
+    enum = Schema.union(
+        [Schema.const("darwin"), Schema.const("win32"), Schema.const(None)]
+    )
+    assert enum.validate("darwin") == "darwin"
+    assert enum.validate(None) is None
+
+
 # ---------------------------------------------------------------------------
 # S7 — array-length min/max
 # ---------------------------------------------------------------------------
@@ -382,6 +398,16 @@ def test_default_does_not_imply_required():
     schema = Schema.string().default("fallback")
     assert schema.validate(None) == "fallback"
     assert schema.validate("ok") == "ok"
+
+
+def test_default_none_returns_null():
+    # A None default on null input returns null without dispatching.
+    assert Schema.string().default(None).validate(None) is None
+    schema = Schema.object({"a": Schema.string().default(None)})
+    # An absent property with a None default stays absent.
+    assert schema.validate({}) == {}
+    # Explicit null on the property is kept.
+    assert schema.validate({"a": None}) == {"a": None}
 
 
 def test_default_is_validated_and_cloned():
@@ -445,6 +471,12 @@ def test_loose_fallback():
     # Loose does not catch the required throw.
     with pytest.raises(SchemaError, match="missing required value"):
         Schema.string().required().loose().validate(None)
+
+
+def test_loose_does_not_catch_unsupported_type():
+    # The unsupported-type error is raised before the loose fallback.
+    with pytest.raises(SchemaError, match="unsupported type"):
+        Schema("unknown_type").loose().validate("x")
 
 
 def test_never_tombstone():

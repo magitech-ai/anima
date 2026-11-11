@@ -495,7 +495,12 @@ class Schema:
 
     @classmethod
     def union(cls, *schemas: Schema) -> Schema:
-        """Create a union schema accepting any matching variant."""
+        """Create a union schema accepting any matching variant.
+
+        Accepts variadic schemas, or a single list of schemas.
+        """
+        if len(schemas) == 1 and isinstance(schemas[0], list):
+            return cls("union", schemas=list(schemas[0]))
         return cls("union", schemas=list(schemas))
 
     @classmethod
@@ -678,7 +683,12 @@ class Schema:
                 raise SchemaError("missing required value", path)
             if self._default is _UNDEFINED:
                 return data, _UNDEFINED
+            if self._default is None:
+                return data, _UNDEFINED
             data = clone(self._default)
+
+        if self.type_name not in _SUPPORTED_TYPES:
+            raise SchemaError(f'unsupported type "{self.type_name}"', path)
 
         try:
             return self._dispatch(data, path, strict)
@@ -811,7 +821,7 @@ class Schema:
                 adapted_in = data if adapted is _UNDEFINED else adapted
                 return self._callback(result), self._callback(adapted_in)
 
-            case _:
+            case _:  # pragma: no cover - _resolve rejects unknown types first
                 raise SchemaError(f'unsupported type "{self.type_name}"', path)
 
     # -- rendering -----------------------------------------------------------
