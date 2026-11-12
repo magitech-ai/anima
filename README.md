@@ -123,7 +123,7 @@ Every capability is a service mounted on a `Context`. The kernel ships these mod
 
 | Area | Modules | What they do |
 | --- | --- | --- |
-| Core | `core`, `events`, `group`, `registry`, `reflect` | Context and service registry, the 5 event modes, composite component groups, component runtime registry, service introspection |
+| Core | `core`, `events`, `tree`, `registry`, `reflect` | Context and service registry, the 5 event modes, loader entry tree and composite component groups, component runtime registry, service introspection |
 | Loading & config | `loader`, `loader_utils`, `include`, `schema`, `pkg`, `cli_env` | YAML profile loading, module resolution, multi-file includes with journaling and patches, declarative schema validation, `uv` package management, cascading environment variables |
 | Server & network | `server`, `server_acl`, `server_echo`, `server_proxy`, `server_static`, `http`, `http_socks` | Async HTTP and WebSocket server, host/loopback access control, echo, reverse proxy, and static file routes; async HTTP client with SOCKS4/5 support |
 | Runtime services | `timer`, `watcher`, `logger`, `hmr` | Reversible timers (timeouts, intervals, debounce, throttle), filesystem change detection, structured namespaced logging, hot module replacement |

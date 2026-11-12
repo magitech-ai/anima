@@ -1,5 +1,7 @@
 """Unit tests for RegistryService."""
 
+from typing import Any
+
 import pytest
 
 from anima.core import Context, FiberState
@@ -532,3 +534,50 @@ class TestRegistryServiceComponentRuntimeError:
         from anima.core import Fiber
 
         assert isinstance(fiber, Fiber)
+
+
+class TestRegistryServiceListConfig:
+    def test_use_list_config_reaches_fiber_intact(self):
+        """use() with a list config mounts the fiber with the list intact."""
+        ctx = Context()
+        reg = RegistryService(ctx)
+        seen: list[Any] = []
+
+        class ListComponent:
+            def __init__(self, c: Context, config: Any) -> None:
+                seen.append(config)
+
+        rows = [{"id": "a"}]
+        fiber = reg.use(ListComponent, rows)
+        assert fiber.config == [{"id": "a"}]
+        assert fiber.config is not rows
+        assert fiber.raw_config == [{"id": "a"}]
+
+    def test_use_dict_config_still_copied(self):
+        """use() with a dict config still copies it."""
+        ctx = Context()
+        reg = RegistryService(ctx)
+
+        class DictComponent:
+            def __init__(self, c: Context, config: Any) -> None:
+                pass
+
+        cfg = {"token": "x"}
+        fiber = reg.use(DictComponent, cfg)
+        assert fiber.config == {"token": "x"}
+        assert fiber.config is not cfg
+
+
+class TestRegistryServicePassthroughConfig:
+    def test_use_scalar_config_passes_through_unchanged(self):
+        """use() with a non-dict, non-list config passes it through as-is."""
+        ctx = Context()
+        reg = RegistryService(ctx)
+
+        class ScalarComponent:
+            def __init__(self, c: Context, config: Any) -> None:
+                pass
+
+        fiber = reg.use(ScalarComponent, "hello")
+        assert fiber.config == "hello"
+        assert fiber.raw_config == "hello"

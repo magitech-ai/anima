@@ -9,7 +9,6 @@ from typing import Any
 
 from anima.core import Context, Fiber, FiberState, Service, inject
 from anima.events import DisposableList, Disposer, EventBus, EventMode, is_bailed
-from anima.group import Group, GroupEntry
 from anima.hmr import HmrService
 from anima.http import HttpConfig, HttpError, HttpRequest, HttpResponse, HttpService
 from anima.include import (
@@ -41,6 +40,7 @@ from anima.registry import Inject, RegistryService, resolve_inject
 from anima.schema import Schema, SchemaError, ValidationError, z
 from anima.server import Route, ServerRequest, ServerResponse, ServerService, WebSocket
 from anima.timer import Scheduled, TimerService
+from anima.tree import Entry, EntryGroup, EntryOptions, EntryTree, Group
 from anima.volatile import (
     Volatile,
     create_volatile,
@@ -76,13 +76,16 @@ __all__ = [
     "Context",
     "DisposableList",
     "Disposer",
+    "Entry",
+    "EntryGroup",
+    "EntryOptions",
+    "EntryTree",
     "EventBus",
     "EventMode",
     "Exporter",
     "Fiber",
     "FiberState",
     "Group",
-    "GroupEntry",
     "HmrService",
     "HttpConfig",
     "HttpError",

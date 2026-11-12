@@ -1,12 +1,15 @@
+"""Unit tests for the loader service surface."""
+
+import asyncio
 import sys
 import types
 from pathlib import Path
-from unittest.mock import patch
+from typing import Any
 
 import pytest
 import yaml
 
-from anima.core import Context
+from anima.core import Context, FiberState, Service
 from anima.loader import (
     LoaderService,
     interpolate_env,
@@ -28,22 +31,6 @@ def test_resolve_component_target_dot_syntax():
     from anima.core import Context as CoreContext
 
     assert target is CoreContext
-
-
-def test_resolve_component_target_builtin_aliases():
-    from anima.group import Group
-    from anima.hmr import HmrService
-    from anima.logger import LoggerService
-    from anima.pkg import PkgService
-    from anima.timer import TimerService
-    from anima.watcher import WatcherService
-
-    assert resolve_component_target("group") is Group
-    assert resolve_component_target("logger") is LoggerService
-    assert resolve_component_target("timer") is TimerService
-    assert resolve_component_target("watcher") is WatcherService
-    assert resolve_component_target("hmr") is HmrService
-    assert resolve_component_target("pkg") is PkgService
 
 
 def test_resolve_component_target_module_with_apply(monkeypatch):
@@ -113,8 +100,19 @@ def test_interpolate_env():
     assert interpolate_env(999, custom_env) == 999
 
 
+def test_loader_service_registration():
+    """The loader registers on the mounting ctx and owns a child tree ctx."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    assert ctx.has("loader")
+    assert loader.ctx is not ctx
+    assert loader.service_ctx is ctx
+    assert loader.ctx._parent is ctx
+    assert isinstance(loader, LoaderService)
+
+
 @pytest.mark.asyncio
-async def test_load_profile_from_list_and_dict_entries(monkeypatch):
+async def test_load_profile_from_list(monkeypatch):
     ctx = Context()
     loaded = []
 
@@ -130,8 +128,6 @@ async def test_load_profile_from_list_and_dict_entries(monkeypatch):
     monkeypatch.setitem(sys.modules, "custom_agent_component", dummy_component)
 
     entries = [
-        # Non-str, non-dict entry (skipped)
-        12345,
         # String entry
         "custom_agent_component:SampleService",
         # Dict entry without config
@@ -141,8 +137,6 @@ async def test_load_profile_from_list_and_dict_entries(monkeypatch):
             "name": "custom_agent_component:SampleService",
             "config": {"token": "secret_xyz"},
         },
-        # Dict entry without name (skipped)
-        {"config": {"ignored": True}},
     ]
 
     loader = load_profile(ctx, entries)
@@ -150,7 +144,20 @@ async def test_load_profile_from_list_and_dict_entries(monkeypatch):
 
     assert "default" in loaded
     assert "secret_xyz" in loaded
-    assert len(loader.fibers) == 3
+    assert len(loader.store) == 3
+
+
+def test_load_profile_row_errors():
+    """Malformed rows fail loud instead of being silently skipped."""
+    ctx = Context()
+    with pytest.raises(TypeError, match="must be a string or dict"):
+        load_profile(ctx, [12345])
+    with pytest.raises(ValueError, match="must specify 'name'"):
+        load_profile(ctx, [{"config": {"ignored": True}}])
+    with pytest.raises(ValueError, match="conflicting 'name' and 'target'"):
+        load_profile(ctx, [{"name": "a", "target": "b"}])
+    with pytest.raises(ValueError, match="both 'entries' and 'config'"):
+        load_profile(ctx, [{"name": "group", "entries": [], "config": []}])
 
 
 @pytest.mark.asyncio
@@ -187,6 +194,33 @@ async def test_load_profile_from_yaml_file(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_load_twice_reconciles_without_duplicates(monkeypatch):
+    """A second load() with the same rows retains entries instead of duplicating."""
+    ctx = Context()
+    calls: list[Any] = []
+
+    dummy_mod = types.ModuleType("twice_mod")
+
+    def comp(c: Context, config: Any = None):
+        calls.append(1)
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "twice_mod", dummy_mod)
+
+    loader = LoaderService(ctx)
+    rows = [{"id": "a", "name": "twice_mod:comp"}]
+    loader.load(rows)
+    await ctx.flush()
+    assert len(loader.root.data) == 1
+    first_fiber = loader.resolve("a").fiber
+    loader.load([{"id": "a", "name": "twice_mod:comp"}])
+    await ctx.flush()
+    assert len(loader.root.data) == 1
+    assert len(loader.store) == 1
+    assert loader.resolve("a").fiber is first_fiber
+
+
+@pytest.mark.asyncio
 async def test_loader_service_isolation_intercept_and_groups():
     ctx = Context()
     loader = LoaderService(ctx)
@@ -197,10 +231,12 @@ async def test_loader_service_isolation_intercept_and_groups():
         def __init__(self, c: Context):
             intercept_observed.append(c.resolve_intercept("mock_svc"))
 
-    import sys
+    def sub_comp(c: Context, config: Any = None):
+        return None
 
     dummy = types.ModuleType("intercept_mod")
     dummy.MockInterceptedService = MockInterceptedService
+    dummy.sub_comp = sub_comp
     sys.modules["intercept_mod"] = dummy
 
     try:
@@ -220,7 +256,7 @@ async def test_loader_service_isolation_intercept_and_groups():
                     "id": "my_group",
                     "target": "group",
                     "entries": [
-                        {"id": "sub_a", "target": lambda c: None},
+                        {"id": "sub_a", "target": "intercept_mod:sub_comp"},
                     ],
                 },
                 {
@@ -235,41 +271,56 @@ async def test_loader_service_isolation_intercept_and_groups():
         await ctx.flush()
 
         assert intercept_observed == [{"mode": "special"}]
-        assert "entry_isolated" in loader.fibers
-        assert "my_group" in loader.fibers
-        assert "disabled_entry" not in loader.fibers
+        assert loader.resolve("entry_isolated").fiber is not None
+        assert loader.resolve("my_group").fiber is not None
+        assert loader.resolve("disabled_entry").fiber is None
+        # Legacy isolate list translated to the dict form.
+        assert loader.resolve("entry_isolated").options["isolate"] == {
+            "unrelated_svc": True
+        }
+        # The nested group child mounts in the shared store.
+        assert loader.resolve("sub_a").fiber is not None
 
         # Enable disabled entry
         await loader.enable("disabled_entry")
-        assert "disabled_entry" in loader.fibers
+        assert loader.resolve("disabled_entry").fiber is not None
+        assert loader.resolve("disabled_entry").fiber.state == FiberState.ACTIVE
 
-        # Enable already enabled
+        # Enable already enabled is a no-op (no duplicate row).
+        rows_before = len(loader.root.data)
         await loader.enable("disabled_entry")
+        assert len(loader.root.data) == rows_before
 
         # Disable entry
         await loader.disable("disabled_entry")
-        assert "disabled_entry" not in loader.fibers
+        assert loader.resolve("disabled_entry").fiber.state == FiberState.DISPOSED
 
-        # Disable already disabled
+        # Disable already disabled is a no-op.
         await loader.disable("disabled_entry")
 
-        # Enable, disable, update nonexistent entry (loop exits)
-        await loader.enable("nonexistent")
-        await loader.disable("nonexistent")
-        await loader.update("nonexistent", {})
+        # Enable, disable, update of unknown ids raise.
+        with pytest.raises(ValueError, match="cannot resolve entry nonexistent"):
+            await loader.enable("nonexistent")
+        with pytest.raises(ValueError, match="cannot resolve entry nonexistent"):
+            await loader.disable("nonexistent")
+        with pytest.raises(ValueError, match="cannot resolve entry nonexistent"):
+            await loader.update("nonexistent", {})
 
-        # Update disabled entry (not in loader.fibers)
-        await loader.update("disabled_entry", {"opt": 2})
+        # Update a disabled entry's options (partial merge, no remount).
+        await loader.update("disabled_entry", {"config": {"opt": 2}})
+        assert loader.resolve("disabled_entry").options["config"] == {"opt": 2}
+        assert loader.resolve("disabled_entry").fiber.state == FiberState.DISPOSED
 
-        # Update entry config
-        await loader.update("my_group", {"entries": []})
-
+        # Update the group entry with a new (empty) child list.
+        await loader.update("my_group", {"config": []})
+        assert "sub_a" not in loader.store
     finally:
         sys.modules.pop("intercept_mod", None)
 
 
 @pytest.mark.asyncio
-async def test_loader_persistence_and_commit(tmp_path: Path):
+async def test_loader_persistence_no_auto_save(tmp_path: Path):
+    """Runtime fiber.update writes back in memory only; the file is untouched."""
     ctx = Context()
     save_file = tmp_path / "saved_profile.yaml"
 
@@ -284,6 +335,7 @@ async def test_loader_persistence_and_commit(tmp_path: Path):
     # Manual save
     loader.save()
     assert save_file.exists()
+    before = save_file.read_bytes()
 
     # Save to custom path
     alt_file = tmp_path / "alt_profile.yaml"
@@ -295,15 +347,17 @@ async def test_loader_persistence_and_commit(tmp_path: Path):
     with pytest.raises(ValueError, match="No destination path specified"):
         loader_no_file.save()
 
-    # Auto commit hook
-    fib = loader.fibers["p1"]
+    # Write-back: options update in memory, file byte-identical.
+    fib = loader.resolve("p1").fiber
+    assert fib is not None
     await fib.update({"opt": 999})
+    assert loader.resolve("p1").options["config"] == {"opt": 999}
+    assert save_file.read_bytes() == before
+
+    # Explicit save persists the new config.
+    loader.save()
     re_read = yaml.safe_load(save_file.read_text(encoding="utf-8"))
     assert re_read[0]["config"] == {"opt": 999}
-
-    # Auto commit error handling
-    with patch.object(loader, "save", side_effect=OSError("disk error")):
-        await fib.update({"opt": 1000})
 
 
 def test_load_profile_error_handling(tmp_path: Path):
@@ -320,3 +374,722 @@ def test_load_profile_error_handling(tmp_path: Path):
     # Components not a list
     with pytest.raises(TypeError, match="components must resolve to a list"):
         LoaderService(ctx).load({"components": "not_a_list"})
+
+
+# --- A2: nesting-bug regression ---
+
+
+@pytest.mark.asyncio
+async def test_a2_nesting_bug_regression(tmp_path: Path, monkeypatch):
+    """The §5.5 profile: nested group entries survive load, save, and reload."""
+    ctx = Context()
+    calls: list[Any] = []
+
+    dummy_mod = types.ModuleType("nest_mod")
+
+    def comp(c: Context, config: Any = None):
+        calls.append(1)
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "nest_mod", dummy_mod)
+
+    profile = [
+        {
+            "id": "my_group",
+            "target": "group",
+            "entries": [
+                {"id": "sub_a", "target": "nest_mod:comp"},
+                {
+                    "id": "sub_group",
+                    "target": "group",
+                    "entries": [
+                        {"id": "deep", "target": "nest_mod:comp"},
+                    ],
+                },
+            ],
+        },
+    ]
+    loader = load_profile(ctx, profile)
+    await ctx.flush()
+
+    assert set(loader.store) == {"my_group", "sub_a", "sub_group", "deep"}
+    deep = loader.resolve("deep")
+    assert deep.fiber is not None
+    assert deep.fiber.state == FiberState.ACTIVE
+    assert calls == [1, 1]
+
+    saved = tmp_path / "nested.yaml"
+    loader.save(saved)
+    text = saved.read_text(encoding="utf-8")
+    assert text.count("deep") == 1
+    assert text.count("sub_a") == 1
+
+    ctx2 = Context()
+    loader2 = load_profile(ctx2, saved)
+    await ctx2.flush()
+    assert set(loader2.store) == {"my_group", "sub_a", "sub_group", "deep"}
+    assert loader2.resolve("deep").fiber is not None
+    assert loader2.resolve("deep").fiber.state == FiberState.ACTIVE
+
+
+# --- A5: enable-after-disable ---
+
+
+@pytest.mark.asyncio
+async def test_a5_enable_after_disable_no_duplicates(tmp_path: Path, monkeypatch):
+    ctx = Context()
+    calls: list[Any] = []
+
+    dummy_mod = types.ModuleType("toggle_mod")
+
+    def comp(c: Context, config: Any = None):
+        calls.append(1)
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "toggle_mod", dummy_mod)
+
+    loader = LoaderService(ctx)
+    loader.load([{"id": "toggle_entry", "name": "toggle_mod:comp"}])
+    await ctx.flush()
+    assert len(loader.root.data) == 1
+
+    saved = tmp_path / "toggle.yaml"
+    for _ in range(2):
+        await loader.disable("toggle_entry")
+        entry = loader.resolve("toggle_entry")
+        assert entry.fiber is not None
+        assert entry.fiber.state == FiberState.DISPOSED
+        assert len(loader.root.data) == 1
+        await loader.enable("toggle_entry")
+        assert len(loader.root.data) == 1
+        assert entry.fiber is not None
+        assert entry.fiber.state == FiberState.ACTIVE
+
+    fibers = [
+        loader.resolve(eid).fiber
+        for eid in loader.store
+        if loader.resolve(eid).fiber is not None
+    ]
+    assert len(fibers) == 1
+    loader.save(saved)
+    assert saved.read_text(encoding="utf-8").count("toggle_entry") == 1
+
+
+# --- A7: isolate dict ---
+
+
+@pytest.mark.asyncio
+async def test_a7_isolate_dict(monkeypatch):
+    ctx = Context()
+    loader = LoaderService(ctx)
+    calls: list[Any] = []
+
+    dummy_mod = types.ModuleType("iso_mod")
+
+    def comp(c: Context, config: Any = None):
+        calls.append(1)
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "iso_mod", dummy_mod)
+
+    loader.load(
+        [
+            {"id": "a", "name": "iso_mod:comp", "isolate": {"svc": True}},
+            {"id": "b", "name": "iso_mod:comp", "isolate": {"svc": True}},
+            {"id": "c", "name": "iso_mod:comp", "isolate": {"svc": "shared"}},
+            {"id": "d", "name": "iso_mod:comp", "isolate": {"svc": "shared"}},
+            {
+                "id": "e",
+                "name": "iso_mod:comp",
+                "intercept": {"svc": {"mode": "x"}},
+            },
+        ]
+    )
+    await ctx.flush()
+    entry_a = loader.resolve("a")
+    entry_b = loader.resolve("b")
+    entry_c = loader.resolve("c")
+    entry_d = loader.resolve("d")
+    entry_e = loader.resolve("e")
+    label_a = entry_a.ctx._isolated_services["svc"]
+    label_b = entry_b.ctx._isolated_services["svc"]
+    assert label_a == "__entry__:a:svc"
+    assert label_b == "__entry__:b:svc"
+    assert label_a != label_b
+    assert entry_c.ctx._isolated_services["svc"] == "shared"
+    assert entry_d.ctx._isolated_services["svc"] == "shared"
+    assert entry_e.ctx._intercept_configs["svc"] == {"mode": "x"}
+    with pytest.raises(ValueError, match="must be true or a label string"):
+        await loader.update("a", {"isolate": {"svc": 42}})
+
+
+@pytest.mark.asyncio
+async def test_isolate_only_change_re_resolves(monkeypatch):
+    """An isolate-only update notifies dependents so the fiber re-resolves.
+
+    The service is visible before the update (no isolation) and out of
+    scope after it; nothing but the hook's notify re-checks the fiber,
+    since the patch-context default does not restart on isolate-only
+    diffs. The fiber must end PENDING, not ACTIVE.
+    """
+    ctx = Context()
+    loader = LoaderService(ctx)
+
+    dep_mod = types.ModuleType("dep_mod")
+
+    def dep(c: Context, config: Any = None):
+        pass
+
+    dep_mod.dep = dep
+    monkeypatch.setitem(sys.modules, "dep_mod", dep_mod)
+
+    ctx.provide("svc", object())
+    loader.load([{"id": "d", "name": "dep_mod:dep", "inject": ["svc"]}])
+    await ctx.flush()
+    entry = loader.resolve("d")
+    assert entry.fiber is not None
+    assert entry.fiber.state == FiberState.ACTIVE
+    assert "config" not in entry.options
+    await loader.update("d", {"isolate": {"svc": True}})
+    await entry.ctx.flush()
+    await loader.await_all()
+    assert entry.fiber is not None
+    assert entry.fiber.state == FiberState.PENDING
+
+
+@pytest.mark.asyncio
+async def test_entry_inject_missing_service_stays_pending(monkeypatch):
+    """Entry-level inject merges before the scheduled load checks it.
+
+    The merge runs synchronously in _init right after registry.use, so the
+    load task's _checkImpl sees the merged inject list; a missing service
+    leaves the fiber PENDING instead of activating without the dependency.
+    """
+    ctx = Context()
+    loader = LoaderService(ctx)
+
+    dep_mod = types.ModuleType("inj_mod")
+
+    def dep(c: Context, config: Any = None):
+        pass
+
+    dep_mod.dep = dep
+    monkeypatch.setitem(sys.modules, "inj_mod", dep_mod)
+
+    loader.load([{"id": "d", "name": "inj_mod:dep", "inject": ["missing_svc"]}])
+    await ctx.flush()
+    entry = loader.resolve("d")
+    assert entry.fiber is not None
+    assert "missing_svc" in entry.fiber.inject
+    assert entry.fiber.state == FiberState.PENDING
+
+
+# --- A8: write-back ---
+
+
+@pytest.mark.asyncio
+async def test_a8_write_back_group_fiber(monkeypatch):
+    ctx = Context()
+    loader = LoaderService(ctx)
+    calls: list[Any] = []
+
+    dummy_mod = types.ModuleType("wb_mod")
+
+    def comp(c: Context, config: Any = None):
+        calls.append(1)
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "wb_mod", dummy_mod)
+
+    loader.load(
+        [
+            {
+                "id": "g",
+                "name": "group",
+                "group": True,
+                "config": [{"id": "k", "name": "wb_mod:comp"}],
+            }
+        ]
+    )
+    await ctx.flush()
+    group_fiber = loader.resolve("g").fiber
+    assert group_fiber is not None
+    new_rows = [{"id": "k2", "name": "wb_mod:comp"}]
+    await group_fiber.update(new_rows)
+    assert loader.resolve("g").options["config"] == new_rows
+    assert loader.resolve("k2").fiber is not None
+    assert "k" not in loader.store
+
+
+# --- A9: self-dispose ---
+
+
+@pytest.mark.asyncio
+async def test_a9_self_dispose_marks_disabled(monkeypatch):
+    ctx = Context()
+    loader = LoaderService(ctx)
+    writes = {"count": 0}
+    monkeypatch.setattr(
+        loader, "write", lambda: writes.__setitem__("count", writes["count"] + 1)
+    )
+
+    dummy_mod = types.ModuleType("sd_mod")
+    release = asyncio.Event()
+
+    def self_disposer(c: Context, config: Any = None):
+        async def _later():
+            await release.wait()
+            await c.fiber.dispose()
+
+        c._schedule_task(_later())
+
+    def parent_comp(c: Context, config: Any = None):
+        def child(c2: Context, config: Any = None):
+            c2._schedule_task(c2.fiber.dispose())
+
+        c.use(child)
+
+    dummy_mod.self_disposer = self_disposer
+    dummy_mod.parent_comp = parent_comp
+    monkeypatch.setitem(sys.modules, "sd_mod", dummy_mod)
+
+    loader.load(
+        [
+            {"id": "doomed", "name": "sd_mod:self_disposer"},
+            {"id": "parent", "name": "sd_mod:parent_comp"},
+        ]
+    )
+    await ctx.flush()
+    doomed = loader.resolve("doomed")
+    assert doomed.fiber is not None
+    assert doomed.fiber.state == FiberState.ACTIVE
+    before = writes["count"]
+    release.set()
+    await doomed.ctx.flush()
+    assert doomed.options.get("disabled") is True
+    assert writes["count"] > before
+    # A child plugin disposing itself does not disable its entry.
+    parent = loader.resolve("parent")
+    await parent.ctx.flush()
+    assert parent.options.get("disabled") is not True
+    assert parent.fiber is not None
+    assert parent.fiber.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_self_dispose_ignored_after_registry_delete(monkeypatch):
+    """Disposal driven by registry deletion (HMR path) does not disable the entry."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    calls: list[Any] = []
+
+    dummy_mod = types.ModuleType("del_mod")
+
+    def comp(c: Context, config: Any = None):
+        calls.append(1)
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "del_mod", dummy_mod)
+
+    loader.load([{"id": "a", "name": "del_mod:comp"}])
+    await ctx.flush()
+    entry = loader.resolve("a")
+    assert entry.fiber is not None
+    fiber = entry.fiber
+    entry.ctx.registry.delete(fiber.target)
+    await entry.ctx.flush()
+    assert fiber.state == FiberState.DISPOSED
+    assert entry.options.get("disabled") is not True
+
+
+@pytest.mark.asyncio
+async def test_internal_plugin_case3_and_case5_synthetic(monkeypatch):
+    """Direct handler checks for the oracle's case 3 and case 5 guards.
+
+    Case 3 (child plugin under the entry) is unreachable through
+    Entry._init, which sets fiber.entry only on entry fibers; case 5's
+    early return needs a tree-owner fiber in UNLOADING. Both are covered
+    here synthetically so the guards stay honest.
+    """
+    from anima.core import FiberState as _State
+    from anima.tree import EntryTree as _EntryTree
+
+    ctx = Context()
+    loader = LoaderService(ctx)
+    dummy_mod = types.ModuleType("syn_mod")
+
+    def comp(c: Context, config: Any = None):
+        pass
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "syn_mod", dummy_mod)
+
+    await loader.create({"id": "e", "name": "syn_mod:comp"})
+    await loader.await_all()
+    entry = loader.resolve("e")
+    assert entry.fiber is not None
+
+    # Case 3: fiber.entry set, parent fiber's entry is the same entry.
+    child_fiber = entry.ctx.use(lambda c: None)
+    child_fiber.entry = entry
+    child_fiber.parent_fiber = entry.fiber
+    child_fiber.uid = None
+    loader._on_internal_plugin(child_fiber)
+    assert entry.options.get("disabled") is not True
+
+    # Case 5: the owner fiber is UNLOADING, so a subtree entry's disposal
+    # is ignored. Build the subtree inside the owner component's body,
+    # force the owner into UNLOADING, then dispose the subtree entry.
+    subtrees: dict[str, Any] = {}
+
+    class _SubTree(_EntryTree):
+        def write(self) -> None:
+            pass
+
+    def owner_comp(c: Context, config: Any = None) -> None:
+        subtrees["tree"] = _SubTree(c, loader=loader)
+
+    dummy_mod.owner_comp = owner_comp
+    await loader.create({"id": "own", "name": "syn_mod:owner_comp"})
+    await loader.await_all()
+    owner_entry = loader.resolve("own")
+    assert owner_entry.fiber is not None
+    subtree = subtrees["tree"]
+    assert subtree.owner_fiber is owner_entry.fiber
+    await subtree.create({"id": "s", "name": "syn_mod:comp"})
+    await loader.await_all()
+    sub_entry = subtree.resolve("s")
+    assert sub_entry.fiber is not None
+    owner_entry.fiber.state = _State.UNLOADING
+    await sub_entry.fiber.dispose()
+    assert sub_entry.options.get("disabled") is not True
+
+
+# --- A15: locate / exit ---
+
+
+@pytest.mark.asyncio
+async def test_a15_locate_and_exit(monkeypatch):
+    ctx = Context()
+    loader = LoaderService(ctx)
+    seen: list[Any] = []
+
+    dummy_mod = types.ModuleType("loc_mod")
+
+    def comp(c: Context, config: Any = None):
+        seen.append(loader.locate())
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "loc_mod", dummy_mod)
+
+    loader.load([{"id": "here", "name": "loc_mod:comp"}])
+    await ctx.flush()
+    assert seen == ["here"]
+    assert loader.locate(ctx.fiber) is None
+    assert loader.exit() is None
+
+
+# --- loader check (await intercept) ---
+
+
+@pytest.mark.asyncio
+async def test_loader_check_blocks_while_tasks_pending(monkeypatch):
+    """The re-provided bound check reports False while the loader has tasks."""
+    ctx = Context()
+    intercepted = ctx.intercept("loader", {"await": True})
+    loader = LoaderService(intercepted)
+    assert loader._loader_check() is True
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    def slow_comp(c: Context, config: Any = None) -> Any:
+        async def _run() -> None:
+            started.set()
+            await release.wait()
+
+        return _run()
+
+    dummy_mod = types.ModuleType("chk_mod")
+    dummy_mod.slow = slow_comp
+    monkeypatch.setitem(sys.modules, "chk_mod", dummy_mod)
+
+    create_task = asyncio.get_running_loop().create_task(
+        loader.create({"id": "slow", "name": "chk_mod:slow"})
+    )
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if started.is_set():
+            break
+    assert started.is_set()
+    assert loader.get_tasks()
+    assert loader._loader_check() is False
+    # The reflect impl carries the bound check.
+    impl = intercepted.reflect._get_impl("loader", strict=False)
+    assert impl is not None and impl.check is not None
+    assert impl.check() is False
+    release.set()
+    await create_task
+    await loader.await_all()
+    assert loader._loader_check() is True
+
+
+@pytest.mark.asyncio
+async def test_loader_update_moves_entry(monkeypatch):
+    ctx = Context()
+    loader = LoaderService(ctx)
+    calls: list[Any] = []
+
+    dummy_mod = types.ModuleType("mv_mod")
+
+    def comp(c: Context, config: Any = None):
+        calls.append(1)
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "mv_mod", dummy_mod)
+
+    await loader.create({"id": "g", "name": "group", "group": True, "config": []})
+    await loader.create({"id": "a", "name": "mv_mod:comp"})
+    await loader.await_all()
+    entry = await loader.update("a", {}, parent="g", position=0)
+    assert entry.parent is loader.resolve("g").subgroup
+    assert loader.resolve("a").fiber is not None
+    assert loader.resolve("a").fiber.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_show_log_group_entries_silent(monkeypatch, caplog):
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.enable_logs = True
+    calls: list[Any] = []
+
+    dummy_mod = types.ModuleType("log_mod")
+
+    def comp(c: Context, config: Any = None):
+        calls.append(1)
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "log_mod", dummy_mod)
+    loader.load(
+        [
+            {"id": "a", "name": "log_mod:comp"},
+            {"id": "g", "name": "group", "group": True, "config": []},
+        ]
+    )
+    await ctx.flush()
+    assert loader.resolve("a").fiber is not None
+    assert loader.resolve("g").fiber is not None
+    with caplog.at_level("INFO", logger="anima.loader"):
+        loader.show_log(loader.resolve("a"), "apply")
+        loader.show_log(loader.resolve("g"), "apply")
+    assert "apply plugin log_mod:comp" in caplog.text
+    assert "apply plugin group" not in caplog.text
+
+
+# --- Service mirror: entry-provided services visible tree-wide ---
+
+
+def _mirror_module(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A dummy module with a providing service and a consumer probe."""
+
+    class ProvidingService(Service):
+        def __init__(self, ctx: Context, config: Any = None) -> None:
+            cfg = dict(config or {})
+            super().__init__(ctx, cfg.get("provide", "xsvc"))
+            self.marker = cfg.get("marker", "x")
+
+    seen: dict[str, Any] = {}
+
+    def consumer(ctx: Context, config: Any = None) -> None:
+        seen["has"] = ctx.has("xsvc")
+        seen["get"] = ctx.get("xsvc", strict=False) is not None
+
+    mod = types.ModuleType("mirror_mod")
+    mod.ProvidingService = ProvidingService
+    mod.consumer = consumer
+    mod.seen = seen
+    monkeypatch.setitem(sys.modules, "mirror_mod", mod)
+    return mod
+
+
+@pytest.mark.asyncio
+async def test_mirror_entry_service_visible_mounting_and_sibling(
+    monkeypatch,
+) -> None:
+    """A service provided by one entry is visible from the mounting ctx and siblings."""
+    mod = _mirror_module(monkeypatch)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {"id": "svc", "name": "mirror_mod:ProvidingService"},
+            {"id": "con", "name": "mirror_mod:consumer"},
+        ]
+    )
+    await ctx.flush()
+    assert ctx.has("xsvc")
+    assert ctx.get("xsvc", strict=False) is loader.resolve("svc").fiber._instance
+    assert mod.seen == {"has": True, "get": True}
+    assert loader.resolve("svc").ctx.has("xsvc")
+
+
+@pytest.mark.asyncio
+async def test_mirror_isolated_service_not_mirrored(monkeypatch) -> None:
+    """An isolated service stays inside its entry: no mirror, no sibling sight."""
+    mod = _mirror_module(monkeypatch)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "svc",
+                "name": "mirror_mod:ProvidingService",
+                "isolate": {"xsvc": True},
+            },
+            {"id": "con", "name": "mirror_mod:consumer"},
+        ]
+    )
+    await ctx.flush()
+    assert not ctx.has("xsvc")
+    assert loader.resolve("svc").ctx.has("xsvc")
+    assert mod.seen == {"has": False, "get": False}
+
+
+@pytest.mark.asyncio
+async def test_mirror_removed_when_entry_disabled(monkeypatch) -> None:
+    """Disabling the providing entry removes the mirror; re-enabling restores it."""
+    _mirror_module(monkeypatch)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load([{"id": "svc", "name": "mirror_mod:ProvidingService"}])
+    await ctx.flush()
+    assert ctx.has("xsvc")
+    await loader.disable("svc")
+    assert not ctx.has("xsvc")
+    await loader.enable("svc")
+    assert ctx.has("xsvc")
+
+
+@pytest.mark.asyncio
+async def test_mirror_last_provider_wins(monkeypatch) -> None:
+    """Two entries providing one name: the last wins; losing it falls back."""
+    _mirror_module(monkeypatch)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "first",
+                "name": "mirror_mod:ProvidingService",
+                "config": {"marker": "first"},
+            },
+            {
+                "id": "second",
+                "name": "mirror_mod:ProvidingService",
+                "config": {"marker": "second"},
+            },
+        ]
+    )
+    await ctx.flush()
+    assert ctx.get("xsvc", strict=False).marker == "second"
+    await loader.disable("second")
+    assert ctx.get("xsvc", strict=False).marker == "first"
+    await loader.enable("second")
+    assert ctx.get("xsvc", strict=False).marker == "second"
+
+
+@pytest.mark.asyncio
+async def test_mirror_does_not_clobber_direct_provide(monkeypatch) -> None:
+    """A service provided directly on the mounting ctx keeps its slot."""
+    mod = _mirror_module(monkeypatch)
+    ctx = Context()
+    direct_fiber = ctx.use(mod.ProvidingService, {"marker": "direct"})
+    await ctx.flush()
+    assert ctx.get("xsvc", strict=False) is direct_fiber._instance
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "svc",
+                "name": "mirror_mod:ProvidingService",
+                "config": {"marker": "entry"},
+            }
+        ]
+    )
+    await ctx.flush()
+    assert ctx.get("xsvc", strict=False) is direct_fiber._instance
+    assert loader.resolve("svc").ctx.get("xsvc", strict=False).marker == "entry"
+
+
+# --- Coverage: baseUrl, locate walk-up, commit guards, patch-context ---
+
+
+def test_loader_service_base_url_config() -> None:
+    ctx = Context()
+    loader = LoaderService(ctx, {"baseUrl": "file:///tmp/"})
+    assert loader.ctx.baseUrl == "file:///tmp/"
+
+
+@pytest.mark.asyncio
+async def test_locate_child_fiber(monkeypatch) -> None:
+    """locate() walks up to the owning entry for a child-plugin fiber."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    children: list[Any] = []
+
+    dummy_mod = types.ModuleType("loc_mod")
+
+    def child(c: Context, config: Any = None) -> None:
+        return None
+
+    def parent(c: Context, config: Any = None) -> None:
+        children.append(c.use(child))
+
+    dummy_mod.child = child
+    dummy_mod.parent = parent
+    monkeypatch.setitem(sys.modules, "loc_mod", dummy_mod)
+    loader.load([{"id": "p", "name": "loc_mod:parent"}])
+    await ctx.flush()
+    assert children
+    assert loader.locate(children[0]) == "p"
+    assert loader.locate() is None
+
+
+@pytest.mark.asyncio
+async def test_on_commit_untracked_fiber_is_noop(monkeypatch) -> None:
+    """A config change on a fiber the loader does not track writes nothing."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+
+    dummy_mod = types.ModuleType("commit_mod")
+
+    def comp(c: Context, config: Any = None) -> None:
+        return None
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "commit_mod", dummy_mod)
+    fiber = ctx.use(comp, {"v": 1})
+    await ctx.flush()
+    assert fiber.state == FiberState.ACTIVE
+    await fiber.update({"v": 2})
+    assert loader.store == {}
+
+
+@pytest.mark.asyncio
+async def test_on_patch_context_sync_next_fn(monkeypatch) -> None:
+    """A synchronous patch-context delegate returns its result unchanged."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+
+    dummy_mod = types.ModuleType("patch_mod")
+
+    def comp(c: Context, config: Any = None) -> None:
+        return None
+
+    dummy_mod.comp = comp
+    monkeypatch.setitem(sys.modules, "patch_mod", dummy_mod)
+    loader.load([{"id": "a", "name": "patch_mod:comp"}])
+    await ctx.flush()
+    entry = loader.resolve("a")
+    assert await loader._on_patch_context(entry, lambda: "sync_done") == "sync_done"

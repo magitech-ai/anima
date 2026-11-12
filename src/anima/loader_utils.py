@@ -15,25 +15,6 @@ def is_nullable(value: Any) -> bool:
     return value is None
 
 
-def unwrap_exports(exports: Any) -> Any:
-    """Get the component exported by a module namespace.
-
-    Mirrors unwrapExports: handles CommonJS (module.exports),
-    ES modules (__es_module + default), and plain values.
-    """
-    if is_nullable(exports):
-        return exports
-    default_val = getattr(exports, "default", None)
-    if default_val is not None:
-        exports = default_val
-    if not getattr(exports, "__es_module", False):
-        return exports
-    default_val = getattr(exports, "default", None)
-    if default_val is not None:
-        return default_val
-    return exports
-
-
 class ModuleFormat(str, Enum):
     """Module format categories."""
 

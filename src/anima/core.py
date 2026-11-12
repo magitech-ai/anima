@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from abc import ABCMeta
 from collections.abc import (
     AsyncIterable,
     Awaitable,
@@ -22,9 +23,12 @@ from collections.abc import (
 )
 from contextvars import ContextVar
 from enum import Enum
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeGuard, cast
 
 from anima.events import Disposer, EventBus, EventMode
+
+if TYPE_CHECKING:
+    from anima.tree import Entry
 
 logger = logging.getLogger("anima")
 
@@ -96,7 +100,7 @@ def format_issues(title: str, issues: list[dict[str, Any]]) -> str:
     return f"{title}:\n" + "\n".join(lines)
 
 
-def is_js_expr(value: Any) -> bool:
+def is_js_expr(value: Any) -> TypeGuard[dict[str, Any]]:
     """Check if a value is a JS expression wrapper."""
     return (
         isinstance(value, dict)
@@ -122,7 +126,7 @@ class Fiber:
         ctx: Context,
         target: Any,
         args: tuple[Any, ...],
-        kwargs: dict[str, Any],
+        kwargs: Any,
         parent_fiber: Fiber | None = None,
         *,
         root: bool = False,
@@ -130,8 +134,10 @@ class Fiber:
         self.ctx = ctx
         self.target = target
         self.args = args
-        self.raw_config: dict[str, Any] = dict(kwargs)
-        self.config: Any = dict(kwargs)
+        # Configs are dicts for ordinary components but lists for group
+        # entries; copy dicts, pass other shapes through unchanged.
+        self.raw_config: Any = dict(kwargs) if isinstance(kwargs, dict) else kwargs
+        self.config: Any = dict(kwargs) if isinstance(kwargs, dict) else kwargs
         self.parent_fiber = parent_fiber
         self.child_fibers: list[Fiber] = []
         self.effects: list[Disposer] = []
@@ -162,6 +168,8 @@ class Fiber:
         self.inertia: asyncio.Future[None] | None = None
         # The component instance produced by the last successful load.
         self._instance: Any = None
+        # The loader entry that owns this fiber, if mounted through one.
+        self.entry: Entry | None = None
         # True once a reload has started for this fiber; await_settle()
         # drives a load only for a fiber that never attempted one, so a
         # fiber that deliberately settled to PENDING is not reloaded.
@@ -276,14 +284,19 @@ class Fiber:
             return
         if self.parent_fiber is not None and self in self.parent_fiber.child_fibers:
             self.parent_fiber.child_fibers.remove(self)
+        self.uid = None
+        # Emit before unregistering the runtime: the loader's
+        # internal/plugin handler distinguishes a self-dispose (runtime
+        # still registered at emit time) from a registry deletion
+        # (runtime removed before the dispose is issued). Unregistering
+        # first would make every last-fiber dispose look like a deletion.
+        self.ctx.emit("internal/plugin", self)
         runtime = self.ctx.registry.get(self.target)
         if runtime is not None:
             if self in runtime.fibers:
                 runtime.fibers.remove(self)
             if not runtime.fibers:
                 self.ctx.registry._unregister(runtime)
-        self.uid = None
-        self.ctx.emit("internal/plugin", self)
         self._setEpoch("__INACTIVE__")
         if self.inertia is None:
             # Epoch was already INACTIVE (e.g. a PENDING fiber), so no
@@ -516,7 +529,7 @@ class Fiber:
 
         await self.restart()
 
-    async def update(self, config: dict[str, Any], no_save: bool = False) -> None:
+    async def update(self, config: Any, no_save: bool = False) -> None:
         """Update component configuration with live lifecycle hooks.
 
         Raises on a disposed fiber, and raises the validation error when
@@ -526,7 +539,7 @@ class Fiber:
         fresh activation, which validates then.
         """
         self.assertActive()
-        self.raw_config = dict(config)
+        self.raw_config = dict(config) if isinstance(config, dict) else config
 
         if self.state != FiberState.ACTIVE:
             self.error = None
@@ -873,9 +886,11 @@ class _BoundService:
         return repr(svc)
 
 
-class _ServiceMeta(type):
+class _ServiceMeta(ABCMeta):
     """Metaclass for Service: proxy-aware isinstance checks.
 
+    Extends ABCMeta so a Service subclass can also extend an abstract
+    base (e.g. the loader's EntryTree) without a metaclass conflict.
     Mirrors the upstream Symbol.hasInstance walk: the check follows
     the constructor chain, unwrapping bound-service facades so a
     service accessed through another context still checks as its own
@@ -1216,9 +1231,19 @@ class Context:
         return fibers
 
     async def flush(self) -> None:
-        """Wait for all pending component load and event tasks to settle."""
-        while self._pending_tasks:
-            tasks = list(self._pending_tasks)
+        """Wait for all pending component load and event tasks to settle.
+
+        The calling task is excluded: a task must never await itself.
+        """
+        while True:
+            current = asyncio.current_task()
+            tasks = [
+                t
+                for t in list(self._pending_tasks)
+                if t is not current and not t.done()
+            ]
+            if not tasks:
+                return
             await asyncio.gather(*tasks, return_exceptions=True)
             for t in tasks:
                 self._pending_tasks.discard(t)
@@ -1264,7 +1289,11 @@ class Context:
     def use(self, component: Any, config: Any = None, **kwargs: Any) -> Fiber:
         """Context.use(component, config?) - Load a component in this context."""
         if kwargs:
-            config = {**(config or {}), **kwargs}
+            if config is None:
+                config = {}
+            if not isinstance(config, dict):
+                raise TypeError("Cannot merge keyword arguments into a non-dict config")
+            config = {**config, **kwargs}
         # Validate target before delegating (our error message for backward compat)
         if not callable(component) and not hasattr(component, "apply"):
             raise ValueError(
