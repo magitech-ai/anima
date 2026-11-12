@@ -1656,6 +1656,149 @@ class TestFiberEffectChildren:
         await fib.dispose()
         assert ran == [1]
 
+    def test_collect_failure_runs_collected_disposers(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+        with pytest.raises(TypeError, match="Invalid effect"):
+            fib.effect(lambda: [lambda: ran.append(1), "bad-string"], label="partial")
+        assert ran == [1]
+
+    def test_collect_failure_runs_returned_child(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+
+        def parent_body():
+            return [
+                ctx.effect(lambda: lambda: ran.append(1), label="child"),
+                "bad",
+            ]
+
+        with pytest.raises(TypeError, match="Invalid effect"):
+            fib.effect(parent_body, label="parent")
+        assert ran == [1]
+        # The child ran during rollback; no wrapper was registered,
+        # so it never appears in getEffects().
+        assert [e["label"] for e in fib.getEffects()] == ["anonymous"]
+
+    @pytest.mark.asyncio
+    async def test_async_disposer_runs_on_collect_failure(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+
+        async def async_cleanup():
+            ran.append(1)
+
+        def parent_body():
+            return [ctx.effect(lambda: async_cleanup, label="child"), "bad"]
+
+        with pytest.raises(TypeError, match="Invalid effect"):
+            fib.effect(parent_body, label="parent")
+        await asyncio.sleep(0)
+        assert ran == [1]
+
+    def test_async_disposer_runs_on_collect_failure_without_loop(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+
+        async def async_cleanup():
+            ran.append(1)
+
+        def parent_body():
+            return [ctx.effect(lambda: async_cleanup, label="child"), "bad"]
+
+        with pytest.raises(TypeError, match="Invalid effect"):
+            fib.effect(parent_body, label="parent")
+        # No running loop: the cleanup runs to completion on a fresh
+        # loop instead of being dropped.
+        assert ran == [1]
+
+    @pytest.mark.asyncio
+    async def test_collect_failure_cleanup_error_logged(self, caplog):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+
+        async def failing_cleanup():
+            raise RuntimeError("boom")
+
+        def parent_body():
+            return [ctx.effect(lambda: failing_cleanup, label="child"), "bad"]
+
+        with pytest.raises(TypeError, match="Invalid effect"):
+            fib.effect(parent_body, label="parent")
+        await asyncio.sleep(0)
+        assert "Effect cleanup failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_deferred_dispose_skips_spent_and_awaits_each(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        order: list[str] = []
+
+        async def a4():
+            order.append("a4")
+
+        async def a3():
+            order.append("a3")
+
+        def s1():
+            order.append("s1")
+
+        child_c2: Any = None
+
+        def parent_body():
+            nonlocal child_c2
+            child_c2 = ctx.effect(lambda: lambda: order.append("c2"), label="c2")
+            return [s1, child_c2, a3, a4]
+
+        wrapper = fib.effect(parent_body, label="parent")
+        chain = wrapper()
+        child_c2()
+        await chain
+        # a4 runs first (eager), then the deferred run awaits a3,
+        # skips the spent c2, and runs s1; c2 ran once, manually.
+        assert order == ["c2", "a4", "a3", "s1"]
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        order: list[str] = []
+
+        async def d2():
+            await asyncio.sleep(0)
+            order.append("d2-done")
+
+        def d1():
+            order.append("d1")
+
+        fib.effect(lambda: [d1, d2], label="mixed")
+        await fib.dispose()
+        # Reverse order, strictly sequential: the async disposer
+        # settles fully before the sync one runs.
+        assert order == ["d2-done", "d1"]
+
+    def test_nested_non_returned_effect_stays_top_level(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+        # Simulate a component body running on this fiber: the nested
+        # effect is registered on the fiber but never returned, so
+        # collect must not move it under the parent.
+        token = _current_fiber.set(fib)
+        try:
+
+            def parent_body():
+                ctx.effect(lambda: lambda: ran.append(1), label="nested")
+
+            fib.effect(parent_body, label="parent")
+        finally:
+            _current_fiber.reset(token)
+        effects = fib.getEffects()
+        assert [e["label"] for e in effects] == ["anonymous", "nested", "parent"]
+        parent = next(e for e in effects if e["label"] == "parent")
+        assert parent["children"] == []
+
 
 class TestServiceInstanceCheck:
     def test_service_instancecheck(self):

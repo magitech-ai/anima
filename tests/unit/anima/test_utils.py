@@ -196,6 +196,11 @@ class TestTimeParseTime:
     def test_parse_time(self, source: str, expected: float):
         assert Time.parse_time(source) == expected
 
+    def test_parse_time_trailing_newline_is_not_end(self):
+        """``$`` would match before a trailing newline in Python; the
+        oracle's pattern matches only at end of input."""
+        assert Time.parse_time("1h\n") == 0.0
+
 
 class TestTimeFormat:
     @pytest.mark.parametrize(
@@ -203,6 +208,8 @@ class TestTimeFormat:
         [
             (0, "0ms"),
             (500, "500ms"),
+            (500.0, "500ms"),
+            (0.0, "0ms"),
             (12.5, "12.5ms"),
             (999, "999ms"),
             (1_000, "1s"),

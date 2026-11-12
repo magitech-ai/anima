@@ -68,6 +68,29 @@ _access_context: ContextVar[Context | None] = ContextVar(
 )
 
 
+def _schedule_cleanup(coro: Any) -> None:
+    """Schedule error logging for a fire-and-forget cleanup coroutine.
+
+    Mirrors the oracle's ``cleanup.catch(logger.error)`` on a failed
+    effect setup: the cleanup runs in the background and its errors
+    are logged, never swallowed. With no running loop the cleanup
+    runs to completion on a fresh loop instead of being dropped.
+    """
+
+    async def _run() -> None:
+        try:
+            await coro
+        except Exception:
+            logger.exception("Effect cleanup failed")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_run())
+        return
+    loop.create_task(_run())
+
+
 class AnimaErrorCode:
     INACTIVE_EFFECT = "cannot create effect on inactive context"
 
@@ -851,30 +874,58 @@ class Fiber:
         except Exception:
             logger.exception("Effect %s failed", label)
             raise
-        collect(result)
 
         disposed = False
 
-        def wrapper() -> Any:
+        async def _run_sequential(items: list[Callable[[], Any]]) -> None:
+            """Run disposers in order, awaiting each awaitable in turn."""
+            for disposable in items:
+                if getattr(disposable, "_spent", False):
+                    continue
+                res = disposable()
+                if inspect.isawaitable(res):
+                    await res
+
+        def dispose() -> Any:
+            """Run the collected disposers in reverse, strictly in order.
+
+            Sync disposers run eagerly until the first awaitable; the
+            rest run inside the returned coroutine, each after the
+            previous one settles.
+            """
             nonlocal disposed
             if disposed:
                 return None
             disposed = True
-            awaitables: list[Any] = []
-            for dispose in reversed(disposables):
-                if getattr(dispose, "_spent", False):
+            items = list(reversed(disposables))
+            disposables.clear()
+            for index, disposable in enumerate(items):
+                if getattr(disposable, "_spent", False):
                     continue
-                res = dispose()
+                res = disposable()
                 if inspect.isawaitable(res):
-                    awaitables.append(res)
-            if not awaitables:
-                return None
 
-            async def _await_collected() -> None:
-                for res in awaitables:
-                    await res
+                    async def _await_chain(
+                        res: Any = res, start: int = index + 1
+                    ) -> None:
+                        await res
+                        await _run_sequential(items[start:])
 
-            return _await_collected()
+                    return _await_chain()
+            return None
+
+        try:
+            collect(result)
+        except Exception:
+            # A failed setup still runs what was already collected,
+            # then re-raises the original error.
+            cleanup = dispose()
+            if inspect.isawaitable(cleanup):
+                _schedule_cleanup(cleanup)
+            raise
+
+        def wrapper() -> Any:
+            return dispose()
 
         # Store effect symbol metadata on wrapper (anima parity)
         setattr(wrapper, symbols["effect"], meta)

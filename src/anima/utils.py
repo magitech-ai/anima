@@ -5,6 +5,10 @@ time helpers, and binary-source helpers used across the kernel.
 
 Each function documents where Python semantics differ from the
 JavaScript originals it mirrors.
+
+No ``define_property`` helper: Python has no non-enumerable
+properties — ``setattr`` lands visibly in ``__dict__``/``dir()`` —
+so a helper by that name would be misleading.
 """
 
 from __future__ import annotations
@@ -175,7 +179,7 @@ _TIME_REGEXP = re.compile(
             r"s(?:ec(?:ond)?(?:s)?)?",
         )
     )
-    + "$"
+    + r"\Z"
 )
 
 
@@ -314,7 +318,10 @@ class Time:
             return f"{_js_round(ms / cls.minute)}m"
         if magnitude >= cls.second:
             return f"{_js_round(ms / cls.second)}s"
-        return f"{ms}ms"
+        # JavaScript stringifies numbers without a fraction when
+        # integral (500 -> "500ms"); Python floats render "500.0ms".
+        rendered = int(ms) if float(ms).is_integer() else ms
+        return f"{rendered}ms"
 
     @staticmethod
     def to_digits(source: int, length: int = 2) -> str:
