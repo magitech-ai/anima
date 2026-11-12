@@ -124,10 +124,12 @@ Every capability is a service mounted on a `Context`. The kernel ships these mod
 | Area | Modules | What they do |
 | --- | --- | --- |
 | Core | `core`, `events`, `tree`, `registry`, `reflect` | Context and service registry, the 5 event modes, loader entry tree and composite component groups, component runtime registry, service introspection |
-| Loading & config | `loader`, `loader_utils`, `include`, `schema`, `pkg`, `cli_env` | YAML profile loading, module resolution, multi-file includes with journaling and patches, declarative schema validation, `uv` package management, cascading environment variables |
-| Server & network | `server`, `server_acl`, `server_echo`, `server_proxy`, `server_static`, `http`, `http_socks` | Async HTTP and WebSocket server, host/loopback access control, echo, reverse proxy, and static file routes; async HTTP client with SOCKS4/5 support |
-| Runtime services | `timer`, `watcher`, `logger`, `hmr` | Reversible timers (timeouts, intervals, debounce, throttle), filesystem change detection, structured namespaced logging, hot module replacement |
-| Interface | `cli`, `cli_create` | Command router and profile execution substrate; interactive project scaffolding via the `Scaffold` library API (`from anima.cli_create import Scaffold`; `Scaffold.start()` runs the flow — no CLI entry point; template fetched from the npm registry) |
+| Loading & config | `loader`, `include`, `schema`, `pkg`†, `cli_env`†, `utils` | YAML profile loading, module resolution, multi-file includes with journaling and patches, declarative schema validation, `uv` package management, cascading environment variables, shared utility helpers (plain-object checks, time, binary) |
+| Server & network | `server`†, `server_acl`†, `server_echo`†, `server_proxy`†, `server_static`†, `http`†, `http_socks`† | Async HTTP and WebSocket server, host/loopback access control, echo, reverse proxy, and static file routes; async HTTP client with SOCKS4/5 support |
+| Runtime services | `timer`, `watcher`†, `logger`, `hmr` | Reversible timers (timeouts, intervals, debounce, throttle), filesystem change detection, structured namespaced logging, hot module replacement |
+| Interface | `cli`†, `cli_create`† | Command router and profile execution substrate; interactive project scaffolding via the `create` subcommand (`anima create <name>`, default `my-app`) or the `Scaffold` library API (`from anima.cli_create import Scaffold`; `Scaffold.start()` runs the flow; template fetched from the npm registry) |
+
+† Anima-original surface: not part of the ported kernel.
 
 ---
 

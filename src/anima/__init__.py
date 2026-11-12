@@ -7,6 +7,7 @@ __version__ = "0.2.0"
 import importlib
 from typing import Any
 
+from anima.cli_env import CliEnv
 from anima.core import Context, Fiber, FiberState, Service, inject
 from anima.events import DisposableList, Disposer, EventBus, EventMode, is_bailed
 from anima.hmr import HmrService, Reload, handle_error
@@ -61,6 +62,20 @@ from anima.schema import Schema, SchemaError, ValidationError, z
 from anima.server import Route, ServerRequest, ServerResponse, ServerService, WebSocket
 from anima.timer import Scheduled, TimerService
 from anima.tree import Entry, EntryChange, EntryGroup, EntryOptions, EntryTree, Group
+from anima.utils import (
+    Binary,
+    Dict,
+    Promisify,
+    Time,
+    filter_keys,
+    hyphenate,
+    is_non_nullable,
+    is_nullable,
+    is_plain_object,
+    map_values,
+    pick,
+    value_map,
+)
 from anima.volatile import (
     Volatile,
     create_volatile,
@@ -89,12 +104,15 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
+    "Binary",
     "CliCommand",
+    "CliEnv",
     "CliService",
     "CliSyntaxError",
     "Conflict",
     "ConsoleExporter",
     "Context",
+    "Dict",
     "DisposableList",
     "Disposer",
     "Entry",
@@ -130,6 +148,7 @@ __all__ = [
     "PatchIndex",
     "PkgResult",
     "PkgService",
+    "Promisify",
     "ReflectService",
     "RegistryService",
     "Reload",
@@ -142,6 +161,7 @@ __all__ = [
     "ServerService",
     "Service",
     "StaleWriteError",
+    "Time",
     "TimerService",
     "ValidationError",
     "Volatile",
@@ -159,16 +179,23 @@ __all__ = [
     "ensure_insert_ids",
     "equal_except_volatile",
     "evaluate",
+    "filter_keys",
     "flatten",
     "handle_error",
+    "hyphenate",
     "inject",
     "interpolate",
     "interpolate_env",
     "is_bailed",
+    "is_non_nullable",
+    "is_nullable",
+    "is_plain_object",
     "is_volatile",
     "load_profile",
+    "map_values",
     "merge",
     "merge_records",
+    "pick",
     "place",
     "reconcile",
     "record",
@@ -177,6 +204,7 @@ __all__ = [
     "route_journal",
     "save_profile",
     "update_volatile",
+    "value_map",
     "volatile_entries",
     "z",
 ]

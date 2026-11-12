@@ -68,6 +68,29 @@ _access_context: ContextVar[Context | None] = ContextVar(
 )
 
 
+def _schedule_cleanup(coro: Any) -> None:
+    """Schedule error logging for a fire-and-forget cleanup coroutine.
+
+    Mirrors the oracle's ``cleanup.catch(logger.error)`` on a failed
+    effect setup: the cleanup runs in the background and its errors
+    are logged, never swallowed. With no running loop the cleanup
+    runs to completion on a fresh loop instead of being dropped.
+    """
+
+    async def _run() -> None:
+        try:
+            await coro
+        except Exception:
+            logger.exception("Effect cleanup failed")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_run())
+        return
+    loop.create_task(_run())
+
+
 class AnimaErrorCode:
     INACTIVE_EFFECT = "cannot create effect on inactive context"
 
@@ -110,12 +133,33 @@ def is_js_expr(value: Any) -> TypeGuard[dict[str, Any]]:
 
 
 class FiberState(str, Enum):
+    """Lifecycle states, compared by name.
+
+    State crosses any boundary — logs, serialized sessions,
+    cross-runtime comparison — by name, never by ordinal or numeric
+    value (see ADR 0009). The numeric values the states carry on the
+    wire are recorded in FIBER_STATE_WIRE_VALUES.
+    """
+
     PENDING = "PENDING"
     LOADING = "LOADING"
     ACTIVE = "ACTIVE"
     UNLOADING = "UNLOADING"
     DISPOSED = "DISPOSED"
     FAILED = "FAILED"
+
+
+# Name-based wire mapping (ADR 0009): the numeric value each state
+# carries on the wire in the upstream runtime. Anima keeps its string
+# enum; no code compares states numerically or relies on their order.
+FIBER_STATE_WIRE_VALUES: dict[FiberState, int] = {
+    FiberState.PENDING: 0,
+    FiberState.LOADING: 1,
+    FiberState.ACTIVE: 2,
+    FiberState.FAILED: 3,
+    FiberState.DISPOSED: 4,
+    FiberState.UNLOADING: 5,
+}
 
 
 class Fiber:
@@ -794,19 +838,94 @@ class Fiber:
             raise AnimaError(AnimaErrorCode.INACTIVE_EFFECT)
 
     def effect(self, execute: Callable[[], Any], label: str = "anonymous") -> Any:
-        """Register an effect on this fiber, returning a disposer."""
+        """Register an effect on this fiber, returning a disposer.
+
+        The disposers ``execute`` returns are collected: each one runs
+        when this effect is disposed, and any carrying effect metadata
+        nests under this effect's ``children`` in ``getEffects()``.
+        """
         self.assertActive()
 
         meta: dict[str, Any] = {"label": label, "children": []}
+        disposables: list[Callable[[], Any]] = []
+
+        def collect(item: Any) -> None:
+            """Collect one disposer into this effect, nesting its meta."""
+            if item is None:
+                return
+            if callable(item):
+                item_meta = getattr(item, symbols["effect"], None)
+                if item_meta is not None:
+                    if item in self.effects:
+                        self.effects.remove(item)
+                    meta["children"].append(item_meta)
+                disposables.append(item)
+                return
+            if isinstance(item, Iterable) and not isinstance(
+                item, (str, bytes, bytearray)
+            ):
+                for sub in item:
+                    collect(sub)
+                return
+            raise TypeError("Invalid effect")
 
         try:
-            execute()
+            result = execute()
         except Exception:
             logger.exception("Effect %s failed", label)
             raise
 
-        def wrapper() -> Any:
+        disposed = False
+
+        async def _run_sequential(items: list[Callable[[], Any]]) -> None:
+            """Run disposers in order, awaiting each awaitable in turn."""
+            for disposable in items:
+                if getattr(disposable, "_spent", False):
+                    continue
+                res = disposable()
+                if inspect.isawaitable(res):
+                    await res
+
+        def dispose() -> Any:
+            """Run the collected disposers in reverse, strictly in order.
+
+            Sync disposers run eagerly until the first awaitable; the
+            rest run inside the returned coroutine, each after the
+            previous one settles.
+            """
+            nonlocal disposed
+            if disposed:
+                return None
+            disposed = True
+            items = list(reversed(disposables))
+            disposables.clear()
+            for index, disposable in enumerate(items):
+                if getattr(disposable, "_spent", False):
+                    continue
+                res = disposable()
+                if inspect.isawaitable(res):
+
+                    async def _await_chain(
+                        res: Any = res, start: int = index + 1
+                    ) -> None:
+                        await res
+                        await _run_sequential(items[start:])
+
+                    return _await_chain()
             return None
+
+        try:
+            collect(result)
+        except Exception:
+            # A failed setup still runs what was already collected,
+            # then re-raises the original error.
+            cleanup = dispose()
+            if inspect.isawaitable(cleanup):
+                _schedule_cleanup(cleanup)
+            raise
+
+        def wrapper() -> Any:
+            return dispose()
 
         # Store effect symbol metadata on wrapper (anima parity)
         setattr(wrapper, symbols["effect"], meta)
@@ -1431,20 +1550,35 @@ class Context:
     def effect(
         self, func: Callable[[], Disposer | None], label: str | None = None
     ) -> Disposer:
-        """Register a cleanup-aware reversible effect on the active fiber."""
+        """Register a cleanup-aware reversible effect on the active fiber.
+
+        The returned disposer carries effect metadata
+        (``{"label": ..., "children": []}``) and is itself the entry
+        registered on the fiber, so ``getEffects()`` lists
+        context-registered effects. The default label is ``"anonymous"``.
+        A disposer runs at most once: disposing it directly marks it
+        spent, so a parent effect wrapping it will not run it again.
+        """
         fiber = _current_fiber.get()
         disposer = func()
+        meta: dict[str, Any] = {"label": label or "anonymous", "children": []}
 
         def _cleanup() -> Any:
+            if getattr(_cleanup, "_spent", False):
+                return None
+            # The spent flag must live on the disposer itself so a
+            # parent effect wrapper can see a manual dispose.
+            setattr(_cleanup, "_spent", True)  # noqa: B010
+            if fiber is not None and _cleanup in fiber.effects:
+                fiber.effects.remove(_cleanup)
             if callable(disposer):
-                if fiber is not None and disposer in fiber.effects:
-                    fiber.effects.remove(disposer)
                 res = disposer()
                 return res
             return None
 
+        setattr(_cleanup, symbols["effect"], meta)
         if callable(disposer) and fiber is not None:
-            fiber.effects.append(disposer)
+            fiber.effects.append(_cleanup)
 
         return _cleanup
 
@@ -1455,7 +1589,7 @@ class Context:
         def _unregister() -> None:
             self._unregister_service(name)
 
-        return self.effect(lambda: _unregister)
+        return self.effect(lambda: _unregister, label=f'ctx.provide("{name}")')
 
     def intercept(self, service_name: str, config: dict[str, Any]) -> Context:
         """Spawn a child context with intercepted configuration for a target service."""
@@ -1519,7 +1653,7 @@ class Context:
         disposer = self._event_bus.on(
             event, callback, mode=mode, prepend=prepend, ctx=self, global_=global_
         )
-        self.effect(lambda: disposer)
+        self.effect(lambda: disposer, label=f'ctx.on("{event}")')
         return disposer
 
     def once(
@@ -1535,7 +1669,7 @@ class Context:
         disposer = self._event_bus.once(
             event, callback, mode=mode, prepend=prepend, ctx=self, global_=global_
         )
-        self.effect(lambda: disposer)
+        self.effect(lambda: disposer, label=f'ctx.once("{event}")')
         return disposer
 
     def emit(self, event: str, *args: Any, **kwargs: Any) -> None:
@@ -1597,7 +1731,13 @@ class Context:
 
 
 class CoreService(Service):
-    """Concrete Service subclass for testing (anima parity)."""
+    """Minimal concrete Service, kept in ``src`` on purpose.
+
+    Anima's own suite mounts it to exercise Service subclassing and
+    instance-check behavior, and downstream suites can mount the same
+    trivial component instead of defining their own. That shared use
+    is why it lives here rather than in a test fixture.
+    """
 
     def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})

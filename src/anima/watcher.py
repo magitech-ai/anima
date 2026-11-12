@@ -1,5 +1,7 @@
 """
 Watcher service for filesystem change detection.
+
+Anima-original surface: not part of the ported kernel.
 """
 
 from __future__ import annotations
