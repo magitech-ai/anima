@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import importlib
+import importlib.util
 import inspect
 import logging
 import os
@@ -395,6 +397,16 @@ class HmrService(Service):
             return
         match = self._find_module_by_path(res_path)
         if match is None:
+            # Unloaded module declared external by name: derive the
+            # candidate name from the path (same derivation as the
+            # fallback in _find_module_by_path) and check it before
+            # falling through to hmr/change. By-path externals are
+            # already handled above via _is_external_path, and the
+            # path is under root here, so relative_to cannot fail.
+            candidate = ".".join(res_path.relative_to(self.root).with_suffix("").parts)
+            if candidate in self._externals_names:
+                await self._on_external(url)
+                return
             self.ctx.emit("hmr/change", url)
             return
         mod_name, _mod = match
@@ -580,6 +592,16 @@ class HmrService(Service):
                 mod = sys.modules.get(name)
                 if mod is None:
                     continue
+                # Delete the cached bytecode first: reload reuses it
+                # when the source mtime (integer seconds) and size
+                # match, so two same-size edits inside one second
+                # would silently execute stale code. A missing or
+                # undeletable cache is not an error.
+                mod_file = getattr(mod, "__file__", None)
+                if isinstance(mod_file, str):
+                    with contextlib.suppress(ValueError, OSError):
+                        cache = importlib.util.cache_from_source(mod_file)
+                        Path(cache).unlink(missing_ok=True)
                 importlib.reload(mod)
         except Exception as exc:  # noqa: BLE001 - any reload failure rolls back
             self._rollback(backups, modules_before)
@@ -593,8 +615,11 @@ class HmrService(Service):
         try:
             reloads = await self._reconcile(accepted, old_targets)
         except Exception as exc:  # noqa: BLE001 - any reconcile failure rolls back
-            await self._restore_fibers(old_targets)
+            # Roll back module state BEFORE restoring fibers: the restore
+            # re-executes the old component, and it must read the old
+            # (rolled-back) module state, not the new broken one.
             self._rollback(backups, modules_before)
+            await self._restore_fibers(old_targets)
             handle_error(exc)
             return False
         self.ctx.emit("hmr/reload", reloads)
@@ -605,7 +630,14 @@ class HmrService(Service):
         backups: dict[str, tuple[ModuleType, dict[str, Any]]],
         modules_before: set[str],
     ) -> None:
-        """Restore pre-cycle module state: dict snapshots and sys.modules."""
+        """Restore pre-cycle module state: dict snapshots and sys.modules.
+
+        The snapshot is shallow: re-bound names are restored, but
+        in-place mutations of pre-existing mutable objects survive —
+        the snapshot holds the same objects. A failed reload whose new
+        code mutates shared mutable module state in place leaves that
+        mutation behind.
+        """
         for name in reversed(list(backups)):
             mod, snapshot = backups[name]
             mod.__dict__.clear()

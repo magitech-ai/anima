@@ -450,6 +450,67 @@ async def test_hmr_failed_reload_rolls_back(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_hmr_rollback_keeps_in_place_mutations(tmp_path: Path):
+    """Rollback restores bindings, not in-place mutations (documented boundary).
+
+    The snapshot holds the same mutable objects, so an in-place append
+    made by the new top-level code survives a rollback. Rebinding the
+    name first is shielded (the append then hits the new list).
+    """
+    mod_path = _write(tmp_path, "p18_shallow_rb.py", "ITEMS = []\nVALUE = 1\n")
+    ctx = Context()
+    hmr = HmrService(ctx, {"root": tmp_path})
+    mod = _load("p18_shallow_rb", mod_path)
+    try:
+        items = mod.ITEMS
+        mod_path.write_text("ITEMS.append('partial')\nraise RuntimeError('boom')\n")
+        _bump(mod_path)
+        assert await hmr.reload_module("p18_shallow_rb", path=mod_path) is None
+        # The re-bound name is restored, but the in-place append on the
+        # same list object survives the rollback.
+        assert mod.VALUE == 1
+        assert mod.ITEMS is items
+        assert mod.ITEMS == ["partial"]
+    finally:
+        _pop("p18_shallow_rb")
+
+
+@pytest.mark.asyncio
+async def test_hmr_reload_same_second_same_size_recompiles(tmp_path: Path):
+    """Two same-size edits inside one second still reload fresh code.
+
+    reload reuses __pycache__ bytecode when the source mtime (integer
+    seconds) and size match, so the reload deletes the cached bytecode
+    first. The mtime is pinned with utime so the test does not depend
+    on wall-clock timing: the second write keeps the same integer
+    second (stale bytecode would apply) but a different float mtime
+    (so the stash still counts as fresh).
+    """
+    mod_path = _write(tmp_path, "p18_stale_pyc.py", "VALUE = 1\n")
+    ctx = Context()
+    hmr = HmrService(ctx, {"root": tmp_path})
+    mod = _load("p18_stale_pyc", mod_path)
+    try:
+        cache = Path(importlib.util.cache_from_source(str(mod_path)))
+        assert cache.exists()  # the initial load wrote bytecode
+        first_mtime = mod_path.stat().st_mtime
+        # Pin the mtime to a base with a small fraction, so +0.5 s
+        # stays inside the same integer second.
+        base = int(first_mtime) + 0.1
+        os.utime(mod_path, (base, base))
+        mod_path.write_text("VALUE = 2\n")
+        # Same integer second and same size (stale bytecode would
+        # apply), but a different float mtime so the change is fresh.
+        os.utime(mod_path, (base, base + 0.5))
+        assert int(mod_path.stat().st_mtime) == int(base)
+        assert mod_path.stat().st_size == len("VALUE = 2\n")
+        assert await hmr.reload_module("p18_stale_pyc", path=mod_path) is mod
+        assert mod.VALUE == 2
+    finally:
+        _pop("p18_stale_pyc")
+
+
+@pytest.mark.asyncio
 async def test_hmr_reload_error_handling(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ):
@@ -620,6 +681,27 @@ async def test_hmr_explicit_externals_config(tmp_path: Path):
         assert absolute.VALUE == 1
     finally:
         _pop("p18_decl_ext", "p18_bare_ext", "p18_abs_ext")
+
+
+@pytest.mark.asyncio
+async def test_hmr_external_by_name_unloaded_fires_hook(tmp_path: Path):
+    # A module declared external by name fires the hook even when it was
+    # never imported: the candidate name is derived from the path, not
+    # from a loaded sys.modules entry.
+    mod_path = _write(tmp_path, "p18_unloaded_ext.py", "VALUE = 1\n")
+    ctx = Context()
+    hooks: list[str] = []
+    hmr = HmrService(
+        ctx,
+        {
+            "root": tmp_path,
+            "externals": ["p18_unloaded_ext"],
+            "full_reload": lambda url: hooks.append(url),
+        },
+    )
+    assert "p18_unloaded_ext" not in sys.modules
+    await hmr._on_file_change("change", mod_path)
+    assert hooks == [mod_path.resolve().as_uri()]
 
 
 # --- acceptance 4: debounce coalesces rapid changes --------------------------
@@ -1188,6 +1270,61 @@ async def test_hmr_reload_broken_new_component_rolls_back_fiber(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_hmr_failed_reload_restores_after_rollback(tmp_path: Path):
+    """A failed reload restores fibers against rolled-back module state.
+
+    The old component's re-mount reads module-level state, so the
+    restore must run after the rollback: restoring first would re-run
+    the old __init__ against the new (broken) state and fail the fiber
+    spuriously even though the old code against the old state mounts
+    fine.
+    """
+    shared_path = _write(tmp_path, "p18_rb2_shared.py", "VALUE = 1\n")
+    plugin_path = _write(
+        tmp_path,
+        "p18_rb2_plugin.py",
+        "from p18_rb2_shared import VALUE\n"
+        "class Comp:\n"
+        "    def __init__(self, ctx):\n"
+        "        self.v = 10 // VALUE\n",
+    )
+    ctx = Context()
+    hmr = HmrService(ctx, {"root": tmp_path})
+    shared = _load("p18_rb2_shared", shared_path)
+    plugin = _load("p18_rb2_plugin", plugin_path)
+    sys.path.insert(0, str(tmp_path))
+    try:
+        fib = ctx.use(plugin.Comp)
+        await ctx.flush()
+        old_target = fib.target
+        assert fib.state == FiberState.ACTIVE
+        assert fib.error is None
+
+        # New shared value breaks the old __init__ (10 // 0).
+        shared_path.write_text("VALUE = 0\n")
+        _bump(shared_path)
+        assert await hmr.reload_module("p18_rb2_shared", path=shared_path) is None
+        # Module state rolled back, and the fiber is intact: the restore
+        # re-ran the old __init__ against VALUE == 1, not 0.
+        assert shared.VALUE == 1
+        assert plugin.VALUE == 1
+        assert fib.target is old_target
+        assert fib.state == FiberState.ACTIVE
+        assert fib.error is None
+        # A retry after fixing the file succeeds with the fresh value.
+        shared_path.write_text("VALUE = 2\n")
+        _bump(shared_path)
+        assert await hmr.reload_module("p18_rb2_shared", path=shared_path) is shared
+        assert shared.VALUE == 2
+        assert plugin.VALUE == 2
+        assert fib.state == FiberState.ACTIVE
+        assert fib.target is not old_target
+    finally:
+        sys.path.remove(str(tmp_path))
+        _pop("p18_rb2_shared", "p18_rb2_plugin")
+
+
+@pytest.mark.asyncio
 async def test_hmr_none_module_entry_restarts_fiber(tmp_path: Path):
     """A stashed module whose sys.modules entry became None is skipped.
 
@@ -1260,8 +1397,10 @@ async def test_hmr_restore_failure_leaves_fiber_failed(
 ):
     """When even restoring the old target fails, the failure is logged.
 
-    The module state is still rolled back; the fiber keeps the new
-    (broken) target and its FAILED state instead of crashing the cycle.
+    The module state is still rolled back; the fiber keeps the old
+    target and its FAILED state instead of crashing the cycle. The
+    restore re-runs the old __init__ after the rollback, so its
+    COUNT side effect lingers (2, not 1).
     """
     mod_file = _write(
         tmp_path,
@@ -1299,7 +1438,10 @@ async def test_hmr_restore_failure_leaves_fiber_failed(
         assert reloaded is None
         # Module state rolled back to the old code.
         assert mod.Comp.version == 1
-        assert mod.COUNT == 1
+        # The restore re-ran the old __init__ after the rollback, so
+        # its COUNT side effect lingers (the old order erased it with
+        # the later rollback).
+        assert mod.COUNT == 2
         # The restore assigned the old target back (replace() assigns
         # before restarting), but its restart failed too, so the fiber
         # keeps the old target and its FAILED state.
