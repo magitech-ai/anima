@@ -1453,6 +1453,28 @@ async def test_include_journal_file_wins_conflict(tmp_path: Path, mod: Any) -> N
 
 
 @pytest.mark.asyncio
+async def test_include_post_await_external_edit_picked_up_via_refresh(
+    tmp_path: Path, mod: Any
+) -> None:
+    """Item 10: an external edit made AFTER `await loader.update(...)`
+    is not seen until a refresh — the drain already settled inside the
+    update await — but refresh() picks it up."""
+    _ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, _rows(1, 2))
+    file = tmp_path / "cfg.yaml"
+    await loader.update(f"{inc_id}:e0", {"config": {"level": 2}})
+    await _settle(inc, loader)
+    assert inc.root.data[0]["config"]["level"] == 2
+    # The edit lands after the await: nothing re-reads the file until
+    # refresh, so the live tree still holds the runtime value.
+    file.write_text(_rows(9, 2), encoding="utf-8")
+    assert inc.root.data[0]["config"]["level"] == 2
+    await inc.refresh()
+    await _settle(inc, loader)
+    assert inc.root.data[0]["config"]["level"] == 9
+    assert mod.calls[-1] == {"level": 9}
+
+
+@pytest.mark.asyncio
 async def test_include_runtime_create_placed_at_parent_position(
     tmp_path: Path, mod: Any
 ) -> None:
@@ -1632,6 +1654,58 @@ async def test_include_cross_entry_update_while_apply_in_flight(
 
 
 @pytest.mark.asyncio
+async def test_include_stale_pending_tree_healed_when_file_missing(
+    tmp_path: Path, mod: Any
+) -> None:
+    """F1: an adopt stages a stale pending tree (e1 patched to 8, e0 at
+    1); a live update to e0=50 races it while the file is missing, so
+    the drain cannot write and — before this fix — scheduled no fresh
+    tree, leaving the stale apply final. The failed write now schedules
+    a fresh tree from cache + journal, so the live value survives."""
+    _ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, _rows(1, 2))
+    file = tmp_path / "cfg.yaml"
+    task = await inc._on_internal_update(
+        {"path": str(file), "patches": [{"id": "e1", "config": {"level": 8}}]},
+        None,
+    )
+    assert isinstance(task, asyncio.Task)
+    await asyncio.sleep(0)
+    file.unlink()
+    await loader.update(f"{inc_id}:e0", {"config": {"level": 50}})
+    await task
+    await _settle(inc, loader)
+    assert inc.root.data[0]["config"]["level"] == 50
+    assert inc.root.data[1]["config"]["level"] == 8
+    assert not file.exists()
+
+
+@pytest.mark.asyncio
+async def test_include_stale_pending_tree_healed_when_file_read_only(
+    tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1, read-only variant: the same race, but the drain cannot write
+    because the file is read-only. The sandbox runs as root, so a real
+    chmod would not block the write; os.access is stubbed instead, the
+    same technique as test_include_readonly_file_warns_and_keeps_journal."""
+    _ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, _rows(1, 2))
+    file = tmp_path / "cfg.yaml"
+    task = await inc._on_internal_update(
+        {"path": str(file), "patches": [{"id": "e1", "config": {"level": 8}}]},
+        None,
+    )
+    assert isinstance(task, asyncio.Task)
+    await asyncio.sleep(0)
+    monkeypatch.setattr(os, "access", lambda *a: False)
+    await loader.update(f"{inc_id}:e0", {"config": {"level": 50}})
+    await task
+    await _settle(inc, loader)
+    assert inc.root.data[0]["config"]["level"] == 50
+    assert inc.root.data[1]["config"]["level"] == 8
+    rows = load_yaml(file.read_text(encoding="utf-8"))
+    assert [row["config"]["level"] for row in rows] == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_include_on_internal_update_sync_next_fn(
     tmp_path: Path, mod: Any
 ) -> None:
@@ -1663,8 +1737,9 @@ async def test_include_on_internal_update_without_next_fn_is_noop(
 async def test_include_on_internal_update_returns_apply_task(
     tmp_path: Path, mod: Any
 ) -> None:
-    """NB3: adopting an update returns the pending apply task, so a caller
-    awaiting the fiber update awaits the re-apply."""
+    """NB3: adopting an update returns the pending apply task, so a direct
+    caller awaiting it awaits the re-apply (through the fiber update the
+    return is discarded)."""
     _ctx, _loader, _inc_id, _entry, inc = await _boot(
         tmp_path, _rows(1, 2), patches=[{"id": "e0", "config": {"level": 9}}]
     )
