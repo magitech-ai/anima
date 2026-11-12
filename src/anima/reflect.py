@@ -213,7 +213,15 @@ class ReflectService:
         self._impl_counter += 1
         self.store[name] = impl
 
-        self.notify([name])
+        # Notify dependents only once the providing fiber is ACTIVE: a
+        # fiber still loading has no live service to offer yet, and its
+        # dependents re-check when it activates (oracle reflect.ts:294-296).
+        # Notifying during load would emit the service event twice — once
+        # here, once at activation. With no owning fiber known, notify as
+        # before; there is no loading fiber to defer to.
+        fiber = _current_fiber.get() or self.ctx._fiber
+        if fiber is None or fiber.state == FiberState.ACTIVE:
+            self.notify([name])
 
         def disposer() -> None:
             if self.store.get(name) is impl:
@@ -222,7 +230,6 @@ class ReflectService:
 
         # Register disposer as effect on the current fiber (anima parity:
         # this.ctx.fiber.effect(...) registers the disposer on the fiber)
-        fiber = _current_fiber.get() or self.ctx._fiber
         impl.fiber = fiber
         if fiber is not None:  # pragma: no cover
             fiber.effects.append(disposer)
