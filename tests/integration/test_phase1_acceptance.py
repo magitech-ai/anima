@@ -186,7 +186,7 @@ class ConsumerPlugin:
 # on LOADING then ACTIVE, and notifies the reflection layer on the ACTIVE
 # transition, which emits internal/service — oracle reflect.ts:321-336;
 # the provide itself does NOT notify while the fiber is still loading —
-# oracle reflect.ts:303-305).
+# oracle reflect.ts:294-296).
 GREETER_MOUNT_EVENTS = [
     ("plugin", "GreeterService", 1),
     ("status", "GreeterService", "LOADING", "PENDING"),
@@ -219,7 +219,7 @@ CONSUMER_DISPOSE_EVENTS = [
 # unload: the ACTIVE -> UNLOADING transition notifies the still-present
 # service (oracle fiber.ts:579-592 + reflect.ts:321-336), then the
 # provide disposer deletes it and notifies again with no value
-# (oracle reflect.ts:307-311).
+# (oracle reflect.ts:297-303).
 GREETER_DISPOSE_EVENTS = [
     ("plugin", "GreeterService", None),
     ("status", "GreeterService", "UNLOADING", "ACTIVE"),
@@ -297,7 +297,7 @@ async def test_acceptance_mount_event_sequence() -> None:
     # Consumer-state is registered through the context-level provide,
     # which notifies at registration time rather than at activation
     # (the oracle has a single provide path, so its notification lands
-    # after the ACTIVE status — oracle reflect.ts:303-305). Pin the
+    # after the ACTIVE status — oracle reflect.ts:294-296). Pin the
     # count, not the position: exactly one service event for it.
     service_events = [e for e in events if e[0] == "service"]
     assert service_events == [

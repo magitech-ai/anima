@@ -215,7 +215,7 @@ class ReflectService:
 
         # Notify dependents only once the providing fiber is ACTIVE: a
         # fiber still loading has no live service to offer yet, and its
-        # dependents re-check when it activates (oracle reflect.ts:303-305).
+        # dependents re-check when it activates (oracle reflect.ts:294-296).
         # Notifying during load would emit the service event twice — once
         # here, once at activation. With no owning fiber known, notify as
         # before; there is no loading fiber to defer to.

@@ -4934,10 +4934,12 @@ async def test_conformance_u_is_js_expr_wired(
     assert not is_js_expr("process.platform")
 
     ctx = Context()
-    assert interpolate(ctx, {"__jsExpr": "process.platform"}) == "linux"
-    assert interpolate(ctx, {"k": {"__jsExpr": "process.platform === 'linux'"}}) == {
-        "k": True
-    }
+    expected = sys.platform  # "linux" / "darwin" / "win32" — never hardcoded
+    other = "win32" if expected != "win32" else "linux"
+    assert interpolate(ctx, {"__jsExpr": "process.platform"}) == expected
+    assert interpolate(
+        ctx, {"k": {"__jsExpr": f"process.platform === '{expected}'"}}
+    ) == {"k": True}
 
     root = _repo_root()
     for name in ("tree.py", "jsexpr.py", "include.py"):
@@ -4961,7 +4963,7 @@ async def test_conformance_u_is_js_expr_wired(
         {
             "id": "u-disabled",
             "name": "conformance_u_probe_mod:Dummy",
-            "disabled": {"__jsExpr": "process.platform === 'linux'"},
+            "disabled": {"__jsExpr": f"process.platform === '{expected}'"},
         }
     )
     disabled_entry = loader.resolve(disabled_id)
@@ -4972,7 +4974,7 @@ async def test_conformance_u_is_js_expr_wired(
         {
             "id": "u-enabled",
             "name": "conformance_u_probe_mod:Dummy",
-            "disabled": {"__jsExpr": "process.platform === 'win32'"},
+            "disabled": {"__jsExpr": f"process.platform === '{other}'"},
         }
     )
     await loader.await_all()
