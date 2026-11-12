@@ -8,6 +8,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from anima.cli_env import CliEnv, load_env_cascade
 from anima.core import (
+    FIBER_STATE_WIRE_VALUES,
     AnimaError,
     AnimaErrorCode,
     Context,
@@ -15,6 +16,7 @@ from anima.core import (
     Fiber,
     FiberState,
     Service,
+    _current_fiber,
     format_issues,
     is_js_expr,
     symbols,
@@ -686,12 +688,14 @@ async def test_class_component_sync_apply_and_disposer_idempotent():
     # Unregister nonexistent service (branch 292->exit)
     ctx._unregister_service("never_registered")
 
-    # Calling disposer when already removed from fiber.effects (branch 322->324)
+    # Calling a disposer twice is a no-op: disposers run at most
+    # once, so a manually disposed effect is not re-run when its
+    # parent effect is disposed later.
     ran = []
     disposer = ctx.effect(lambda: lambda: ran.append(1))
     disposer()
-    disposer()  # second call when disposer not in fiber.effects
-    assert ran == [1, 1]
+    disposer()  # second call must not re-run the disposer
+    assert ran == [1]
 
 
 @pytest.mark.asyncio
@@ -1424,9 +1428,16 @@ class TestFiberEffect:
         fib.effect(lambda: None, label="effect2")
 
         effects = fib.getEffects()
-        assert len(effects) == 2
-        assert effects[0]["label"] == "effect1"
-        assert effects[1]["label"] == "effect2"
+        # The "anonymous" entry is CoreService's unregister effect,
+        # registered by Service.__init__ during mount; S13 attaches
+        # metadata to context-registered effects, so it is visible now.
+        assert [e["label"] for e in effects] == [
+            "anonymous",
+            "effect1",
+            "effect2",
+        ]
+        assert effects[1]["label"] == "effect1"
+        assert effects[2]["label"] == "effect2"
 
     @pytest.mark.asyncio
     async def test_fiber_effect_wrapper_called_on_dispose(self):
@@ -1441,6 +1452,209 @@ class TestFiberEffect:
         await fib.dispose()
         assert len(wrapper_called) == 1
         assert wrapper_called[0] == "wrapper_executed"
+
+
+class TestFiberStateWireMapping:
+    def test_wire_values_match_adr_table(self):
+        """Name-based wire mapping (ADR 0009): names cross boundaries,
+        numeric values are recorded explicitly, never compared."""
+        assert FIBER_STATE_WIRE_VALUES == {
+            FiberState.PENDING: 0,
+            FiberState.LOADING: 1,
+            FiberState.ACTIVE: 2,
+            FiberState.FAILED: 3,
+            FiberState.DISPOSED: 4,
+            FiberState.UNLOADING: 5,
+        }
+
+    def test_states_serialize_by_name(self):
+        for state in FiberState:
+            assert state.value == state.name
+
+
+class TestContextEffectMeta:
+    @pytest.mark.asyncio
+    async def test_context_effect_appears_in_get_effects(self):
+        ctx = Context()
+
+        def component(c: Context):
+            c.effect(lambda: lambda: None, label="my_effect")
+
+        fib = ctx.use(component)
+        await ctx.flush()
+        effects = fib.getEffects()
+        assert [e["label"] for e in effects] == ["my_effect"]
+        assert effects[0]["children"] == []
+
+    @pytest.mark.asyncio
+    async def test_context_effect_default_label_is_anonymous(self):
+        ctx = Context()
+
+        def component(c: Context):
+            c.effect(lambda: lambda: None)
+
+        fib = ctx.use(component)
+        await ctx.flush()
+        assert [e["label"] for e in fib.getEffects()] == ["anonymous"]
+
+    @pytest.mark.asyncio
+    async def test_on_once_provide_labels(self):
+        ctx = Context()
+
+        def component(c: Context):
+            c.on("my-event", lambda: None)
+            c.once("other-event", lambda: None)
+            c.provide("my_svc", object())
+
+        fib = ctx.use(component)
+        await ctx.flush()
+        assert [e["label"] for e in fib.getEffects()] == [
+            'ctx.on("my-event")',
+            'ctx.once("other-event")',
+            'ctx.provide("my_svc")',
+        ]
+
+    @pytest.mark.asyncio
+    async def test_returned_disposer_carries_meta(self):
+        ctx = Context()
+        seen: dict[str, Any] = {}
+
+        def component(c: Context):
+            seen["disposer"] = c.effect(lambda: None, label="labeled")
+
+        ctx.use(component)
+        await ctx.flush()
+        meta = getattr(seen["disposer"], symbols["effect"], None)
+        assert meta is not None
+        assert meta["label"] == "labeled"
+
+
+class TestFiberEffectChildren:
+    def test_returned_disposer_nests_as_child(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+
+        def parent_body():
+            return ctx.effect(lambda: lambda: None, label="child")
+
+        fib.effect(parent_body, label="parent")
+        effects = fib.getEffects()
+        assert [e["label"] for e in effects] == ["anonymous", "parent"]
+        parent = next(e for e in effects if e["label"] == "parent")
+        assert [c["label"] for c in parent["children"]] == ["child"]
+
+    def test_iterable_return_collects_each(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+
+        def parent_body():
+            return [
+                ctx.effect(lambda: lambda: None, label="c1"),
+                ctx.effect(lambda: lambda: None, label="c2"),
+            ]
+
+        fib.effect(parent_body, label="parent")
+        effects = fib.getEffects()
+        parent = next(e for e in effects if e["label"] == "parent")
+        assert [c["label"] for c in parent["children"]] == ["c1", "c2"]
+
+    def test_invalid_return_raises(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        with pytest.raises(TypeError, match="Invalid effect"):
+            fib.effect(lambda: 42, label="bad")
+        with pytest.raises(TypeError, match="Invalid effect"):
+            fib.effect(lambda: "oops", label="bad")
+
+    def test_wrapper_runs_collected_disposers_once(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+
+        def parent_body():
+            return ctx.effect(lambda: lambda: ran.append(1), label="child")
+
+        wrapper = fib.effect(parent_body, label="parent")
+        wrapper()
+        wrapper()
+        assert ran == [1]
+
+    @pytest.mark.asyncio
+    async def test_child_disposer_runs_on_parent_dispose(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+
+        def parent_body():
+            return ctx.effect(lambda: lambda: ran.append(1), label="child")
+
+        fib.effect(parent_body, label="parent")
+        await fib.dispose()
+        assert ran == [1]
+
+    @pytest.mark.asyncio
+    async def test_async_child_awaited_on_dispose(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+
+        async def async_cleanup():
+            ran.append(1)
+
+        def parent_body():
+            return ctx.effect(lambda: async_cleanup, label="child")
+
+        fib.effect(parent_body, label="parent")
+        await fib.dispose()
+        assert ran == [1]
+
+    @pytest.mark.asyncio
+    async def test_plain_callable_return_collected_without_children(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+
+        fib.effect(lambda: lambda: ran.append(1), label="plain")
+        effects = fib.getEffects()
+        plain = next(e for e in effects if e["label"] == "plain")
+        assert plain["children"] == []
+        await fib.dispose()
+        assert ran == [1]
+
+    def test_returned_registered_disposer_moves_to_children(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        # Simulate a component body running on this fiber: the child
+        # effect is registered on the fiber first, then returned from
+        # the parent body, so collect moves it under the parent.
+        token = _current_fiber.set(fib)
+        try:
+            child = ctx.effect(lambda: lambda: None, label="child")
+            fib.effect(lambda: child, label="parent")
+        finally:
+            _current_fiber.reset(token)
+        effects = fib.getEffects()
+        assert [e["label"] for e in effects] == ["anonymous", "parent"]
+        parent = next(e for e in effects if e["label"] == "parent")
+        assert [c["label"] for c in parent["children"]] == ["child"]
+
+    @pytest.mark.asyncio
+    async def test_manually_disposed_child_does_not_run_twice(self):
+        ctx = Context()
+        fib = ctx.use(CoreService)
+        ran: list[int] = []
+        child: Any = None
+
+        def parent_body():
+            nonlocal child
+            child = ctx.effect(lambda: lambda: ran.append(1), label="child")
+            return child
+
+        fib.effect(parent_body, label="parent")
+        child()
+        assert ran == [1]
+        await fib.dispose()
+        assert ran == [1]
 
 
 class TestServiceInstanceCheck:

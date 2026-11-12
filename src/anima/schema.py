@@ -19,6 +19,7 @@ import math
 import re
 from typing import Any
 
+from anima.utils import is_plain_object
 from anima.volatile import (
     create_volatile,
     is_volatile,
@@ -108,7 +109,7 @@ def _js_str(value: Any, _seen: set[int] | None = None) -> str:
             return ",".join(_js_str(item, seen) for item in value)
         finally:
             seen.discard(id(value))
-    if isinstance(value, dict):
+    if is_plain_object(value):
         return "[object Object]"
     return str(value)
 
@@ -147,7 +148,7 @@ def _js_json(value: Any, _seen: set[int] | None = None) -> str:
             return "[" + ",".join(parts) + "]"
         finally:
             seen.discard(id(value))
-    if isinstance(value, dict):
+    if is_plain_object(value):
         seen.add(id(value))
         try:
             parts = []
@@ -243,7 +244,7 @@ def deep_equal(a: Any, b: Any, strict: bool = False) -> bool:
                     compare(left_item, right_item)
                     for left_item, right_item in zip(left, right)
                 )
-            if isinstance(left, dict) and isinstance(right, dict):
+            if is_plain_object(left) and is_plain_object(right):
                 keys = set(left) | set(right)
                 return all(compare(left.get(key), right.get(key)) for key in keys)
             return False
@@ -272,7 +273,7 @@ def clone(value: Any, _refs: dict[int, Any] | None = None) -> Any:
         refs[id(value)] = result
         result.extend(clone(item, refs) for item in value)
         return result if isinstance(value, list) else tuple(result)
-    if isinstance(value, dict):
+    if is_plain_object(value):
         result_dict: dict[Any, Any] = {}
         refs[id(value)] = result_dict
         for key, item in value.items():
@@ -773,7 +774,7 @@ class Schema:
                 ], _UNDEFINED
 
             case "dict":
-                if not isinstance(data, dict):
+                if not is_plain_object(data):
                     raise SchemaError(f"expected object but got {_js_str(data)}", path)
                 inner = self._inner or Schema.any()
                 result_dict: builtins.dict[str, Any] = {}
@@ -784,7 +785,7 @@ class Schema:
                 return result_dict, _UNDEFINED
 
             case "object":
-                if not isinstance(data, dict):
+                if not is_plain_object(data):
                     raise SchemaError(f"expected object but got {_js_str(data)}", path)
                 props = self._properties or {}
                 out_obj: builtins.dict[str, Any] = {}
