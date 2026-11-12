@@ -347,14 +347,22 @@ class Fiber:
 
         Runs the waterfall hook, then applies schema validation if
         declared. Validation is synchronous; the waterfall stays async.
+        The resolving fiber is bound as the current fiber for the
+        waterfall, so the loader's internal/config hook sees it as the
+        hook's fiber (the oracle binds the hook's ``this`` to the fiber
+        whose config is being resolved).
         """
 
         async def _default(cfg: Any) -> Any:
             return cfg
 
-        resolved = await self.ctx.waterfall(
-            "internal/config", config, default_handler=_default
-        )
+        token = _current_fiber.set(self)
+        try:
+            resolved = await self.ctx.waterfall(
+                "internal/config", config, default_handler=_default
+            )
+        finally:
+            _current_fiber.reset(token)
         return self._validate_config_value(resolved)
 
     @staticmethod

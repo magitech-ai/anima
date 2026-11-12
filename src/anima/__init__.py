@@ -19,6 +19,7 @@ from anima.include import (
     apply_patch,
     diff_entries,
 )
+from anima.jsexpr import JsExprError, evaluate, interpolate
 from anima.loader import (
     LoaderService,
     interpolate_env,
@@ -97,6 +98,7 @@ __all__ = [
     "Inject",
     "Journal",
     "JournalRecord",
+    "JsExprError",
     "LoaderService",
     "Logger",
     "LoggerLevel",
@@ -123,7 +125,9 @@ __all__ = [
     "apply_patch",
     "create_volatile",
     "diff_entries",
+    "evaluate",
     "inject",
+    "interpolate",
     "interpolate_env",
     "is_bailed",
     "is_volatile",
