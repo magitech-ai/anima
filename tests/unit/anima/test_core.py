@@ -731,6 +731,62 @@ async def test_fiber_resolve_config_waterfall():
 
 
 @pytest.mark.asyncio
+async def test_fiber_resolve_config_candidate_is_not_published():
+    """Fiber.resolve_config validates a candidate without publishing it."""
+    from anima.volatile import is_volatile
+
+    schema = Schema.object(
+        {"theme": Schema.string().volatile(), "level": Schema.number()}
+    )
+
+    class VolatileComp:
+        Config = schema
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            self.config = config
+
+    ctx = Context()
+    fib = ctx.use(VolatileComp, theme="dark", level=3)
+    await ctx.flush()
+    assert fib.state == FiberState.ACTIVE
+    assert fib.config_schema is schema
+
+    candidate = await fib.resolve_config({"theme": "light", "level": 3})
+    assert is_volatile(candidate["theme"])
+    assert candidate["theme"].get() == "light"
+    # Nothing published: the running config and raw input are untouched.
+    assert fib.config["theme"].get() == "dark"
+    assert fib.raw_config == {"theme": "dark", "level": 3}
+
+
+def test_fiber_config_schema_lookup():
+    """config_schema prefers Config, falls back to schema, else None."""
+    attr_schema = Schema.object({"a": Schema.string()})
+
+    class NoSchema:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            pass
+
+    class SchemaAttr:
+        schema = attr_schema
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            pass
+
+    class BothAttrs:
+        Config = attr_schema
+        schema = Schema.object({"b": Schema.string()})
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            pass
+
+    ctx = Context()
+    assert ctx.use(NoSchema).config_schema is None
+    assert ctx.use(SchemaAttr).config_schema is attr_schema
+    assert ctx.use(BothAttrs).config_schema is attr_schema
+
+
+@pytest.mark.asyncio
 async def test_context_intercept_and_resolve():
     ctx = Context()
 

@@ -1,6 +1,7 @@
 """Unit tests for the loader entry tree (EntryTree, Entry, EntryGroup, Group)."""
 
 import asyncio
+import logging
 import math
 import re
 import secrets
@@ -12,7 +13,9 @@ from typing import Any
 import pytest
 
 from anima.core import Context, FiberState
+from anima.events import EventMode
 from anima.loader import LoaderService
+from anima.schema import Schema
 from anima.tree import (
     BUILTIN_ALIASES,
     Entry,
@@ -22,6 +25,7 @@ from anima.tree import (
     resolve_component_target,
     unwrap_exports,
 )
+from anima.volatile import is_volatile
 
 
 class MemoryTree(EntryTree):
@@ -1027,3 +1031,472 @@ async def test_case5_owner_fiber_alive_marks_disabled(mod: Any) -> None:
     await sub.ctx.flush()
     assert sub.fiber.state == FiberState.DISPOSED
     assert sub.options.get("disabled") is True
+
+
+# ---------------------------------------------------------------------------
+# P1-6 — Volatile live-update commit path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def volatile_mod(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A dummy module with components whose Config carries volatile fields."""
+    calls: list[Any] = []
+
+    def comp(ctx: Context, config: Any = None) -> None:
+        calls.append(config)
+
+    comp.Config = Schema.object(  # type: ignore[attr-defined]
+        {
+            "theme": Schema.string().volatile(),
+            "level": Schema.number(),
+            "nested": Schema.object(
+                {
+                    "label": Schema.string().volatile(),
+                    "count": Schema.number(),
+                }
+            ),
+        }
+    )
+
+    def root_comp(ctx: Context, config: Any = None) -> None:
+        calls.append(("root", config))
+
+    root_comp.Config = Schema.object({"level": Schema.number()}).volatile()  # type: ignore[attr-defined]
+
+    def strict_comp(ctx: Context, config: Any = None) -> None:
+        calls.append(("strict", config))
+
+    strict_comp.Config = Schema.object(  # type: ignore[attr-defined]
+        {
+            "score": Schema.number().volatile().min(0).max(10),
+            "level": Schema.number(),
+        }
+    )
+
+    module = _install_module(
+        monkeypatch,
+        "volatile_test_mod",
+        comp=comp,
+        root_comp=root_comp,
+        strict_comp=strict_comp,
+    )
+    module.calls = calls  # type: ignore[attr-defined]
+    return module
+
+
+@pytest.mark.asyncio
+async def test_volatile_only_update_no_reload(volatile_mod: Any) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:comp",
+            "config": {"theme": "dark", "level": 3},
+        }
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    fiber = entry.fiber
+    assert fiber is not None and fiber.state == FiberState.ACTIVE
+    ref = fiber.config["theme"]
+    assert is_volatile(ref)
+    assert ref.get() == "dark"
+    volatile_updates: list[list[list[str]]] = []
+    partials: list[Any] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
+    children_before = len(entry.ctx._children)
+    inits_before = len(volatile_mod.calls)
+
+    await entry.update({"config": {"theme": "light", "level": 3}})
+
+    assert len(volatile_mod.calls) == inits_before  # no reload
+    assert entry.fiber is fiber
+    assert fiber.state == FiberState.ACTIVE
+    assert partials == []  # the volatile-only path never emits partial-dispose
+    assert volatile_updates == [[["theme"]]]
+    assert fiber.config["theme"] is ref  # same stable reference
+    assert ref.get() == "light"  # live value updated in place
+    assert fiber.raw_config == {"theme": "light", "level": 3}
+    assert entry.options["config"] == {"theme": "light", "level": 3}
+    assert len(entry.ctx._children) == children_before  # no leaked filter ctx
+
+
+@pytest.mark.asyncio
+async def test_volatile_nested_only_update_no_reload(volatile_mod: Any) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:comp",
+            "config": {
+                "theme": "dark",
+                "level": 3,
+                "nested": {"label": "a", "count": 1},
+            },
+        }
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    fiber = entry.fiber
+    assert fiber is not None
+    label_ref = fiber.config["nested"]["label"]
+    theme_ref = fiber.config["theme"]
+    volatile_updates: list[list[list[str]]] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+    inits_before = len(volatile_mod.calls)
+
+    await entry.update(
+        {
+            "config": {
+                "theme": "dark",
+                "level": 3,
+                "nested": {"label": "b", "count": 1},
+            }
+        }
+    )
+
+    assert len(volatile_mod.calls) == inits_before
+    assert volatile_updates == [[["nested", "label"]]]
+    assert fiber.config["nested"]["label"] is label_ref
+    assert label_ref.get() == "b"
+    assert theme_ref.get() == "dark"  # unchanged snapshot is not recommitted
+
+
+@pytest.mark.asyncio
+async def test_volatile_root_config_update_no_reload(volatile_mod: Any) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(
+        {"id": "a", "name": "volatile_test_mod:root_comp", "config": {"level": 3}}
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    fiber = entry.fiber
+    assert fiber is not None and fiber.state == FiberState.ACTIVE
+    ref = fiber.config
+    assert is_volatile(ref)
+    assert ref.get() == {"level": 3}
+    volatile_updates: list[list[list[str]]] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+    inits_before = len(volatile_mod.calls)
+
+    await entry.update({"config": {"level": 4}})
+
+    assert len(volatile_mod.calls) == inits_before
+    assert volatile_updates == [[[]]]  # the root reference has an empty path
+    assert fiber.config is ref
+    assert ref.get() == {"level": 4}
+
+
+@pytest.mark.asyncio
+async def test_volatile_and_ordinary_change_restarts(volatile_mod: Any) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:comp",
+            "config": {"theme": "dark", "level": 3},
+        }
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    volatile_updates: list[list[list[str]]] = []
+    partials: list[Any] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
+
+    await entry.update({"config": {"theme": "light", "level": 4}})
+    await loader.await_all()
+
+    assert len(volatile_mod.calls) == 2  # full restart: the component ran again
+    assert len(partials) == 1
+    assert volatile_updates == []  # the fast path was not taken
+    assert entry.fiber is not None and entry.fiber.state == FiberState.ACTIVE
+    assert entry.fiber.config["theme"].get() == "light"
+    assert entry.fiber.config["level"] == 4
+
+
+@pytest.mark.asyncio
+async def test_volatile_update_failing_validation_is_refused(
+    volatile_mod: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:strict_comp",
+            "config": {"score": 5, "level": 1},
+        }
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    fiber = entry.fiber
+    assert fiber is not None and fiber.state == FiberState.ACTIVE
+    ref = fiber.config["score"]
+    assert ref.get() == 5
+    volatile_updates: list[list[list[str]]] = []
+    partials: list[Any] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
+
+    with caplog.at_level(logging.WARNING, logger="anima.loader"):
+        await entry.update({"config": {"score": 99, "level": 1}})
+
+    assert len(volatile_mod.calls) == 1  # no restart
+    assert partials == []
+    assert volatile_updates == []
+    assert ref.get() == 5  # live value untouched, not half-applied
+    assert fiber.state == FiberState.ACTIVE
+    # The raw config stays retained for the next activation.
+    assert fiber.raw_config == {"score": 99, "level": 1}
+    assert "volatile config update failed for a" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_volatile_js_expr_to_literal_is_no_change(
+    volatile_mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VOL_THEME", "dark")
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:comp",
+            "config": {"theme": {"__jsExpr": "process.env.VOL_THEME"}, "level": 3},
+        }
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    fiber = entry.fiber
+    assert fiber is not None
+    ref = fiber.config["theme"]
+    assert ref.get() == "dark"
+    volatile_updates: list[list[list[str]]] = []
+    partials: list[Any] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
+
+    # The raw form changed (expression to literal) but the resolved
+    # snapshot is identical, so no path changed and no event fires.
+    await entry.update({"config": {"theme": "dark", "level": 3}})
+
+    assert len(volatile_mod.calls) == 1
+    assert partials == []
+    assert volatile_updates == []
+    assert ref.get() == "dark"
+
+
+@pytest.mark.asyncio
+async def test_volatile_update_event_scoped_to_fiber(
+    mod: Any, volatile_mod: Any
+) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:comp",
+            "config": {"theme": "dark", "level": 3},
+        }
+    )
+    await loader.create({"id": "b", "name": "tree_test_mod:comp"})
+    await loader.await_all()
+    entry_a = loader.resolve("a")
+    entry_b = loader.resolve("b")
+    on_a: list[list[list[str]]] = []
+    on_child: list[list[list[str]]] = []
+    on_b: list[list[list[str]]] = []
+    on_root: list[list[list[str]]] = []
+    on_global: list[list[list[str]]] = []
+    entry_a.ctx.on("loader/volatile-update", lambda paths: on_a.append(paths))
+    child = entry_a.ctx.extend()
+    child.on("loader/volatile-update", lambda paths: on_child.append(paths))
+    entry_b.ctx.on("loader/volatile-update", lambda paths: on_b.append(paths))
+    ctx.on("loader/volatile-update", lambda paths: on_root.append(paths))
+    ctx.on(
+        "loader/volatile-update",
+        lambda paths: on_global.append(paths),
+        global_=True,
+    )
+
+    await entry_a.update({"config": {"theme": "light", "level": 3}})
+
+    assert on_a == [[["theme"]]]
+    assert on_child == [[["theme"]]]  # descendants of the fiber ctx receive it
+    assert on_b == []  # another fiber's listeners do not
+    assert on_root == []  # ancestors do not
+    assert on_global == [[["theme"]]]  # global listeners always receive it
+
+
+@pytest.mark.asyncio
+async def test_volatile_only_update_no_reload_in_group(volatile_mod: Any) -> None:
+    # The prototype check is meaningful for group children: a mounted
+    # child is parented to its group ctx, not the loader ctx.
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create({"id": "g1", "name": "group", "group": True, "config": []})
+    await loader.await_all()
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:comp",
+            "config": {"theme": "dark", "level": 3},
+        },
+        parent="g1",
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    fiber = entry.fiber
+    assert fiber is not None and fiber.state == FiberState.ACTIVE
+    assert entry.ctx._parent is entry.parent.ctx
+    ref = fiber.config["theme"]
+    assert ref.get() == "dark"
+    volatile_updates: list[list[list[str]]] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+    inits_before = len(volatile_mod.calls)
+
+    await entry.update({"config": {"theme": "light", "level": 3}})
+
+    assert len(volatile_mod.calls) == inits_before
+    assert volatile_updates == [[["theme"]]]
+    assert ref.get() == "light"
+
+
+@pytest.mark.asyncio
+async def test_volatile_fast_path_disabled_when_patch_context_short_circuited(
+    volatile_mod: Any,
+) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    # Swallow every loader/patch-context waterfall before mounting, so
+    # the child entry ctx is never re-parented to its group ctx.
+    ctx.on(
+        "loader/patch-context",
+        lambda entry, next_fn: None,
+        mode=EventMode.WATERFALL,
+    )
+    await loader.create({"id": "g1", "name": "group", "group": True, "config": []})
+    await loader.await_all()
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:comp",
+            "config": {"theme": "dark", "level": 3},
+        },
+        parent="g1",
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    fiber = entry.fiber
+    assert fiber is not None and fiber.state == FiberState.ACTIVE
+    assert entry.ctx._parent is loader.ctx  # still the tree ctx...
+    assert entry.ctx._parent is not entry.parent.ctx  # ...not the group ctx
+    ref = fiber.config["theme"]
+    assert ref.get() == "dark"
+    volatile_updates: list[list[list[str]]] = []
+    partials: list[Any] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
+
+    await entry.update({"config": {"theme": "light", "level": 3}})
+
+    # The fast path was not taken: partial-dispose fired, but the
+    # short-circuited patch-context never ran fiber.update, so the live
+    # value is unchanged while the raw config is retained.
+    assert len(partials) == 1
+    assert volatile_updates == []
+    assert ref.get() == "dark"
+    assert entry.options["config"] == {"theme": "light", "level": 3}
+
+
+@pytest.mark.asyncio
+async def test_volatile_fast_path_skipped_when_fiber_not_active(
+    volatile_mod: Any,
+) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:comp",
+            "config": {"theme": "dark", "level": "not-a-number"},
+        }
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    fiber = entry.fiber
+    assert fiber is not None and fiber.state == FiberState.FAILED
+    assert len(volatile_mod.calls) == 0  # validation failed before the body ran
+    volatile_updates: list[list[list[str]]] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+
+    await entry.update({"config": {"theme": "dark", "level": 3}})
+    await loader.await_all()
+
+    assert volatile_updates == []
+    assert len(volatile_mod.calls) == 1  # recovered through the ordinary path
+    assert entry.fiber is not None and entry.fiber.state == FiberState.ACTIVE
+    assert entry.fiber.config["theme"].get() == "dark"
+    assert entry.fiber.config["level"] == 3
+
+
+@pytest.mark.asyncio
+async def test_commit_volatile_no_refs_returns_true(mod: Any) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(_row(id="a", config={"x": 1}))
+    await loader.await_all()
+    entry = loader.resolve("a")
+    volatile_updates: list[list[list[str]]] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+
+    assert await entry._commit_volatile() is True
+    assert volatile_updates == []
+
+
+@pytest.mark.asyncio
+async def test_volatile_ordinary_value_changed_via_env_restarts(
+    volatile_mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The raw configs differ only in the volatile field, but the
+    # candidate re-resolves an ordinary JsExpr field against changed
+    # environment, so the effective configs differ ordinarily: the
+    # commit is refused and the ordinary update lifecycle restarts.
+    monkeypatch.setenv("VOL_LVL", "3")
+    ctx = Context()
+    loader = LoaderService(ctx)
+    expr = {"__jsExpr": "Number(process.env.VOL_LVL)"}
+    await loader.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:comp",
+            "config": {"theme": "dark", "level": expr},
+        }
+    )
+    await loader.await_all()
+    entry = loader.resolve("a")
+    fiber = entry.fiber
+    assert fiber is not None and fiber.state == FiberState.ACTIVE
+    assert fiber.config["level"] == 3
+    volatile_updates: list[list[list[str]]] = []
+    partials: list[Any] = []
+    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
+    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
+
+    monkeypatch.setenv("VOL_LVL", "4")
+    await entry.update({"config": {"theme": "light", "level": dict(expr)}})
+    await loader.await_all()
+
+    assert len(volatile_mod.calls) == 2  # full restart, not a commit
+    assert len(partials) == 1
+    assert volatile_updates == []
+    assert entry.fiber is not None and entry.fiber.state == FiberState.ACTIVE
+    assert entry.fiber.config["theme"].get() == "light"
+    assert entry.fiber.config["level"] == 4
