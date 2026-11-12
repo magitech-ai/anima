@@ -21,9 +21,11 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 
 from anima.core import Context, Fiber, FiberState, is_js_expr
 from anima.events import EventMode
+from anima.include import equal_except_volatile
 from anima.jsexpr import evaluate as evaluate_js_expr
 from anima.registry import resolve_inject
 from anima.schema import deep_equal
+from anima.volatile import update_volatile, volatile_entries
 
 if TYPE_CHECKING:
     from anima.loader import LoaderService
@@ -118,6 +120,22 @@ def _sort_options_keys(options: dict[str, Any]) -> None:
     ordered = {key: options[key] for key in sorted(options, key=_rank)}
     options.clear()
     options.update(ordered)
+
+
+def _in_fiber_scope(owner: Context, scope: Context) -> bool:
+    """Whether ``owner`` is ``scope`` or descends from it.
+
+    The oracle's volatile-update filter tests ``owner.fiber is fiber``;
+    anima never binds a non-root fiber to its context, so scope ancestry
+    is the equivalent test: listeners registered on the fiber's context
+    or a descendant of it belong to that fiber's scope.
+    """
+    ctx: Context | None = owner
+    while ctx is not None:
+        if ctx is scope:
+            return True
+        ctx = ctx._parent
+    return False
 
 
 class EntryOptions(TypedDict, total=False):
@@ -381,17 +399,89 @@ class Entry:
                     self.options.get(key), legacy.get(key), key == "config"
                 )
             ]
-            # P1-6 insertion point: volatileOnly is computed here, from
-            # changes == ['config'], fiber ACTIVE, prototype check, and
-            # equalExceptVolatile; pending becomes [] when volatileOnly
-            # and _commit_volatile() succeeds. Until then:
-            pending = changes
+            # Volatile-only fast path: a change confined to volatile
+            # fields commits into the running fiber without a restart.
+            # The fiber must be ACTIVE and the entry ctx must still be
+            # parented to its group ctx (a short-circuited
+            # loader/patch-context waterfall leaves it on the loader
+            # ctx, which disables the fast path).
+            fiber = self.fiber
+            volatile_only = (
+                changes == ["config"]
+                and fiber.state is FiberState.ACTIVE
+                and self.ctx._parent is self.parent.ctx
+                and equal_except_volatile(
+                    legacy.get("config"),
+                    self.options.get("config"),
+                    fiber.config_schema,
+                )
+            )
+            if volatile_only:
+                raw = self.options.get("config")
+                fiber.raw_config = dict(raw) if isinstance(raw, dict) else raw
+            pending = [] if volatile_only and await self._commit_volatile() else changes
             if not pending and not force:
                 return
             self.ctx.emit("loader/partial-dispose", self, legacy, True)
             await self._patch_context(pending)
         else:
             await self.init()
+
+    async def _commit_volatile(self) -> bool:
+        """Commit a volatile-only raw config change into the live fiber.
+
+        Re-validates the candidate; refuses it (leaving the running
+        references unchanged) when validation fails, and reports False
+        when an ordinary effective value changed so the caller runs the
+        ordinary update lifecycle. Otherwise commits the changed
+        volatile snapshots and emits ``loader/volatile-update`` with the
+        changed paths, scoped to this fiber's listeners.
+        """
+        # The caller guarantees a live fiber (the volatile-only path is
+        # only reached with one); the cast mirrors the oracle's
+        # non-null assertion.
+        fiber = cast(Fiber, self.fiber)
+        refs = volatile_entries(fiber.config)
+        if not refs:
+            return True
+        raw = self.options.get("config")
+        try:
+            candidate = await fiber.resolve_config(raw)
+        except Exception as exc:  # noqa: BLE001 - any resolve failure refuses the commit
+            logger.warning(
+                "volatile config update failed for %s", self.options.get("id")
+            )
+            logger.warning("%s", exc)
+            return True
+        if not deep_equal(fiber.config, candidate, strict=True):
+            logger.debug(
+                "ordinary config values of %s changed with its volatile "
+                "values; applying the ordinary update",
+                self.options.get("id"),
+            )
+            return False
+        paths: list[list[str]] = []
+        for item in refs:
+            path = item["path"]
+            ref = item["ref"]
+            source: Any = candidate
+            for key in path:
+                source = source[key]
+            if deep_equal(ref.get(), source.get(), strict=True):
+                continue
+            update_volatile(ref, source)
+            paths.append(list(path))
+        if not paths:
+            return True
+        # Scope the event to this fiber's listeners. The filtered ctx is
+        # detached afterwards: filter() registers it on the parent, and
+        # a throwaway ctx per emit would leak one per volatile update.
+        scoped = fiber.ctx.filter(lambda owner: _in_fiber_scope(owner, fiber.ctx))
+        try:
+            scoped.emit("loader/volatile-update", paths)
+        finally:
+            fiber.ctx._children.remove(scoped)
+        return True
 
     async def _patch_context(self, diff: list[str]) -> None:
         """Re-parent the entry ctx and, when the diff touches config, update the fiber."""
