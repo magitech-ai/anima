@@ -15,7 +15,7 @@ import pytest
 from anima.core import Context, FiberState
 from anima.events import EventMode
 from anima.loader import LoaderService
-from anima.schema import Schema
+from anima.schema import Schema, ValidationError
 from anima.tree import (
     BUILTIN_ALIASES,
     Entry,
@@ -273,6 +273,41 @@ async def test_tree_commit_on_create_remove_update(mod: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_tree_commit_records_failed_update(volatile_mod: Any) -> None:
+    """B1: the commit journals the intended state even when the fiber
+    restart then fails validation — a later fiber failure does not
+    un-commit it."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    tree = MemoryTree(ctx, loader=loader)
+    await tree.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:strict_comp",
+            "config": {"score": 5, "level": 1},
+        }
+    )
+    await loader.await_all()
+    entry = tree.resolve("a")
+    assert entry.fiber is not None
+    # The subtree fiber's load settles a tick after the loader's tasks.
+    await entry.fiber.await_settle()
+    assert entry.fiber.state == FiberState.ACTIVE
+    with pytest.raises(ValidationError, match="expected number"):
+        await tree.update("a", {"config": {"score": 5, "level": "bad"}})
+    await loader.await_all()
+    assert len(tree.commits) == 2
+    failed = tree.commits[1]
+    assert failed.options is not None
+    assert failed.options["config"] == {"score": 5, "level": "bad"}
+    assert failed.legacy is not None
+    assert failed.legacy["config"] == {"score": 5, "level": 1}
+    # The fiber keeps its old config; the journal keeps the intended one.
+    assert entry.fiber.state == FiberState.ACTIVE
+    assert entry.fiber.config["level"] == 1
+
+
+@pytest.mark.asyncio
 async def test_tree_commit_on_move_and_cross_tree_move(
     mod: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -413,6 +448,30 @@ async def test_tree_cross_tree_move_duplicate_id_raises(
         await loader.update("a:leaf", {}, parent="g")
     # Nothing moved: the leaf is still in the subtree.
     assert "leaf" in sub_a.store
+
+
+@pytest.mark.asyncio
+async def test_tree_move_into_own_descendant_raises(mod: Any) -> None:
+    """NB1: moving a group into its own descendant (or itself) fails loud.
+
+    The base tree silently deleted both entries; the head recursed.
+    A legitimate move can never target a descendant.
+    """
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create({"id": "g", "name": "group", "group": True, "config": []})
+    await loader.create({"id": "p", "name": "group", "group": True, "config": []})
+    await loader.update("p", {}, parent="g")
+    await loader.await_all()
+    assert loader.resolve("p").parent is loader.resolve("g").subgroup
+    with pytest.raises(ValueError, match="cannot move entry g into its own descendant"):
+        await loader.update("g", {}, parent="p")
+    with pytest.raises(ValueError, match="cannot move entry g into its own descendant"):
+        await loader.update("g", {}, parent="g")
+    # Nothing moved: both entries survive, p still under g.
+    assert "g" in loader.store and "p" in loader.store
+    assert loader.resolve("p").parent is loader.resolve("g").subgroup
+    assert loader.resolve("g").parent is loader.root
 
 
 # --- A1: scripted sequence ---

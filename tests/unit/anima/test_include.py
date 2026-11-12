@@ -1435,10 +1435,15 @@ async def test_include_patch_on_inserted_row_and_missing_id_warns(
 async def test_include_journal_file_wins_conflict(tmp_path: Path, mod: Any) -> None:
     ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, _rows(1, 2))
     file = tmp_path / "cfg.yaml"
-    # A runtime change is journalled but not yet drained when the file
-    # changes underneath it; the drain must reconcile file-wins.
-    await loader.update(f"{inc_id}:e0", {"config": {"level": 2}})
+    # The file changes underneath the runtime change; the drain must
+    # reconcile file-wins. The edit lands BEFORE the update, matching
+    # the oracle's own conflict test: with commit-before-await (B1) the
+    # journal is recorded and the drain settles inside the update await,
+    # so an edit after the await is only seen via refresh/watch — the
+    # deterministic conflict window is an edit that lands before (or
+    # during) the update, which the drain's stale check catches.
     file.write_text(_rows(9, 2), encoding="utf-8")
+    await loader.update(f"{inc_id}:e0", {"config": {"level": 2}})
     await _settle(inc, loader)
     assert "config conflict" in _logger_text(ctx)
     assert "file wins" in _logger_text(ctx)
@@ -1585,6 +1590,123 @@ async def test_include_apply_loop_failure_is_logged(
     assert "apply boom" in _logger_text(ctx)
     # The failed apply leaves the old tree in place.
     assert inc.root.data[0]["config"]["level"] == 1
+
+
+# ---------------------------------------------------------------------------
+# P1-7 review fixes (PR #40 re-review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_include_rapid_updates_coalesce_to_final_state(
+    tmp_path: Path, mod: Any
+) -> None:
+    """B1: five sequential runtime updates; the file must end at the LAST one.
+
+    The commit is journalled before the fiber restart is awaited, so a
+    stale reconcile applying afterwards cannot clobber the merge.
+    """
+    _ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, _rows(1))
+    for level in (10, 20, 30, 40, 50):
+        await loader.update(f"{inc_id}:e0", {"config": {"level": level}})
+    await _settle(inc, loader)
+    file = tmp_path / "cfg.yaml"
+    assert load_yaml(file.read_text(encoding="utf-8"))[0]["config"]["level"] == 50
+    assert inc.root.data[0]["config"]["level"] == 50
+
+
+@pytest.mark.asyncio
+async def test_include_cross_entry_update_while_apply_in_flight(
+    tmp_path: Path, mod: Any
+) -> None:
+    """B1: an update to e1 made while the e0 apply is in flight is not lost."""
+    _ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, _rows(1, 2))
+    await loader.update(f"{inc_id}:e0", {"config": {"level": 10}})
+    await asyncio.sleep(0)
+    await loader.update(f"{inc_id}:e1", {"config": {"level": 20}})
+    await _settle(inc, loader)
+    file = tmp_path / "cfg.yaml"
+    rows = load_yaml(file.read_text(encoding="utf-8"))
+    assert rows[1]["config"]["level"] == 20
+    assert inc.root.data[1]["config"]["level"] == 20
+
+
+@pytest.mark.asyncio
+async def test_include_on_internal_update_sync_next_fn(
+    tmp_path: Path, mod: Any
+) -> None:
+    """B3: a foreign config with a synchronous delegate returns its result.
+
+    Mirrors Group._on_update's direct-call test; the waterfall always
+    passes an async next_fn, but the branch executes on direct call.
+    """
+    _ctx, _loader, _inc_id, _entry, inc = await _boot(tmp_path, _rows(1))
+    result = await inc._on_internal_update(
+        {"path": str(tmp_path / "other.yaml")}, lambda cfg: "sync_done"
+    )
+    assert result == "sync_done"
+    assert inc.root.data[0]["config"]["level"] == 1
+
+
+@pytest.mark.asyncio
+async def test_include_on_internal_update_without_next_fn_is_noop(
+    tmp_path: Path, mod: Any
+) -> None:
+    """B3: a foreign config with no delegate is a no-op returning None."""
+    _ctx, _loader, _inc_id, _entry, inc = await _boot(tmp_path, _rows(1))
+    result = await inc._on_internal_update({"path": str(tmp_path / "other.yaml")}, None)
+    assert result is None
+    assert inc.root.data[0]["config"]["level"] == 1
+
+
+@pytest.mark.asyncio
+async def test_include_on_internal_update_returns_apply_task(
+    tmp_path: Path, mod: Any
+) -> None:
+    """NB3: adopting an update returns the pending apply task, so a caller
+    awaiting the fiber update awaits the re-apply."""
+    _ctx, _loader, _inc_id, _entry, inc = await _boot(
+        tmp_path, _rows(1, 2), patches=[{"id": "e0", "config": {"level": 9}}]
+    )
+    file = tmp_path / "cfg.yaml"
+    task = await inc._on_internal_update(
+        {"path": str(file), "patches": [{"id": "e0", "config": {"level": 7}}]},
+        None,
+    )
+    assert isinstance(task, asyncio.Task)
+    await task
+    assert inc.root.data[0]["config"]["level"] == 7
+    assert mod.calls[-1] == {"level": 7}
+
+
+@pytest.mark.asyncio
+async def test_include_internal_update_veto_rejects_js_expr_patches(
+    tmp_path: Path, mod: Any
+) -> None:
+    """B4: the veto path validates patches exactly as construction does.
+
+    Both shapes fail loud via fiber.update: a JsExpr patch, and a JsExpr
+    insert item. Neither is adopted, mounted, or persisted; the include
+    fiber stays ACTIVE.
+    """
+    _ctx, loader, _inc_id, entry, inc = await _boot(tmp_path, _rows(1))
+    file = tmp_path / "cfg.yaml"
+    before = file.read_bytes()
+    assert entry.fiber is not None
+    fiber = entry.fiber
+    with pytest.raises(IncludeError, match="include patches must be literal mappings"):
+        await fiber.update({"path": str(file), "patches": [{"__jsExpr": "1 + 1"}]})
+    with pytest.raises(IncludeError, match="expected a literal entry list"):
+        await fiber.update(
+            {"path": str(file), "patches": [{"insert": [{"__jsExpr": "1 + 1"}]}]}
+        )
+    await _settle(inc, loader)
+    assert fiber.state == FiberState.ACTIVE
+    assert inc.config.get("patches") is None
+    assert inc.root.data == [
+        {"id": "e0", "name": "inc_test_mod:comp", "config": {"level": 1}}
+    ]
+    assert file.read_bytes() == before
 
 
 # ---------------------------------------------------------------------------
@@ -1925,6 +2047,37 @@ def test_route_journal_create_under_missing_group_warns() -> None:
     assert data == [{"id": "a", "name": "x"}]
 
 
+def test_route_journal_descendant_move_warns_and_drops() -> None:
+    """B2: moving a group under its own descendant detaches it first, so
+    the flatten lookup for the target misses; the entry warns and drops
+    instead of placing."""
+    data: list[dict[str, Any]] = []
+    patches = [
+        {
+            "insert": [
+                {
+                    "id": "g",
+                    "name": "group",
+                    "group": True,
+                    "config": [
+                        {"id": "p", "name": "group", "group": True, "config": []}
+                    ],
+                }
+            ]
+        }
+    ]
+    journal: Journal = {
+        "g": JournalRecord(
+            kind="upsert", created=False, parent="p", position=0, changes={}
+        )
+    }
+    warnings: list[str] = []
+    route_journal(journal, data, patches, _warn_sink(warnings))
+    assert any("cannot place entry" in w and "g" in w for w in warnings)
+    assert data == []
+    assert patches[0]["insert"] == []
+
+
 # ---------------------------------------------------------------------------
 # P1-7 — coverage: Include edge branches
 # ---------------------------------------------------------------------------
@@ -2015,11 +2168,12 @@ async def test_include_read_with_pending_journal_writes_merge(
 ) -> None:
     _ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, _rows(1, 2))
     file = tmp_path / "cfg.yaml"
-    # A runtime change is pending when the file changes a different
-    # entry: the read merges both, and the write persists the runtime
-    # value alongside the file's edit.
-    await loader.update(f"{inc_id}:e0", {"config": {"level": 20}})
+    # A runtime change merges with a file edit to a different entry.
+    # The edit lands BEFORE the update, matching the oracle's staging:
+    # with commit-before-await (B1) the drain settles inside the update
+    # await, so the drain's stale check sees the edit and reconciles.
     file.write_text(_rows(1, 99), encoding="utf-8")
+    await loader.update(f"{inc_id}:e0", {"config": {"level": 20}})
     await inc.refresh()
     await _settle(inc, loader)
     rows = load_yaml(file.read_text(encoding="utf-8"))
@@ -2035,13 +2189,16 @@ async def test_include_write_with_missing_file_warns_and_keeps_journal(
 ) -> None:
     ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, _rows(1, 2))
     file = tmp_path / "cfg.yaml"
-    await loader.update(f"{inc_id}:e1", {"config": {"level": 20}})
+    # The file goes missing BEFORE the update: with commit-before-await
+    # (B1) the drain settles inside the update await, so deleting after
+    # it would miss the write entirely. The drain warns and keeps the
+    # journal; once the file is back, an explicit write drains it (a
+    # refresh alone would no-op on identical content).
     file.unlink()
+    await loader.update(f"{inc_id}:e1", {"config": {"level": 20}})
     await _settle(inc, loader)
     assert "is missing" in _logger_text(ctx)
     assert not file.exists()
-    # The change is kept: once the file is back, an explicit write
-    # drains it (a refresh alone would no-op on identical content).
     file.write_text(_rows(1, 2), encoding="utf-8")
     inc.write()
     await _settle(inc, loader)
