@@ -7,8 +7,13 @@ import yaml
 from anima.cli import CliService
 from anima.core import Context, EventMode, FiberState, Service
 from anima.http import HttpService
-from anima.include import IncludeService, Journal
-from anima.loader import load_profile
+from anima.include import (
+    EntryChange,
+    JournalRecord,
+    apply_journal,
+    record,
+)
+from anima.loader import LoaderService, load_profile
 from anima.logger import Exporter, Logger, Message
 from anima.schema import SchemaError, z
 from anima.server import ServerService, WebSocket
@@ -340,29 +345,47 @@ async def test_extended_ecosystem_network_cli_and_schema_integration(tmp_path: P
         "invalid config:\n  - $.api_key missing required value (at api_key)"
     )
 
-    # 2. Multi-File Configuration Resolution ($include and Journal)
-    inc = IncludeService(ctx)
-    auth_file = tmp_path / "auth_config.yaml"
-    auth_file.write_text("auth_mode: token\nrealm: internal\n", encoding="utf-8")
-
+    # 2. File-backed Include + journal round-trip
     cluster_file = tmp_path / "cluster.yaml"
     cluster_file.write_text(
-        "cluster_name: prod-east\nsecurity:\n  $include: ./auth_config.yaml\n  max_retries: 3\n",
+        "- id: cluster_name\n  name: cluster\n  status: initializing\n",
         encoding="utf-8",
     )
+    loader = LoaderService(ctx)
+    inc_id = await loader.create(
+        {"name": "include", "config": {"path": str(cluster_file)}}
+    )
+    await loader.await_all()
+    await ctx.flush()
+    entry = loader.resolve(inc_id)
+    inc = entry.ctx.get("include", strict=False)
+    assert inc is not None
+    assert inc.root.data[0]["status"] == "initializing"
 
-    resolved_config = inc.resolve(cluster_file)
-    assert resolved_config["cluster_name"] == "prod-east"
-    assert resolved_config["security"]["auth_mode"] == "token"
-    assert resolved_config["security"]["realm"] == "internal"
-    assert resolved_config["security"]["max_retries"] == 3
+    # A runtime update is journalled and written back to the file.
+    await loader.update(f"{inc_id}:cluster_name", {"status": "operational"})
+    await inc.flush()
+    await loader.await_all()
+    rows = yaml.safe_load(cluster_file.read_text(encoding="utf-8"))
+    assert rows[0]["status"] == "operational"
 
-    # Journal dynamic patch tracking
-    journal = Journal()
-    journal.record_upsert("cluster_name", {"status": "operational"})
+    # The same change as a raw journal record overlays an entry list.
+    journal: dict[str, JournalRecord] = {}
+    record(
+        journal,
+        EntryChange(
+            id="cluster_name",
+            group=loader.root,
+            options={"id": "cluster_name", "status": "operational"},
+            legacy={"id": "cluster_name", "status": "initializing"},
+        ),
+        None,
+    )
     entries = [{"id": "cluster_name", "status": "initializing"}]
-    updated_entries = journal.apply(entries)
-    assert updated_entries[0]["status"] == "operational"
+    assert apply_journal(entries, journal)[0]["status"] == "operational"
+
+    # Fixture data for the health endpoint in §3.
+    resolved_config = {"cluster_name": "prod-east"}
 
     # 3. Server Subsystem (HTTP + WebSocket) and HTTP Client Communication
     http_svc = HttpService(ctx)
