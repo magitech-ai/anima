@@ -15,10 +15,11 @@ import pytest
 from anima.core import Context, FiberState
 from anima.events import EventMode
 from anima.loader import LoaderService
-from anima.schema import Schema
+from anima.schema import Schema, ValidationError
 from anima.tree import (
     BUILTIN_ALIASES,
     Entry,
+    EntryChange,
     EntryGroup,
     EntryTree,
     Group,
@@ -34,9 +35,13 @@ class MemoryTree(EntryTree):
     def __init__(self, ctx: Context, loader: Any = None) -> None:
         super().__init__(ctx, loader=loader)
         self.writes = 0
+        self.commits: list[Any] = []
 
     def write(self) -> None:
         self.writes += 1
+
+    def commit(self, change: Any) -> None:
+        self.commits.append(change)
 
 
 def _install_module(monkeypatch: pytest.MonkeyPatch, name: str, **attrs: Any) -> Any:
@@ -141,12 +146,14 @@ def test_loader_unwrap_exports_alias():
 
 def test_resolve_component_target_builtin_aliases():
     from anima.hmr import HmrService
+    from anima.include import Include
     from anima.logger import LoggerService
     from anima.pkg import PkgService
     from anima.timer import TimerService
     from anima.watcher import WatcherService
 
     assert resolve_component_target("group") is Group
+    assert resolve_component_target("include") is Include
     assert resolve_component_target("logger") is LoggerService
     assert resolve_component_target("timer") is TimerService
     assert resolve_component_target("watcher") is WatcherService
@@ -156,6 +163,7 @@ def test_resolve_component_target_builtin_aliases():
 
 def test_builtin_aliases_map():
     assert BUILTIN_ALIASES["group"] == "anima.tree:Group"
+    assert BUILTIN_ALIASES["include"] == "anima.include:Include"
     assert BUILTIN_ALIASES["logger"] == "anima.logger:LoggerService"
 
 
@@ -227,6 +235,243 @@ async def test_resolve_nested_subtree_ids(
         loader.resolve("a:b:nope")
     with pytest.raises(ValueError, match="cannot resolve entry a:nope:c"):
         loader.resolve("a:nope:c")
+
+
+# --- commit protocol (P1-7): EntryTree.commit records every mutation ---
+
+
+@pytest.mark.asyncio
+async def test_tree_commit_on_create_remove_update(mod: Any) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    tree = MemoryTree(ctx, loader=loader)
+    await tree.create(_row(id="a", config={"level": 1}))
+    await loader.await_all()
+    assert len(tree.commits) == 1
+    created = tree.commits[0]
+    assert isinstance(created, EntryChange)
+    assert created.id == "a" and created.group is tree.root
+    assert created.options is not None and created.options["id"] == "a"
+    assert created.legacy is None
+    await tree.update("a", {"config": {"level": 2}})
+    await loader.await_all()
+    assert len(tree.commits) == 2
+    updated = tree.commits[1]
+    assert updated.id == "a"
+    assert updated.options is not None
+    assert updated.options["config"] == {"level": 2}
+    assert updated.legacy is not None
+    assert updated.legacy["config"] == {"level": 1}
+    assert updated.from_group is None
+    tree.remove("a")
+    assert len(tree.commits) == 3
+    removed = tree.commits[2]
+    assert removed.id == "a"
+    assert removed.options is None
+    assert removed.legacy is not None
+    assert removed.legacy["id"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_tree_commit_records_failed_update(volatile_mod: Any) -> None:
+    """B1: the commit journals the intended state even when the fiber
+    restart then fails validation — a later fiber failure does not
+    un-commit it."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    tree = MemoryTree(ctx, loader=loader)
+    await tree.create(
+        {
+            "id": "a",
+            "name": "volatile_test_mod:strict_comp",
+            "config": {"score": 5, "level": 1},
+        }
+    )
+    await loader.await_all()
+    entry = tree.resolve("a")
+    assert entry.fiber is not None
+    # The subtree fiber's load settles a tick after the loader's tasks.
+    await entry.fiber.await_settle()
+    assert entry.fiber.state == FiberState.ACTIVE
+    with pytest.raises(ValidationError, match="expected number"):
+        await tree.update("a", {"config": {"score": 5, "level": "bad"}})
+    await loader.await_all()
+    assert len(tree.commits) == 2
+    failed = tree.commits[1]
+    assert failed.options is not None
+    assert failed.options["config"] == {"score": 5, "level": "bad"}
+    assert failed.legacy is not None
+    assert failed.legacy["config"] == {"score": 5, "level": 1}
+    # The fiber keeps its old config; the journal keeps the intended one.
+    assert entry.fiber.state == FiberState.ACTIVE
+    assert entry.fiber.config["level"] == 1
+
+
+@pytest.mark.asyncio
+async def test_tree_commit_on_move_and_cross_tree_move(
+    mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    subtrees: dict[str, Any] = {}
+
+    def owner_comp(c: Context, config: Any = None) -> None:
+        subtrees["a"] = MemoryTree(c, loader=loader)
+
+    _install_module(monkeypatch, "move_mod", owner=owner_comp)
+    # A group in the loader tree, a group in the subtree, and a leaf in
+    # the subtree.
+    await loader.create({"id": "g", "name": "group", "group": True, "config": []})
+    await loader.create({"id": "a", "name": "move_mod:owner"})
+    await ctx.flush()
+    await loader.await_all()
+    sub_a = subtrees["a"]
+    assert isinstance(sub_a, MemoryTree)
+    await sub_a.create({"id": "sg", "name": "group", "group": True, "config": []})
+    await sub_a.create(_row(id="leaf"))
+    await loader.await_all()
+    # Same-tree move inside the subtree: from_group is the source group.
+    # Group children resolve by short id (a group owns no subtree).
+    await sub_a.update("leaf", {}, parent="sg")
+    await loader.await_all()
+    assert sub_a.resolve("leaf").parent is sub_a.resolve("sg").subgroup
+    moved = sub_a.commits[-1]
+    assert moved.id == "leaf"
+    assert moved.from_group is sub_a.root
+    assert moved.options is not None
+    # Cross-tree move into the loader tree: a removal on the source
+    # tree (the loader's own commit is a no-op, so only the source
+    # record is observable here).
+    await loader.update("a:leaf", {}, parent="g")
+    await loader.await_all()
+    assert loader.resolve("leaf").parent is loader.resolve("g").subgroup
+    removed = sub_a.commits[-1]
+    assert removed.id == "leaf"
+    assert removed.options is None
+    assert removed.legacy is not None
+
+
+@pytest.mark.asyncio
+async def test_tree_commit_on_cross_tree_group_move(
+    mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Moving a group across trees migrates its members with it."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    subtrees: dict[str, Any] = {}
+
+    def owner_comp(c: Context, config: Any = None) -> None:
+        subtrees["a"] = MemoryTree(c, loader=loader)
+
+    _install_module(monkeypatch, "move_mod", owner=owner_comp)
+    await loader.create({"id": "g", "name": "group", "group": True, "config": []})
+    await loader.create({"id": "a", "name": "move_mod:owner"})
+    await ctx.flush()
+    await loader.await_all()
+    sub_a = subtrees["a"]
+    assert isinstance(sub_a, MemoryTree)
+    await sub_a.create({"id": "sg", "name": "group", "group": True, "config": []})
+    await sub_a.create(_row(id="leaf"))
+    await sub_a.create(_row(id="leaf2"))
+    await sub_a.update("leaf", {}, parent="sg")
+    await sub_a.update("leaf2", {}, parent="sg")
+    await loader.await_all()
+    assert "leaf" in sub_a.store
+    assert "leaf2" in sub_a.store
+    assert "sg" in sub_a.store
+    # Move the whole group into the loader tree: the leaves migrate
+    # with it, and the subgroup now belongs to the target tree.
+    await loader.update("a:sg", {}, parent="g")
+    await loader.await_all()
+    assert "sg" not in sub_a.store
+    assert "leaf" not in sub_a.store
+    assert "leaf2" not in sub_a.store
+    assert loader.resolve("leaf").parent is loader.resolve("sg").subgroup
+    assert loader.resolve("leaf2").parent is loader.resolve("sg").subgroup
+    assert loader.resolve("sg").subgroup.tree is loader
+    assert loader.resolve("leaf").options["id"] == "leaf"
+    assert loader.resolve("leaf2").options["id"] == "leaf2"
+
+
+@pytest.mark.asyncio
+async def test_tree_move_of_stopped_group_restores_children(
+    mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Moving a stopped group re-mounts its children from the kept rows.
+
+    ``Group.stop`` drops the child store entries but keeps the data
+    rows, so the move's member scan skips the stale rows and the
+    post-move reconcile re-creates the children from the row config.
+    """
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create({"id": "g2", "name": "group", "group": True, "config": []})
+    await loader.create({"id": "sg", "name": "group", "group": True, "config": []})
+    await loader.create(_row(id="leaf"))
+    await loader.create(_row(id="leaf2"))
+    await loader.update("leaf", {}, parent="sg")
+    await loader.update("leaf2", {}, parent="sg")
+    await loader.await_all()
+    sg = loader.resolve("sg")
+    assert sg.subgroup is not None
+    sg.subgroup.stop()
+    assert "leaf" not in loader.store
+    assert "leaf2" not in loader.store
+    await loader.update("sg", {}, parent="g2")
+    await loader.await_all()
+    assert loader.resolve("leaf").parent is loader.resolve("sg").subgroup
+    assert loader.resolve("leaf2").parent is loader.resolve("sg").subgroup
+
+
+@pytest.mark.asyncio
+async def test_tree_cross_tree_move_duplicate_id_raises(
+    mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    subtrees: dict[str, Any] = {}
+
+    def owner_comp(c: Context, config: Any = None) -> None:
+        subtrees["a"] = MemoryTree(c, loader=loader)
+
+    _install_module(monkeypatch, "move_mod", owner=owner_comp)
+    await loader.create({"id": "g", "name": "group", "group": True, "config": []})
+    await loader.create({"id": "a", "name": "move_mod:owner"})
+    await loader.create(_row(id="leaf"))
+    await ctx.flush()
+    await loader.await_all()
+    sub_a = subtrees["a"]
+    assert isinstance(sub_a, MemoryTree)
+    await sub_a.create(_row(id="leaf"))
+    await loader.await_all()
+    with pytest.raises(ValueError, match="already exists in the target tree"):
+        await loader.update("a:leaf", {}, parent="g")
+    # Nothing moved: the leaf is still in the subtree.
+    assert "leaf" in sub_a.store
+
+
+@pytest.mark.asyncio
+async def test_tree_move_into_own_descendant_raises(mod: Any) -> None:
+    """NB1: moving a group into its own descendant (or itself) fails loud.
+
+    The base tree silently deleted both entries; the head recursed.
+    A legitimate move can never target a descendant.
+    """
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create({"id": "g", "name": "group", "group": True, "config": []})
+    await loader.create({"id": "p", "name": "group", "group": True, "config": []})
+    await loader.update("p", {}, parent="g")
+    await loader.await_all()
+    assert loader.resolve("p").parent is loader.resolve("g").subgroup
+    with pytest.raises(ValueError, match="cannot move entry g into its own descendant"):
+        await loader.update("g", {}, parent="p")
+    with pytest.raises(ValueError, match="cannot move entry g into its own descendant"):
+        await loader.update("g", {}, parent="g")
+    # Nothing moved: both entries survive, p still under g.
+    assert "g" in loader.store and "p" in loader.store
+    assert loader.resolve("p").parent is loader.resolve("g").subgroup
+    assert loader.resolve("g").parent is loader.root
 
 
 # --- A1: scripted sequence ---
@@ -869,6 +1114,13 @@ def test_entry_tree_write_base_raises() -> None:
     tree = MemoryTree(ctx)
     with pytest.raises(NotImplementedError):
         EntryTree.write(tree)
+
+
+def test_entry_tree_commit_base_raises() -> None:
+    ctx = Context()
+    tree = MemoryTree(ctx)
+    with pytest.raises(NotImplementedError):
+        EntryTree.commit(tree, EntryChange(id="a", group=tree.root))
 
 
 @pytest.mark.asyncio

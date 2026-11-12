@@ -14,7 +14,7 @@ import pytest
 from anima.cli import CliService
 from anima.core import Context
 from anima.http import HttpService
-from anima.include import IncludeService
+from anima.include import Include, IncludeError
 from anima.loader import LoaderService
 from anima.logger import LoggerService
 from anima.server import ServerService
@@ -66,14 +66,27 @@ async def test_server_service_mounts_via_component():
 
 
 @pytest.mark.asyncio
-async def test_include_service_mounts_via_component():
+async def test_include_service_mounts_via_component(tmp_path: Path):
+    # P1-7: Include is a file-backed tree, so mounting requires a path;
+    # the old pathless mount no longer applies (fail-loud configuration).
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("[]", encoding="utf-8")
+
     ctx = Context()
-    await ctx.use(IncludeService)
+    await ctx.use(Include, {"path": str(profile)})
     await ctx.flush()
 
     svc = ctx.get("include")
-    assert isinstance(svc, IncludeService)
+    assert isinstance(svc, Include)
     assert svc.name == "include"
+
+
+@pytest.mark.asyncio
+async def test_include_service_mount_without_path_fails_loud():
+    ctx = Context()
+    with pytest.raises(IncludeError, match="requires a 'path' string"):
+        await ctx.use(Include)
+    await ctx.flush()
 
 
 @pytest.mark.asyncio

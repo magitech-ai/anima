@@ -747,6 +747,9 @@ async def test_internal_plugin_case3_and_case5_synthetic(monkeypatch):
         def write(self) -> None:
             pass
 
+        def commit(self, change: Any) -> None:
+            pass
+
     def owner_comp(c: Context, config: Any = None) -> None:
         subtrees["tree"] = _SubTree(c, loader=loader)
 

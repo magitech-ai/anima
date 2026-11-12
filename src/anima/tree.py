@@ -17,14 +17,14 @@ import math
 import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Iterator
-from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, TypeGuard, cast
 
 from anima.core import Context, Fiber, FiberState, is_js_expr
 from anima.events import EventMode
-from anima.include import equal_except_volatile
 from anima.jsexpr import evaluate as evaluate_js_expr
 from anima.registry import resolve_inject
-from anima.schema import deep_equal
+from anima.schema import _UNDEFINED, Schema, deep_equal
 from anima.volatile import update_volatile, volatile_entries
 
 if TYPE_CHECKING:
@@ -35,8 +35,112 @@ logger = logging.getLogger("anima.loader")
 # Distinct from None: "argument not supplied" for EntryTree.update's parent.
 _UNSET: Any = object()
 
+
+def _is_schema(value: Any) -> bool:
+    """Whether ``value`` carries the schema seam.
+
+    The local seam vendor is ``anima``; anything without it compares by
+    strict raw equality.
+    """
+    seam = getattr(value, "~standard", None)
+    return seam is not None and getattr(seam, "vendor", None) == "anima"
+
+
+def _is_record(value: Any) -> TypeGuard[dict[str, Any]]:
+    """Whether ``value`` is a plain record (not a JsExpr node)."""
+    return isinstance(value, dict) and not is_js_expr(value)
+
+
+def equal_except_volatile(previous: Any, next_config: Any, schema: Any) -> bool:
+    """Compare two raw configs, treating volatile fields as equal.
+
+    Volatile fields at fixed object paths compare equal regardless of
+    value; an absent object compares equal to its schema default; schema
+    backedges, JsExpr/opaque values, unknown fields, and non-object
+    schemas keep strict raw equality. Nothing is evaluated, validated,
+    or mutated.
+
+    Moved here from ``anima.include`` in P1-7: ``Include`` must subclass
+    ``EntryTree``, and this module is the only runtime consumer, so the
+    function lives with the loader tree (the oracle's diff lives in the
+    loader package). ``anima.include`` re-exports it unchanged.
+    """
+    if not _is_schema(schema):
+        return deep_equal(previous, next_config, strict=True)
+
+    ancestors: set[int] = set()
+
+    def equal(a: Any, b: Any, node: Schema | None) -> bool:
+        if node is not None and node._volatile:
+            return True
+        if (
+            node is None
+            or node.type_name != "object"
+            or node._properties is None
+            or id(node) in ancestors
+        ):
+            return deep_equal(a, b, strict=True)
+        default = node._default if node._default is not _UNDEFINED else None
+        left = a if a is not None else default
+        right = b if b is not None else default
+        if not _is_record(left) or not _is_record(right):
+            return deep_equal(left, right, strict=True)
+        props = node._properties
+        ancestors.add(id(node))
+        try:
+            return all(
+                equal(left.get(key), right.get(key), props.get(key))
+                for key in set(left) | set(right)
+            )
+        finally:
+            ancestors.discard(id(node))
+
+    return equal(previous, next_config, schema)
+
+
+def _members(entry: Entry, tree: EntryTree) -> list[Entry]:
+    """Return an entry plus its subgroup members that live in ``tree``.
+
+    Mirrors the oracle's ``members()``: a group entry contributes the
+    entries of its subgroup (recursively) when the subgroup belongs to
+    the same tree; members of another tree are not collected.
+    """
+    result = [entry]
+    subgroup = entry.subgroup
+    if subgroup is None or subgroup.tree is not tree:
+        return result
+    for row in subgroup.data:
+        row_id = row.get("id")
+        member = tree.store.get(row_id) if row_id else None
+        if member is not None and member.parent is subgroup:
+            result.extend(_members(member, tree))
+    return result
+
+
+@dataclass
+class EntryChange:
+    """One tree-side mutation, reported to ``EntryTree.commit()``.
+
+    ``options`` absent: the entry was removed from ``group``.
+    ``legacy`` absent: the entry was created in ``group``. Both present:
+    the entry was updated and now lives in ``group``; ``from_group`` is
+    the group it left if the update moved it within the same tree. A
+    move into another tree is reported as a removal to the source tree
+    and a creation to the target tree.
+
+    ``from_group`` is named so because ``from`` is a Python keyword.
+    """
+
+    id: str
+    group: EntryGroup
+    from_group: EntryGroup | None = None
+    options: dict[str, Any] | None = None
+    legacy: dict[str, Any] | None = None
+
+
 BUILTIN_ALIASES: dict[str, str] = {
     "group": "anima.tree:Group",
+    "include": "anima.include:Include",
     "logger": "anima.logger:LoggerService",
     "timer": "anima.timer:TimerService",
     "watcher": "anima.watcher:WatcherService",
@@ -247,15 +351,20 @@ class EntryTree(ABC):
     ) -> str:
         """Create an entry in the root group or a nested group; return its full id."""
         group = self.resolve_group(parent)
+        entry_id = self.ensure_id(options)
         group.data.insert(_normalize_position(position, len(group.data)), options)
         group.tree.write()
+        self.commit(EntryChange(id=entry_id, group=group, options=options))
         return await group.create(options)
 
     def remove(self, entry_id: str) -> None:
         """Stop and remove an entry from its parent group."""
         entry = self.resolve(entry_id)
-        entry.parent.remove(entry_id)
-        entry.parent.tree.write()
+        group = entry.parent
+        legacy = dict(entry.options)
+        group.remove(entry_id)
+        group.tree.write()
+        group.tree.commit(EntryChange(id=legacy["id"], group=group, legacy=legacy))
 
     async def update(
         self,
@@ -267,20 +376,110 @@ class EntryTree(ABC):
         """Update an entry and optionally move it to another group."""
         entry = self.resolve(entry_id)
         source = entry.parent
+        legacy = dict(entry.options)
+        cross_tree = False
         if parent is not _UNSET:
             target = self.resolve_group(parent)
-            source.unlink(entry.options)
-            target.data.insert(
-                _normalize_position(
-                    position if position is not None else math.inf,
-                    len(target.data),
-                ),
-                entry.options,
-            )
-            target.tree.write()
-            entry.parent = target
+            # A move into the entry's own subtree would detach the
+            # group from itself: reject loud instead of recursing (or
+            # silently dropping the entries). A legitimate move can
+            # never target a descendant.
+            if target.owner is not None and target.owner in _members(
+                entry, source.tree
+            ):
+                raise ValueError(
+                    f"cannot move entry {entry_id} into its own descendant "
+                    f"group {parent}"
+                )
+            if target.tree is not source.tree:
+                # Cross-tree move: migrate the entry and its subgroup
+                # members into the target tree's store first, so the
+                # target tree adopts them instead of creating new ones.
+                members = _members(entry, source.tree)
+                for member in members:
+                    member_id = member.options["id"]
+                    if member_id in target.tree.store:
+                        raise ValueError(
+                            f"entry {member_id} already exists in the target tree"
+                        )
+                source.unlink(entry.options)
+                target.data.insert(
+                    _normalize_position(
+                        position if position is not None else math.inf,
+                        len(target.data),
+                    ),
+                    entry.options,
+                )
+                entry.parent = target
+                for member in members:
+                    member_id = member.options["id"]
+                    del source.tree.store[member_id]
+                    target.tree.store[member_id] = member
+                    if (
+                        member.subgroup is not None
+                        and member.subgroup.tree is source.tree
+                    ):
+                        member.subgroup.tree = target.tree
+                target.tree.write()
+                cross_tree = True
+            else:
+                source.unlink(entry.options)
+                target.data.insert(
+                    _normalize_position(
+                        position if position is not None else math.inf,
+                        len(target.data),
+                    ),
+                    entry.options,
+                )
+                target.tree.write()
+                entry.parent = target
+        if parent is not _UNSET:
+            # A move replays the row's config into the fiber, so sync
+            # each moved group member's row config from its subgroup
+            # data first: the fiber's config is a copy, so subgroup
+            # membership never flows back to the row on its own, and
+            # without this the reconcile would drop the children.
+            for member in _members(entry, entry.parent.tree):
+                if member.subgroup is not None:
+                    member.options["config"] = list(member.subgroup.data)
         source.tree.write()
-        await entry.update(options, create=False, force=True)
+        # The merge runs synchronously before the first await, so the
+        # change is fully visible to commit() once the call returns —
+        # mirroring the oracle, where Entry.update assigns the new
+        # options before its first await and EntryTree.update commits
+        # synchronously right after calling it. Committing before
+        # awaiting the fiber restart journals the intended state: a
+        # stale reconcile applying afterwards can no longer clobber the
+        # merge and empty the diff, and a later fiber failure does not
+        # un-commit it.
+        premerged_legacy = entry._merge_options(options)
+        if cross_tree:
+            # A move across trees is a removal from the source tree and
+            # a creation in the target tree.
+            source.tree.commit(
+                EntryChange(id=legacy["id"], group=source, legacy=legacy)
+            )
+            entry.parent.tree.commit(
+                EntryChange(
+                    id=legacy["id"],
+                    group=entry.parent,
+                    options=entry.options,
+                )
+            )
+        else:
+            from_group = source if entry.parent is not source else None
+            entry.parent.tree.commit(
+                EntryChange(
+                    id=legacy["id"],
+                    group=entry.parent,
+                    from_group=from_group,
+                    options=entry.options,
+                    legacy=legacy,
+                )
+            )
+        await entry.update(
+            options, create=False, force=True, _premerged_legacy=premerged_legacy
+        )
         return entry
 
     def import_(self, name: str, outer_stack: list[str] | None = None) -> Any:
@@ -292,6 +491,18 @@ class EntryTree(ABC):
     @abstractmethod
     def write(self) -> None:
         """Persist current tree state. In-memory trees may implement this as a no-op."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def commit(self, change: EntryChange) -> None:
+        """Report a tree-side mutation to the persistence layer.
+
+        Called synchronously by ``create`` / ``remove`` / ``update`` and
+        by the loader's ``internal/commit`` handler once a mutation has
+        been applied to the entry options / group data. In-memory trees
+        implement this as a no-op; file-backed trees record the change
+        for write-back.
+        """
         raise NotImplementedError
 
 
@@ -365,15 +576,15 @@ class Entry:
             return
         await self.init()
 
-    async def update(
-        self,
-        options: dict[str, Any],
-        create: bool = False,
-        force: bool = False,
-    ) -> None:
-        """Merge new options, restart as needed, and persist through the parent tree.
+    def _merge_options(
+        self, options: dict[str, Any], create: bool = False
+    ) -> dict[str, Any]:
+        """Apply an options merge synchronously; return the pre-merge options.
 
-        A None value deletes its key; it is never stored.
+        A None value deletes its key; it is never stored. ``create``
+        adopts the given dict as the options object; otherwise the merge
+        mutates the live options in place, so the group data row stays
+        the identical object.
         """
         legacy = dict(self.options)
         if create:
@@ -385,6 +596,27 @@ class Entry:
                 else:
                     self.options[key] = value
         _sort_options_keys(self.options)
+        return legacy
+
+    async def update(
+        self,
+        options: dict[str, Any],
+        create: bool = False,
+        force: bool = False,
+        _premerged_legacy: dict[str, Any] | None = None,
+    ) -> None:
+        """Merge new options, restart as needed, and persist through the parent tree.
+
+        A None value deletes its key; it is never stored.
+        ``_premerged_legacy`` is the pre-merge options when the caller
+        already merged (EntryTree.update): the merge is skipped and the
+        change is diffed against it, so the fiber restart still sees
+        the real change.
+        """
+        if _premerged_legacy is None:
+            legacy = self._merge_options(options, create=create)
+        else:
+            legacy = _premerged_legacy
 
         if self.disabled:
             if self.fiber is not None:

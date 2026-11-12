@@ -20,6 +20,7 @@ from anima.tree import (
     _UNSET,
     BUILTIN_ALIASES,
     Entry,
+    EntryChange,
     EntryGroup,
     EntryTree,
     resolve_component_target,
@@ -179,6 +180,10 @@ class LoaderService(Service, EntryTree):
         """Root tree writes are no-ops; persistence is explicit save() only."""
         return
 
+    def commit(self, change: EntryChange) -> None:
+        """Report a tree-side mutation; the root tree lives in memory only."""
+        return
+
     def show_log(self, entry: Entry, type: str) -> None:
         """Log a loader lifecycle event for an entry, when logging is enabled."""
         if entry.options.get("group") or not self.enable_logs:
@@ -320,8 +325,10 @@ class LoaderService(Service, EntryTree):
     def _on_commit(self, fiber: Fiber, config: Any) -> None:
         """Write a runtime config change back into the owning entry's options.
 
-        Persistence is the tree's job; for the root loader tree write() is
-        a no-op, so runtime changes are memory-only until explicit save().
+        Persistence is the tree's job: the owning tree's ``commit``
+        records the change (a file-backed tree journals it for
+        write-back; for the root loader tree ``commit`` is a no-op, so
+        runtime changes are memory-only until explicit save()).
         """
         entry = fiber.entry
         if entry is None:
@@ -334,7 +341,16 @@ class LoaderService(Service, EntryTree):
             fiber.parent_fiber is not None and fiber.parent_fiber.entry is entry
         ):
             return
+        legacy = dict(entry.options)
         entry.options["config"] = config
+        entry.parent.tree.commit(
+            EntryChange(
+                id=entry.options["id"],
+                group=entry.parent,
+                options=entry.options,
+                legacy=legacy,
+            )
+        )
         entry.parent.tree.write()
         self.show_log(entry, "reload")
 
@@ -413,7 +429,16 @@ class LoaderService(Service, EntryTree):
         # config update, ancestor disable) — already disabled, nothing to do.
         if entry.disabled:
             return
+        legacy = dict(entry.options)
         entry.options["disabled"] = True
+        entry.parent.tree.commit(
+            EntryChange(
+                id=entry.options["id"],
+                group=entry.parent,
+                options=entry.options,
+                legacy=legacy,
+            )
+        )
         entry.parent.tree.write()
 
     def _on_internal_service(self, name: str, _value: Any) -> None:
