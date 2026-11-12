@@ -3,6 +3,8 @@
 Python port of the create-anima: interactive project scaffolding that
 downloads a template tarball from the npm registry, extracts it, optionally
 stages a yarn binary, and initializes a Git repository.
+
+Anima-original surface: not part of the ported kernel.
 """
 
 from __future__ import annotations

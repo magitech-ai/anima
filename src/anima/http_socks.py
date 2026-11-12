@@ -1,4 +1,7 @@
-"""SOCKS4 and SOCKS5 proxy support extension for HttpService."""
+"""SOCKS4 and SOCKS5 proxy support extension for HttpService.
+
+Anima-original surface: not part of the ported kernel.
+"""
 
 from __future__ import annotations
 

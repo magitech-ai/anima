@@ -1,11 +1,14 @@
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from anima.cli import CliCommand, CliService, CliSyntaxError, main
+from anima.cli_create import Scaffold
 from anima.core import Context
 
 
@@ -198,6 +201,25 @@ async def test_run_command_profile_integration(tmp_path: Path):
     # loader was invoked
     assert ctx.has("loader")
     assert ctx.has("timer")
+
+
+@pytest.mark.asyncio
+async def test_create_command_scaffolds_project(monkeypatch):
+    calls: list[dict[str, Any]] = []
+
+    def fake_start(self, prompt: Callable[[str], str] = input) -> None:
+        calls.append(dict(self.options))
+
+    monkeypatch.setattr(Scaffold, "start", fake_start)
+
+    exit_code = await main(["create", "demo-app"])
+    assert exit_code == 0
+    assert calls == [{"name": "demo-app"}]
+
+    calls.clear()
+    exit_code = await main(["create"])
+    assert exit_code == 0
+    assert calls == [{"name": "my-app"}]
 
 
 @pytest.mark.asyncio

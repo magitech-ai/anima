@@ -1,4 +1,7 @@
-"""Static file delivery middleware for ServerService."""
+"""Static file delivery middleware for ServerService.
+
+Anima-original surface: not part of the ported kernel.
+"""
 
 from __future__ import annotations
 

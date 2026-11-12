@@ -1,4 +1,7 @@
-"""Host header and loopback access-control extension for ServerService."""
+"""Host header and loopback access-control extension for ServerService.
+
+Anima-original surface: not part of the ported kernel.
+"""
 
 from __future__ import annotations
 

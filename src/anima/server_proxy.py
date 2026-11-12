@@ -1,4 +1,7 @@
-"""Reverse proxy route middleware for ServerService forwarding via HttpService."""
+"""Reverse proxy route middleware for ServerService forwarding via HttpService.
+
+Anima-original surface: not part of the ported kernel.
+"""
 
 from __future__ import annotations
 

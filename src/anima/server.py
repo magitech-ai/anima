@@ -1,4 +1,7 @@
-"""Asynchronous HTTP and WebSocket server engine for Anima microkernel."""
+"""Asynchronous HTTP and WebSocket server engine for Anima microkernel.
+
+Anima-original surface: not part of the ported kernel.
+"""
 
 from __future__ import annotations
 

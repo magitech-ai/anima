@@ -1,4 +1,7 @@
-"""Command-line router, parser, and execution substrate for Anima microkernel."""
+"""Command-line router, parser, and execution substrate for Anima microkernel.
+
+Anima-original surface: not part of the ported kernel.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from anima.cli_create import Scaffold
 from anima.core import Context, Disposer, Service
 from anima.loader import LoaderService
 
@@ -328,6 +332,15 @@ class CliService(Service):
 
         self.command("run [profile:string]", "Load and run an Anima profile").action(
             _run_action
+        )
+
+        # Default create command (scaffold a new project)
+        def _create_action(argv: Argv, name: str = "my-app") -> Any:
+            Scaffold({"name": name}).start()
+            return True
+
+        self.command("create [name:string]", "Scaffold a new project").action(
+            _create_action
         )
 
     def define(self, name: str, parse_fn: Callable[[str], Any]) -> Disposer:
