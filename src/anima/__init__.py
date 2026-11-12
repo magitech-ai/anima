@@ -9,7 +9,7 @@ from typing import Any
 
 from anima.core import Context, Fiber, FiberState, Service, inject
 from anima.events import DisposableList, Disposer, EventBus, EventMode, is_bailed
-from anima.hmr import HmrService
+from anima.hmr import HmrService, Reload, handle_error
 from anima.http import HttpConfig, HttpError, HttpRequest, HttpResponse, HttpService
 from anima.include import (
     Conflict,
@@ -132,6 +132,7 @@ __all__ = [
     "PkgService",
     "ReflectService",
     "RegistryService",
+    "Reload",
     "Route",
     "Scheduled",
     "Schema",
@@ -159,6 +160,7 @@ __all__ = [
     "equal_except_volatile",
     "evaluate",
     "flatten",
+    "handle_error",
     "inject",
     "interpolate",
     "interpolate_env",
