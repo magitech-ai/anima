@@ -494,6 +494,7 @@ async def test_hmr_reload_same_second_same_size_recompiles(tmp_path: Path):
         cache = Path(importlib.util.cache_from_source(str(mod_path)))
         assert cache.exists()  # the initial load wrote bytecode
         first_mtime = mod_path.stat().st_mtime
+        first_size = mod_path.stat().st_size
         # Pin the mtime to a base with a small fraction, so +0.5 s
         # stays inside the same integer second.
         base = int(first_mtime) + 0.1
@@ -503,7 +504,10 @@ async def test_hmr_reload_same_second_same_size_recompiles(tmp_path: Path):
         # apply), but a different float mtime so the change is fresh.
         os.utime(mod_path, (base, base + 0.5))
         assert int(mod_path.stat().st_mtime) == int(base)
-        assert mod_path.stat().st_size == len("VALUE = 2\n")
+        # Same size as v1 (write_text translates the newline on
+        # Windows, so compare against the measured v1 size, not the
+        # literal length).
+        assert mod_path.stat().st_size == first_size
         assert await hmr.reload_module("p18_stale_pyc", path=mod_path) is mod
         assert mod.VALUE == 2
     finally:
