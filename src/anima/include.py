@@ -969,8 +969,10 @@ class Include(Service, EntryTree):
         patches exactly as construction does, adopt the new config
         (including new patches), re-apply, and do NOT restart the fiber
         — the children update in place. Returns the pending apply task,
-        so a caller awaiting the fiber update awaits the re-apply. Any
-        other update passes down the chain.
+        so a direct caller can await the re-apply; through the fiber
+        update the return is discarded, so awaiting the fiber update
+        does NOT await the re-apply. Any other update passes down the
+        chain.
         """
         if not isinstance(config, dict) or config.get("path") != self.config.get(
             "path"
@@ -1172,6 +1174,12 @@ class Include(Service, EntryTree):
                 self.filename,
                 len(self._journal),
             )
+            # The journal still holds the live change, but no newer
+            # tree is scheduled by a write that never happened: a
+            # stale tree already in flight would apply unopposed and
+            # clobber it. Schedule a fresh tree from the current
+            # cache + journal so it supersedes the stale one.
+            self._schedule_apply()
             return
         if current != self._cache["content"]:
             # Someone else wrote the file: merge first, then come back.
@@ -1225,6 +1233,10 @@ class Include(Service, EntryTree):
                 self.filename,
                 len(self._journal),
             )
+            # As above: no write means no fresh tree, so schedule one
+            # from the restored journal before a stale in-flight tree
+            # can clobber the live change.
+            self._schedule_apply()
             return
 
         text = self._dump(data)
@@ -1242,6 +1254,9 @@ class Include(Service, EntryTree):
                 self.filename,
                 len(self._journal),
             )
+            # As above: schedule a fresh tree from the restored
+            # journal before a stale in-flight tree can clobber it.
+            self._schedule_apply()
             raise
         self._cache = {"content": text, "data": data}
         self._schedule_apply()
