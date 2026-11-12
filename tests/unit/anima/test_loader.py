@@ -1145,3 +1145,232 @@ async def test_on_patch_context_sync_next_fn(monkeypatch) -> None:
     await ctx.flush()
     entry = loader.resolve("a")
     assert await loader._on_patch_context(entry, lambda: "sync_done") == "sync_done"
+
+
+# --- P1-5: JsExpr end-to-end (internal/config interpolation) ---
+
+
+def _install_jsexpr_mod(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A dummy module with a recording component and a child-mounting one."""
+    calls: list[Any] = []
+    child_calls: list[Any] = []
+
+    def child(c: Context, config: Any = None) -> None:
+        child_calls.append(dict(config) if isinstance(config, dict) else config)
+
+    def comp(c: Context, config: Any = None) -> None:
+        calls.append(dict(config) if isinstance(config, dict) else config)
+
+    def parent(c: Context, config: Any = None) -> None:
+        calls.append(dict(config) if isinstance(config, dict) else config)
+        c.use(child, {"mode": {"__jsExpr": "process.env.ANIMA_LOADER_MISSING ?? 'x'"}})
+
+    mod = types.ModuleType("loader_jsexpr_mod")
+    mod.comp = comp
+    mod.parent = parent
+    mod.child = child
+    mod.calls = calls  # type: ignore[attr-defined]
+    mod.child_calls = child_calls  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "loader_jsexpr_mod", mod)
+    return mod
+
+
+@pytest.mark.asyncio
+async def test_internal_config_interpolates_entry_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _install_jsexpr_mod(monkeypatch)
+    monkeypatch.setenv("ANIMA_LOADER_TEST", "from-env")
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "a",
+                "name": "loader_jsexpr_mod:comp",
+                "config": {
+                    "mode": {"__jsExpr": "process.env.ANIMA_LOADER_TEST"},
+                    "port": {
+                        "__jsExpr": "Number(process.env.ANIMA_LOADER_MISSING ?? 9090)"
+                    },
+                    "plain": "keep",
+                },
+            }
+        ]
+    )
+    await ctx.flush()
+    assert mod.calls == [{"mode": "from-env", "port": 9090, "plain": "keep"}]
+    entry = loader.resolve("a")
+    assert entry.fiber is not None
+    assert entry.fiber.config == {"mode": "from-env", "port": 9090, "plain": "keep"}
+    # The stored options keep the raw nodes for write-back.
+    assert entry.options["config"]["mode"] == {
+        "__jsExpr": "process.env.ANIMA_LOADER_TEST"
+    }
+    assert entry.options["config"]["port"] == {
+        "__jsExpr": "Number(process.env.ANIMA_LOADER_MISSING ?? 9090)"
+    }
+
+
+@pytest.mark.asyncio
+async def test_internal_config_skips_fiber_without_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _install_jsexpr_mod(monkeypatch)
+    ctx = Context()
+    LoaderService(ctx)
+    fiber = ctx.use(
+        mod.comp, {"mode": {"__jsExpr": "process.env.ANIMA_LOADER_MISSING ?? 'x'"}}
+    )
+    await ctx.flush()
+    assert fiber.state == FiberState.ACTIVE
+    assert mod.calls == [
+        {"mode": {"__jsExpr": "process.env.ANIMA_LOADER_MISSING ?? 'x'"}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_internal_config_skips_tree_carriers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anima.tree import EntryGroup
+
+    calls: list[Any] = []
+
+    class Carrier:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            calls.append(config)
+
+    setattr(Carrier, EntryGroup.key, True)
+    mod = types.ModuleType("loader_carrier_mod")
+    mod.carrier = Carrier
+    monkeypatch.setitem(sys.modules, "loader_carrier_mod", mod)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "c",
+                "name": "loader_carrier_mod:carrier",
+                "config": {
+                    "mode": {"__jsExpr": "process.env.ANIMA_LOADER_MISSING ?? 'x'"}
+                },
+            }
+        ]
+    )
+    await ctx.flush()
+    assert calls == [{"mode": {"__jsExpr": "process.env.ANIMA_LOADER_MISSING ?? 'x'"}}]
+
+
+@pytest.mark.asyncio
+async def test_internal_config_skips_entry_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _install_jsexpr_mod(monkeypatch)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load([{"id": "p", "name": "loader_jsexpr_mod:parent", "config": {}}])
+    await ctx.flush()
+    # The child mounts on the entry ctx, so flush that ctx too: the
+    # mounting ctx's flush cannot see the child's load task.
+    await loader.resolve("p").ctx.flush()
+    assert mod.calls == [{}]
+    assert mod.child_calls == [
+        {"mode": {"__jsExpr": "process.env.ANIMA_LOADER_MISSING ?? 'x'"}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_internal_config_without_current_fiber() -> None:
+    ctx = Context()
+    LoaderService(ctx)
+    resolved = await ctx.waterfall("internal/config", {"mode": {"__jsExpr": "1 === 1"}})
+    assert resolved == {"mode": {"__jsExpr": "1 === 1"}}
+
+
+@pytest.mark.asyncio
+async def test_internal_config_group_keeps_child_rows_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _install_jsexpr_mod(monkeypatch)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "g",
+                "name": "group",
+                "group": True,
+                "config": [
+                    {
+                        "id": "kid",
+                        "name": "loader_jsexpr_mod:comp",
+                        "config": {
+                            "mode": {
+                                "__jsExpr": "process.env.ANIMA_LOADER_MISSING ?? 'kid'"
+                            }
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+    await ctx.flush()
+    # The group fiber keeps the child rows literal; the child fiber
+    # interpolates its own config.
+    group_entry = loader.resolve("g")
+    assert group_entry.fiber is not None
+    assert group_entry.fiber.config[0]["config"]["mode"] == {
+        "__jsExpr": "process.env.ANIMA_LOADER_MISSING ?? 'kid'"
+    }
+    assert mod.calls == [{"mode": "kid"}]
+
+
+@pytest.mark.asyncio
+async def test_js_expr_yaml_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from anima.jsexpr import load_yaml
+
+    _install_jsexpr_mod(monkeypatch)
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(
+        "- id: a\n"
+        "  name: loader_jsexpr_mod:comp\n"
+        "  config:\n"
+        "    mode: !!js process.env.ANIMA_LOADER_MISSING ?? 'workspace-write'\n"
+        "    port: !!js Number(process.env.ANIMA_LOADER_MISSING ?? 8080)\n"
+        "  disabled: !!js ctx.disabled\n",
+        encoding="utf-8",
+    )
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(profile)
+    await ctx.flush()
+    out = tmp_path / "out.yaml"
+    loader.save(out)
+    dumped = out.read_text(encoding="utf-8")
+    assert "!!js" in dumped
+    reloaded = load_yaml(dumped)
+    assert reloaded == loader.root.data
+    assert reloaded[0]["config"]["mode"] == {
+        "__jsExpr": "process.env.ANIMA_LOADER_MISSING ?? 'workspace-write'"
+    }
+    assert reloaded[0]["config"]["port"] == {
+        "__jsExpr": "Number(process.env.ANIMA_LOADER_MISSING ?? 8080)"
+    }
+    assert reloaded[0]["disabled"] == {"__jsExpr": "ctx.disabled"}
+    # A fresh loader reading the saved file sees the same rows.
+    ctx2 = Context()
+    loader2 = LoaderService(ctx2)
+    loader2.load(out)
+    await ctx2.flush()
+    assert loader2.root.data == loader.root.data
+
+
+@pytest.mark.asyncio
+async def test_on_internal_config_sync_next_fn() -> None:
+    """A synchronous delegate returns its result unchanged."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    assert await loader._on_internal_config({"a": 1}, lambda: {"a": 1}) == {"a": 1}

@@ -453,14 +453,97 @@ async def test_update_disabled_short_circuit(mod: Any) -> None:
     assert entry.fiber.state == FiberState.DISPOSED
 
 
-def test_evaluate_not_implemented() -> None:
-    from anima.tree import Entry
+def test_entry_evaluate_attested_patterns(monkeypatch: pytest.MonkeyPatch) -> None:
+    from anima.jsexpr import JsExprError
 
     ctx = Context()
     loader = LoaderService(ctx)
     fresh = Entry(loader)
-    with pytest.raises(NotImplementedError, match="P1-5"):
-        fresh.evaluate("1 + 1")
+    monkeypatch.setenv("ANIMA_TREE_TEST", "on")
+    assert fresh.evaluate("process.env.ANIMA_TREE_TEST") == "on"
+    assert fresh.evaluate("process.env.ANIMA_TREE_MISSING") is None
+    assert fresh.evaluate("process.platform === 'win32'") == (sys.platform == "win32")
+    assert fresh.evaluate("1 === 1") is True
+    assert fresh.evaluate("ctx.get('answer')") is None
+    with pytest.raises(JsExprError, match="unsupported call"):
+        fresh.evaluate("homePath('sessions')")
+
+
+@pytest.mark.asyncio
+async def test_disabled_js_expr(mod: Any) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    ctx.provide("flag", True)
+    loader.load(
+        [
+            _row(
+                id="a",
+                disabled={"__jsExpr": "ctx.get('flag')"},
+            ),
+            _row(
+                id="b",
+                disabled={"__jsExpr": "!ctx.get('flag')"},
+            ),
+        ]
+    )
+    await ctx.flush()
+    entry_a = loader.resolve("a")
+    entry_b = loader.resolve("b")
+    assert entry_a.disabled is True
+    assert entry_a.fiber is None
+    assert entry_b.disabled is False
+    assert entry_b.fiber is not None
+    assert entry_b.fiber.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_disabled_js_expr_inherits_through_group(mod: Any) -> None:
+    ctx = Context()
+    loader = LoaderService(ctx)
+    ctx.provide("flag", True)
+    loader.load(
+        [
+            {
+                "id": "g",
+                "name": "group",
+                "group": True,
+                "disabled": {"__jsExpr": "ctx.get('flag')"},
+                "config": [_row(id="kid")],
+            }
+        ]
+    )
+    await ctx.flush()
+    group_entry = loader.resolve("g")
+    kid = loader.resolve("kid")
+    # A group entry is always enabled itself; its descendants inherit.
+    assert group_entry.disabled is False
+    assert kid.disabled is True
+    assert kid.fiber is None
+    # Flipping the flag remounts the descendant.
+    ctx.provide("flag", False)
+    await loader.update("g", {"disabled": {"__jsExpr": "ctx.get('flag')"}})
+    await loader.await_all()
+    assert kid.disabled is False
+    assert kid.fiber is not None
+    assert kid.fiber.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_disabled_js_expr_out_of_scope_fails_loud(
+    mod: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    from anima.jsexpr import JsExprError
+
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load([_row(id="a", disabled={"__jsExpr": "homePath('sessions')"})])
+    await ctx.flush()
+    entry = loader.resolve("a")
+    # The entry never mounts, and the failure is logged, not swallowed.
+    assert entry.fiber is None
+    assert "Failed to create entry" in caplog.text
+    with pytest.raises(JsExprError, match="unsupported call"):
+        _ = entry.disabled
 
 
 @pytest.mark.asyncio
@@ -785,8 +868,8 @@ def test_entry_tree_write_base_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_js_expr_disabled_raises(mod: Any) -> None:
-    """A JsExpr disabled flag reaches evaluate, which lands in P1-5."""
+async def test_js_expr_disabled_evaluates(mod: Any) -> None:
+    """A JsExpr disabled flag evaluates: "true" disables the entry."""
     ctx = Context()
     loader = LoaderService(ctx)
     loader.load(
@@ -799,9 +882,8 @@ async def test_js_expr_disabled_raises(mod: Any) -> None:
         ]
     )
     await ctx.flush()
+    assert loader.resolve("jx").disabled is True
     assert loader.resolve("jx").fiber is None
-    with pytest.raises(NotImplementedError, match="P1-5"):
-        _ = loader.resolve("jx").disabled
 
 
 @pytest.mark.asyncio
