@@ -540,6 +540,7 @@ def _validate_patch_list(patches: Any) -> None:
 
     Patches are literal: a patch list, a patch, or an insert that is a
     config expression is rejected, never evaluated. A JsExpr carried as
+    a patch VALUE is data, applied literally and never evaluated.
     A missing patch list (None) is valid: no patches.
     """
     if patches is None:
@@ -746,8 +747,11 @@ def route_journal(
             return config if isinstance(config, list) else None
         found = flatten(container(owner)[0]).get(parent_id)
         # The index only yields embedded owners for entries mounted
-        # from that container, so the lookup cannot miss.
-        if found is None:  # pragma: no cover
+        # from that container, so the lookup usually hits — but a move
+        # can detach the container first (a group moved under its own
+        # descendant), and then it misses: fall back to place() + warn,
+        # exactly as the oracle does.
+        if found is None:
             return None
         config = found.options.get("config")
         if config is None:
@@ -961,10 +965,12 @@ class Include(Service, EntryTree):
     async def _on_internal_update(self, config: Any, next_fn: Any = None) -> Any:
         """Adopt an update to this include's own config; veto the restart.
 
-        When the fiber's own config updates (same path), adopt the new
-        config (including new patches), re-apply, and do NOT restart the
-        fiber — the children update in place. Any other update passes
-        down the chain.
+        When the fiber's own config updates (same path), validate the new
+        patches exactly as construction does, adopt the new config
+        (including new patches), re-apply, and do NOT restart the fiber
+        — the children update in place. Returns the pending apply task,
+        so a caller awaiting the fiber update awaits the re-apply. Any
+        other update passes down the chain.
         """
         if not isinstance(config, dict) or config.get("path") != self.config.get(
             "path"
@@ -973,14 +979,13 @@ class Include(Service, EntryTree):
                 res = next_fn(config)
                 if inspect.isawaitable(res):
                     return await res
-                return (
-                    res  # pragma: no cover - the waterfall always passes an async next
-                )
-            return None  # pragma: no cover - the waterfall always supplies next
+                return res
+            return None
+        _validate_patch_list(config.get("patches"))
         self.config = config
         ensure_insert_ids(config.get("patches"), lambda i: i in self.store)
         self._schedule_apply()
-        return None
+        return self._apply_task
 
     async def init(self) -> None:
         """Read the file (or fall back to ``initial``) and mount the tree."""

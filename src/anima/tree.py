@@ -380,6 +380,17 @@ class EntryTree(ABC):
         cross_tree = False
         if parent is not _UNSET:
             target = self.resolve_group(parent)
+            # A move into the entry's own subtree would detach the
+            # group from itself: reject loud instead of recursing (or
+            # silently dropping the entries). A legitimate move can
+            # never target a descendant.
+            if target.owner is not None and target.owner in _members(
+                entry, source.tree
+            ):
+                raise ValueError(
+                    f"cannot move entry {entry_id} into its own descendant "
+                    f"group {parent}"
+                )
             if target.tree is not source.tree:
                 # Cross-tree move: migrate the entry and its subgroup
                 # members into the target tree's store first, so the
@@ -432,7 +443,16 @@ class EntryTree(ABC):
                 if member.subgroup is not None:
                     member.options["config"] = list(member.subgroup.data)
         source.tree.write()
-        await entry.update(options, create=False, force=True)
+        # The merge runs synchronously before the first await, so the
+        # change is fully visible to commit() once the call returns —
+        # mirroring the oracle, where Entry.update assigns the new
+        # options before its first await and EntryTree.update commits
+        # synchronously right after calling it. Committing before
+        # awaiting the fiber restart journals the intended state: a
+        # stale reconcile applying afterwards can no longer clobber the
+        # merge and empty the diff, and a later fiber failure does not
+        # un-commit it.
+        premerged_legacy = entry._merge_options(options)
         if cross_tree:
             # A move across trees is a removal from the source tree and
             # a creation in the target tree.
@@ -457,6 +477,9 @@ class EntryTree(ABC):
                     legacy=legacy,
                 )
             )
+        await entry.update(
+            options, create=False, force=True, _premerged_legacy=premerged_legacy
+        )
         return entry
 
     def import_(self, name: str, outer_stack: list[str] | None = None) -> Any:
@@ -553,15 +576,15 @@ class Entry:
             return
         await self.init()
 
-    async def update(
-        self,
-        options: dict[str, Any],
-        create: bool = False,
-        force: bool = False,
-    ) -> None:
-        """Merge new options, restart as needed, and persist through the parent tree.
+    def _merge_options(
+        self, options: dict[str, Any], create: bool = False
+    ) -> dict[str, Any]:
+        """Apply an options merge synchronously; return the pre-merge options.
 
-        A None value deletes its key; it is never stored.
+        A None value deletes its key; it is never stored. ``create``
+        adopts the given dict as the options object; otherwise the merge
+        mutates the live options in place, so the group data row stays
+        the identical object.
         """
         legacy = dict(self.options)
         if create:
@@ -573,6 +596,27 @@ class Entry:
                 else:
                     self.options[key] = value
         _sort_options_keys(self.options)
+        return legacy
+
+    async def update(
+        self,
+        options: dict[str, Any],
+        create: bool = False,
+        force: bool = False,
+        _premerged_legacy: dict[str, Any] | None = None,
+    ) -> None:
+        """Merge new options, restart as needed, and persist through the parent tree.
+
+        A None value deletes its key; it is never stored.
+        ``_premerged_legacy`` is the pre-merge options when the caller
+        already merged (EntryTree.update): the merge is skipped and the
+        change is diffed against it, so the fiber restart still sees
+        the real change.
+        """
+        if _premerged_legacy is None:
+            legacy = self._merge_options(options, create=create)
+        else:
+            legacy = _premerged_legacy
 
         if self.disabled:
             if self.fiber is not None:
