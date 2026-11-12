@@ -18,6 +18,7 @@ from anima.include import (
     JournalRecord,
     apply_patch,
     diff_entries,
+    equal_except_volatile,
 )
 from anima.jsexpr import JsExprError, evaluate, interpolate
 from anima.loader import (
@@ -125,6 +126,7 @@ __all__ = [
     "apply_patch",
     "create_volatile",
     "diff_entries",
+    "equal_except_volatile",
     "evaluate",
     "inject",
     "interpolate",

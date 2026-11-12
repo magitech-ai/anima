@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from anima.core import Context, Service, is_js_expr
 from anima.jsexpr import load_yaml
+from anima.schema import _UNDEFINED, Schema, deep_equal
 
 
 class IncludeError(Exception):
@@ -24,15 +25,101 @@ class JournalRecord:
     changes: dict[str, Any] = field(default_factory=dict)
 
 
-def diff_entries(older: dict[str, Any], newer: dict[str, Any]) -> dict[str, Any]:
-    """Calculate the key-level delta between two entry dictionaries."""
+def _is_schema(value: Any) -> bool:
+    """Whether ``value`` carries the schema seam.
+
+    The local seam vendor is ``anima``; anything without it compares by
+    strict raw equality.
+    """
+    seam = getattr(value, "~standard", None)
+    return seam is not None and getattr(seam, "vendor", None) == "anima"
+
+
+def _is_record(value: Any) -> TypeGuard[dict[str, Any]]:
+    """Whether ``value`` is a plain record (not a JsExpr node)."""
+    return isinstance(value, dict) and not is_js_expr(value)
+
+
+def equal_except_volatile(previous: Any, next_config: Any, schema: Any) -> bool:
+    """Compare two raw configs, treating volatile fields as equal.
+
+    Volatile fields at fixed object paths compare equal regardless of
+    value; an absent object compares equal to its schema default; schema
+    backedges, JsExpr/opaque values, unknown fields, and non-object
+    schemas keep strict raw equality. Nothing is evaluated, validated,
+    or mutated.
+    """
+    if not _is_schema(schema):
+        return deep_equal(previous, next_config, strict=True)
+
+    ancestors: set[int] = set()
+
+    def equal(a: Any, b: Any, node: Schema | None) -> bool:
+        if node is not None and node._volatile:
+            return True
+        if (
+            node is None
+            or node.type_name != "object"
+            or node._properties is None
+            or id(node) in ancestors
+        ):
+            return deep_equal(a, b, strict=True)
+        default = node._default if node._default is not _UNDEFINED else None
+        left = a if a is not None else default
+        right = b if b is not None else default
+        if not _is_record(left) or not _is_record(right):
+            return deep_equal(left, right, strict=True)
+        props = node._properties
+        ancestors.add(id(node))
+        try:
+            return all(
+                equal(left.get(key), right.get(key), props.get(key))
+                for key in set(left) | set(right)
+            )
+        finally:
+            ancestors.discard(id(node))
+
+    return equal(previous, next_config, schema)
+
+
+def diff_entries(
+    older: dict[str, Any],
+    newer: dict[str, Any],
+    config_schema: Any = None,
+) -> dict[str, Any]:
+    """Calculate the key-level delta between two entry dictionaries.
+
+    A removed key yields ``None``: in a changes dict None deletes the
+    key, it is never stored as a value. The ``config`` key compares with
+    the schema-aware diff when ``config_schema`` is given, so a
+    volatile-only config change produces no diff entry; without a schema
+    every key compares by strict raw equality. Expression nodes compare
+    structurally and are never evaluated.
+    """
     changes: dict[str, Any] = {}
     for key in set(older.keys()) | set(newer.keys()):
         if key == "id":
             continue
-        if older.get(key) != newer.get(key):
-            changes[key] = newer.get(key)
+        old_value = older.get(key)
+        new_value = newer.get(key)
+        if key == "config" and config_schema is not None:
+            if equal_except_volatile(old_value, new_value, config_schema):
+                continue
+        elif deep_equal(old_value, new_value, strict=True):
+            continue
+        changes[key] = new_value
     return changes
+
+
+def _apply_changes(base: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
+    """Apply a changes dict: a None value deletes its key, never stored."""
+    updated = dict(base)
+    for key, value in changes.items():
+        if value is None:
+            updated.pop(key, None)
+        else:
+            updated[key] = value
+    return updated
 
 
 class Journal:
@@ -70,10 +157,9 @@ class Journal:
                 rec = self.records[eid]
                 if rec.kind == "remove":
                     continue
-                # Apply changes
-                updated = dict(entry)
-                updated.update(rec.changes)
-                result.append(updated)
+                # Apply changes: a None value deletes its key, it is
+                # never stored as a value.
+                result.append(_apply_changes(entry, rec.changes))
                 seen_ids.add(eid)
             else:
                 result.append(dict(entry))
@@ -83,9 +169,7 @@ class Journal:
         # Append newly created entries from journal
         for eid, rec in self.records.items():
             if rec.created and eid not in seen_ids and rec.kind == "upsert":
-                new_entry: dict[str, Any] = {"id": eid}
-                new_entry.update(rec.changes)
-                result.append(new_entry)
+                result.append(_apply_changes({"id": eid}, rec.changes))
 
         return result
 

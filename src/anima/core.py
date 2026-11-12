@@ -189,15 +189,21 @@ class Fiber:
             self.inject = []
             self.inject_config = getattr(target, "inject_config", None)
 
+    @property
+    def config_schema(self) -> Any:
+        """The component's declared config schema (``Config`` or ``schema``)."""
+        schema = getattr(self.target, "Config", None)
+        if schema is None:
+            schema = getattr(self.target, "schema", None)
+        return schema
+
     def _validate_config_value(self, config: Any) -> Any:
         """Validate a config value against the component's declared schema.
 
         Synchronous validation used by _resolve_config at activation time.
         Returns the validated config; raises on failure.
         """
-        config_schema = getattr(self.target, "Config", None)
-        if config_schema is None:
-            config_schema = getattr(self.target, "schema", None)
+        config_schema = self.config_schema
         if config_schema is None:
             return config
 
@@ -364,6 +370,16 @@ class Fiber:
         finally:
             _current_fiber.reset(token)
         return self._validate_config_value(resolved)
+
+    async def resolve_config(self, config: Any) -> Any:
+        """Evaluate and validate a candidate config without publishing it.
+
+        Runs the ``internal/config`` waterfall, then schema validation,
+        and returns the resolved candidate. The running config, raw
+        input, and volatile references are untouched. Raises when
+        validation fails.
+        """
+        return await self._resolve_config(config)
 
     @staticmethod
     def _safe_getattr(obj: Any, name: str) -> Any:
