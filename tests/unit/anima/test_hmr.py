@@ -1063,13 +1063,13 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
     A reschedule arriving after the debounce task has joined the drain
     must not cancel the drain: cancelling a task awaiting the drain
     cancels the drain itself (asyncio cancels the awaited task too).
+
+    The service is constructed directly (no watcher): the race is between
+    the debounce task and the drain, and watcher polls would only add
+    timing noise to the handover wait below.
     """
     ctx = Context()
-    ctx.use(WatcherService)
-    ctx.use(HmrService, root=tmp_path, interval=0.01)
-    await ctx.flush()
-
-    hmr: HmrService = ctx.hmr
+    hmr = HmrService(ctx, {"root": tmp_path})
     mod_file = tmp_path / "sample_component.py"
     mod_file.write_text(
         "import asyncio\n"
@@ -1090,15 +1090,6 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
     assert spec.loader is not None
     spec.loader.exec_module(mod)
 
-    async def _wait_for_handover() -> None:
-        # The debounce task clears its slot once its window elapses and
-        # it joins the drain; wait for that instead of guessing a sleep.
-        for _ in range(200):
-            if hmr._debounce_task is None:
-                return
-            await asyncio.sleep(0.01)
-        raise AssertionError("debounce task never joined the drain")
-
     try:
         fib = ctx.use(mod.MyComponent)
         await ctx.flush()
@@ -1117,12 +1108,17 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
         )
         _bump(mod_file)
 
-        # Route the change through the watcher path twice: the first
-        # schedules a debounce task, which joins the in-flight drain once
-        # its window elapses; the second reschedules while it is joined.
-        # Cancelling that task must not cancel the drain.
+        # Route the change through the watcher path: this schedules a
+        # debounce task, which joins the in-flight drain once its 100 ms
+        # window elapses. The drain runs ~1 s (two slow-disposer cycles),
+        # so after 300 ms the task is joined but the drain is still
+        # running; all three delays are loop timers, so they scale
+        # together under load and the ordering holds.
         await hmr._on_file_change("change", mod_file)
-        await _wait_for_handover()
+        await asyncio.sleep(0.3)
+
+        # Reschedule while the debounce task is joined to the drain.
+        # Cancelling that task must not cancel the drain.
         await hmr._on_file_change("change", mod_file)
 
         reloaded = await hmr.reload_module(mod_name, path=mod_file)
