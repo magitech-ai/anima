@@ -7,9 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from anima.core import Context, Service
+from anima.core import Context, Service, is_js_expr
+from anima.jsexpr import load_yaml
 
 
 class IncludeError(Exception):
@@ -94,14 +93,43 @@ class Journal:
 def apply_patch(
     entries: list[dict[str, Any]], patches: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Apply declarative patch operations over an entries list."""
+    """Apply declarative patch operations over an entries list.
+
+    Patches are literal: an entry list, a patch list, or a patch that is
+    a config expression is rejected, never evaluated.
+    """
+    if not isinstance(entries, list):
+        raise IncludeError(
+            "expected a literal entry list; config expressions are not evaluated"
+        )
+    if not isinstance(patches, list):
+        raise IncludeError(
+            "include patches must be a literal patch list; "
+            "config expressions are not evaluated"
+        )
     id_map = {e.get("id"): dict(e) for e in entries if e.get("id")}
     ordered_ids = [e.get("id") for e in entries if e.get("id")]
     additional_entries: list[dict[str, Any]] = []
 
     for patch in patches:
-        if "insert" in patch and isinstance(patch["insert"], list):
-            for item in patch["insert"]:
+        if not isinstance(patch, dict) or is_js_expr(patch):
+            raise IncludeError(
+                "include patches must be literal mappings; "
+                "config expressions are not evaluated"
+            )
+        if "insert" in patch:
+            inserted = patch["insert"]
+            if not isinstance(inserted, list):
+                raise IncludeError(
+                    "expected a literal entry list; "
+                    "config expressions are not evaluated"
+                )
+            for item in inserted:
+                if is_js_expr(item):
+                    raise IncludeError(
+                        "expected a literal entry list; "
+                        "config expressions are not evaluated"
+                    )
                 if isinstance(item, dict):
                     additional_entries.append(dict(item))
             continue
@@ -154,7 +182,12 @@ class IncludeService(Service):
             if p.suffix in (".json",):
                 raw_data = json.load(f)
             else:
-                raw_data = yaml.safe_load(f)
+                raw_data = load_yaml(f)
+
+        if is_js_expr(raw_data):
+            raise IncludeError(
+                "expected a literal entry list; config expressions are not evaluated"
+            )
 
         return self.resolve(raw_data, base_dir=current_dir, seen=active_seen)
 
@@ -177,6 +210,13 @@ class IncludeService(Service):
         if isinstance(source, dict):
             if "$include" in source:
                 include_target = source["$include"]
+                if is_js_expr(include_target) or not isinstance(
+                    include_target, (str, Path)
+                ):
+                    raise IncludeError(
+                        "include path must be literal; "
+                        "config expressions are not evaluated"
+                    )
                 resolved_include = self.resolve_file(
                     include_target, base_dir=base_dir, seen=active_seen
                 )

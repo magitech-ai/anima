@@ -177,3 +177,80 @@ def test_resolve_missing_file(tmp_path: Path):
     with pytest.raises(IncludeError) as exc_info:
         inc.resolve(tmp_path / "nonexistent.yaml")
     assert "does not exist" in str(exc_info.value)
+
+
+# --- P1-5: patches and include config must stay literal ---
+
+
+def test_apply_patch_rejects_js_expr() -> None:
+    entries = [{"id": "a", "name": "comp"}]
+    with pytest.raises(IncludeError, match="include patches must be literal mappings"):
+        apply_patch(entries, [{"__jsExpr": "process.env.X"}])
+    with pytest.raises(IncludeError, match="include patches must be literal mappings"):
+        apply_patch(entries, ["not-a-mapping"])
+    with pytest.raises(
+        IncludeError, match="include patches must be a literal patch list"
+    ):
+        apply_patch(entries, {"__jsExpr": "process.env.X"})  # type: ignore[arg-type]
+    with pytest.raises(IncludeError, match="expected a literal entry list"):
+        apply_patch({"__jsExpr": "process.env.X"}, [])  # type: ignore[arg-type]
+
+
+def test_apply_patch_rejects_js_expr_insert() -> None:
+    entries = [{"id": "a", "name": "comp"}]
+    with pytest.raises(IncludeError, match="expected a literal entry list"):
+        apply_patch(entries, [{"insert": {"__jsExpr": "process.env.X"}}])
+    with pytest.raises(IncludeError, match="expected a literal entry list"):
+        apply_patch(entries, [{"insert": "not-a-list"}])
+    with pytest.raises(IncludeError, match="expected a literal entry list"):
+        apply_patch(entries, [{"insert": [{"__jsExpr": "process.env.X"}]}])
+    # A literal insert still applies; a JsExpr patch value is data, not
+    # an instruction, so it is applied literally and never evaluated.
+    patched = apply_patch(entries, [{"insert": [{"id": "b", "name": "other"}]}])
+    assert [e["id"] for e in patched] == ["a", "b"]
+    patched = apply_patch(
+        entries,
+        [{"id": "a", "config": {"mode": {"__jsExpr": "process.env.X"}}}],
+    )
+    assert patched[0]["config"] == {"mode": {"__jsExpr": "process.env.X"}}
+
+
+def test_resolve_include_path_must_be_literal(tmp_path: Path) -> None:
+    ctx = Context()
+    inc = IncludeService(ctx)
+    with pytest.raises(IncludeError, match="include path must be literal"):
+        inc.resolve({"$include": {"__jsExpr": "process.env.X"}})
+    with pytest.raises(IncludeError, match="include path must be literal"):
+        inc.resolve({"$include": 42})
+    # A literal string path still resolves.
+    target = tmp_path / "data.yaml"
+    target.write_text("name: db\n", encoding="utf-8")
+    assert inc.resolve({"$include": str(target)}) == {"name": "db"}
+
+
+def test_resolve_file_top_level_js_expr_rejected(tmp_path: Path) -> None:
+    ctx = Context()
+    inc = IncludeService(ctx)
+    expr_file = tmp_path / "expr.yaml"
+    expr_file.write_text("!!js process.env.X\n", encoding="utf-8")
+    with pytest.raises(IncludeError, match="expected a literal entry list"):
+        inc.resolve(expr_file)
+
+
+def test_diff_treats_js_expr_as_opaque() -> None:
+    # Identical expression nodes: no change, and nothing is evaluated
+    # (an out-of-scope expression would raise if it were).
+    older = {"id": "a", "config": {"mode": {"__jsExpr": "homePath('x')"}}}
+    newer = {"id": "a", "config": {"mode": {"__jsExpr": "homePath('x')"}}}
+    assert diff_entries(older, newer) == {}
+    # A changed expression string is a raw change, still unevaluated.
+    changed = {"id": "a", "config": {"mode": {"__jsExpr": "process.env.Y"}}}
+    assert diff_entries(older, changed) == {
+        "config": {"mode": {"__jsExpr": "process.env.Y"}}
+    }
+    # An expression node replacing a literal (and vice versa) is a change.
+    literal = {"id": "a", "config": {"mode": "plain"}}
+    assert diff_entries(literal, older) == {
+        "config": {"mode": {"__jsExpr": "homePath('x')"}}
+    }
+    assert diff_entries(older, literal) == {"config": {"mode": "plain"}}

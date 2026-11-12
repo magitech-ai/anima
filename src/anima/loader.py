@@ -13,14 +13,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from anima.core import Context, Fiber, FiberState, Service
+from anima.core import Context, Fiber, FiberState, Service, _current_fiber
 from anima.events import Disposer, EventMode
+from anima.jsexpr import dump_yaml, interpolate, load_yaml
 from anima.tree import (
     _UNSET,
     BUILTIN_ALIASES,
     Entry,
+    EntryGroup,
     EntryTree,
     resolve_component_target,
 )
@@ -92,7 +92,7 @@ def save_profile(path: Path | str, entries: list[dict[str, Any]]) -> None:
     p = Path(path).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
-        yaml.safe_dump(entries, f, sort_keys=False)
+        dump_yaml(entries, f)
 
 
 def _normalise_row(item: Any) -> dict[str, Any]:
@@ -159,6 +159,12 @@ class LoaderService(Service, EntryTree):
         # 3. Hooks, registered on the ORIGINAL ctx.
         ctx.on("internal/commit", self._on_commit)
         ctx.on(
+            "internal/config",
+            self._on_internal_config,
+            mode=EventMode.WATERFALL,
+            global_=True,
+        )
+        ctx.on(
             "loader/patch-context",
             self._on_patch_context,
             mode=EventMode.WATERFALL,
@@ -213,7 +219,7 @@ class LoaderService(Service, EntryTree):
                 raise FileNotFoundError(f"Profile config file not found: {path}")
             self.filename = path
             with open(path, encoding="utf-8") as f:
-                raw_data = yaml.safe_load(f)
+                raw_data = load_yaml(f)
         else:
             raw_data = config_source
 
@@ -284,6 +290,32 @@ class LoaderService(Service, EntryTree):
         if target_path is None:
             raise ValueError("No destination path specified to save profile")
         save_profile(target_path, self.root.data)
+
+    async def _on_internal_config(self, config: Any, next_fn: Any) -> Any:
+        """Interpolate expression nodes in a resolving entry's config.
+
+        The waterfall runs first and the result is interpolated. Entries
+        without a loader entry, child components of an entry, and tree
+        carriers (Group, Include) keep their configs literal: a carrier's
+        entry and patch lists hold other rows' configs, whose expressions
+        belong to those rows' own fibers.
+        """
+        resolved = next_fn()
+        if inspect.isawaitable(resolved):
+            resolved = await resolved
+        fiber = _current_fiber.get()
+        if fiber is None or fiber.entry is None:
+            return resolved
+        # Child components of an entry carry entry=None (unlike the
+        # oracle, where the entry marker is inherited through the ctx),
+        # so the entry-None return above already subsumes this guard.
+        if (  # pragma: no cover
+            fiber.parent_fiber is not None and fiber.parent_fiber.entry is fiber.entry
+        ):
+            return resolved
+        if EntryGroup.is_tree_carrier(fiber.target):
+            return resolved
+        return interpolate(fiber.ctx, resolved)
 
     def _on_commit(self, fiber: Fiber, config: Any) -> None:
         """Write a runtime config change back into the owning entry's options.

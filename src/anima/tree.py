@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 
 from anima.core import Context, Fiber, FiberState, is_js_expr
 from anima.events import EventMode
+from anima.jsexpr import evaluate as evaluate_js_expr
 from anima.registry import resolve_inject
 from anima.schema import deep_equal
 
@@ -335,8 +336,8 @@ class Entry:
         return bool(raw)
 
     def evaluate(self, expr: str) -> Any:
-        """Evaluate a JS expression against this entry's context (P1-5)."""
-        raise NotImplementedError("JsExpr evaluation lands in P1-5")
+        """Evaluate a JS expression against this entry's context."""
+        return evaluate_js_expr(self.ctx, expr)
 
     async def refresh(self) -> None:
         """(Re-)mount this entry when it has no fiber and is not disabled."""
