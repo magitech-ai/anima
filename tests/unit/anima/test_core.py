@@ -2134,3 +2134,75 @@ def test_context_init_probe_returns_none():
     """The Fiber.load init probe on a Context instance returns None."""
     ctx = Context()
     assert getattr(ctx, "init", None) is None
+
+
+@pytest.mark.asyncio
+async def test_flush_excludes_calling_task():
+    """A task calling flush() while siblings are pending returns instead of deadlocking."""
+    ctx = Context()
+    settled: list[str] = []
+
+    async def sibling() -> None:
+        await asyncio.sleep(0)
+        settled.append("sibling")
+
+    async def caller() -> None:
+        await ctx.flush()
+        settled.append("caller")
+
+    sibling_task = asyncio.get_running_loop().create_task(sibling())
+    ctx._pending_tasks.add(sibling_task)
+    sibling_task.add_done_callback(ctx._pending_tasks.discard)
+    caller_task = asyncio.get_running_loop().create_task(caller())
+    ctx._pending_tasks.add(caller_task)
+    caller_task.add_done_callback(ctx._pending_tasks.discard)
+    await asyncio.gather(sibling_task, caller_task)
+    assert settled == ["caller", "sibling"] or settled == ["sibling", "caller"]
+    assert "caller" in settled and "sibling" in settled
+
+
+@pytest.mark.asyncio
+async def test_fiber_list_config_mounts():
+    """A fiber mounted with a list config keeps the list intact."""
+    ctx = Context()
+    seen: list[Any] = []
+
+    class ListComponent:
+        def __init__(self, c: Context, config: Any) -> None:
+            seen.append(config)
+
+    fiber = ctx.use(ListComponent, [{"id": "a"}, {"id": "b"}])
+    await ctx.flush()
+    assert fiber.state == FiberState.ACTIVE
+    assert seen == [[{"id": "a"}, {"id": "b"}]]
+    assert fiber.config == [{"id": "a"}, {"id": "b"}]
+    assert fiber.raw_config == [{"id": "a"}, {"id": "b"}]
+
+
+def test_context_use_list_config_with_kwargs_raises():
+    """Merging kwargs into a list config fails loud."""
+    ctx = Context()
+
+    class ListComponent:
+        def __init__(self, c: Context, config: Any) -> None:
+            pass
+
+    with pytest.raises(TypeError, match="non-dict config"):
+        ctx.use(ListComponent, [{"id": "a"}], extra=1)
+
+
+@pytest.mark.asyncio
+async def test_fiber_update_list_config():
+    """Fiber.update accepts a list config and stores it without copying to a dict."""
+    ctx = Context()
+
+    class ListComponent:
+        def __init__(self, c: Context, config: Any) -> None:
+            pass
+
+    fiber = ctx.use(ListComponent, [{"id": "a"}])
+    await ctx.flush()
+    assert fiber.state == FiberState.ACTIVE
+    await fiber.update([{"id": "a"}, {"id": "b"}], no_save=True)
+    assert fiber.config == [{"id": "a"}, {"id": "b"}]
+    assert fiber.raw_config == [{"id": "a"}, {"id": "b"}]

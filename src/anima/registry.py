@@ -250,8 +250,16 @@ class RegistryService:
 
         callback, target = forwarded
         runtime = self._internal.get(callback) or self._create(callback, target)
-        config_dict = dict(config or {})
-        fiber = Fiber(self.ctx, target, (), config_dict)
+        # Dict configs are copied (None means an empty dict, as before);
+        # list configs (group entries) are shallow-copied; anything else
+        # passes through unchanged.
+        if config is None or isinstance(config, dict):
+            config_value: Any = dict(config or {})
+        elif isinstance(config, list):
+            config_value = list(config)
+        else:
+            config_value = config
+        fiber = Fiber(self.ctx, target, (), config_value)
         runtime.fibers.append(fiber)
         parent_fiber = self.ctx.fiber
         fiber.parent_fiber = parent_fiber

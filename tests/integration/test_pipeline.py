@@ -188,7 +188,7 @@ async def test_declarative_profile_integration(tmp_path: Path, monkeypatch):
     profile_file.write_text(yaml.dump(profile_content), encoding="utf-8")
 
     ctx = Context()
-    load_profile(ctx, profile_file)
+    loader = load_profile(ctx, profile_file)
     await ctx.flush()
 
     assert ctx.has("provider")
@@ -198,7 +198,9 @@ async def test_declarative_profile_integration(tmp_path: Path, monkeypatch):
     res = await ctx.agent.run("automated test")
     assert "[mock-gpt] response to: automated test" in res
 
-    # Introspect context hierarchy
+    # Introspect context hierarchy. Entries mount on entry ctxs, so the
+    # mounting ctx itself holds no direct fibers; the profile's fibers
+    # live in the loader store.
     tree = ctx.dump_tree()
     assert set(tree["services"]) == {
         "provider",
@@ -208,7 +210,12 @@ async def test_declarative_profile_integration(tmp_path: Path, monkeypatch):
         "registry",
         "reflect",
     }
-    assert len(tree["fibers"]) == 3
+    assert tree["fibers"] == []
+    entry_fibers = [entry.fiber for entry in loader.store.values()]
+    assert len(entry_fibers) == 3
+    assert all(
+        fiber is not None and fiber.state == FiberState.ACTIVE for fiber in entry_fibers
+    )
 
 
 @pytest.mark.asyncio
@@ -247,7 +254,7 @@ async def test_full_microkernel_ecosystem_integration(tmp_path: Path):
     assert ctx.has("timer")
     assert ctx.has("watcher")
     assert ctx.has("loader")
-    assert "work_group" in loader.fibers
+    assert "work_group" in loader.store
 
     # Use timer to debounce a contextual log
     log_messages = []
@@ -284,12 +291,13 @@ async def test_full_microkernel_ecosystem_integration(tmp_path: Path):
     disp_watch()
 
     # Dynamic group disable and re-enable
-    group_entry = loader.fibers["work_group"].target
-    assert "group_component" in group_entry.entries
-    await group_entry.disable("group_component")
-    assert group_entry.entries["group_component"].disabled is True
-    await group_entry.enable("group_component")
-    assert group_entry.entries["group_component"].disabled is False
+    assert "group_component" in loader.store
+    await loader.disable("group_component")
+    assert loader.resolve("group_component").options.get("disabled") is True
+    assert loader.resolve("group_component").fiber.state == FiberState.DISPOSED
+    await loader.enable("group_component")
+    assert loader.resolve("group_component").options.get("disabled") is not True
+    assert loader.resolve("group_component").fiber.state == FiberState.ACTIVE
 
     # Unload and clean up root
     await ctx.root.flush()

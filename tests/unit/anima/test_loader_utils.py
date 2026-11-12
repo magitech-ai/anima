@@ -1,7 +1,5 @@
 """Unit tests for loader-utils module-loading utilities."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from anima.loader_utils import (
@@ -10,38 +8,16 @@ from anima.loader_utils import (
     ModuleStatus,
     ModuleWrap,
     get_module_jobs,
-    unwrap_exports,
+    is_nullable,
 )
 
 
-def test_unwrap_exports_nullable():
-    """unwrap_exports passes through None."""
-    assert unwrap_exports(None) is None
-
-
-def test_unwrap_exports_plain_value():
-    """A non-module value is returned as-is."""
-    assert unwrap_exports("component") == "component"
-    assert unwrap_exports(42) == 42
-
-
-def test_unwrap_exports_no_es_module():
-    """A namespace without __es_module returns its default or itself."""
-    ns = SimpleNamespace(default="my-component", other="value")
-    assert unwrap_exports(ns) == "my-component"
-
-    ns_no_default = SimpleNamespace(other="value")
-    assert unwrap_exports(ns_no_default) is ns_no_default
-
-
-def test_unwrap_exports_with_es_module():
-    """A namespace with __es_module returns its default export, or itself."""
-    ns = SimpleNamespace(default="esm-component", __es_module=True)
-    assert unwrap_exports(ns) == "esm-component"
-
-    # No default export: anima returns the namespace itself (?? fallback)
-    ns_no_default = SimpleNamespace(__es_module=True)
-    assert unwrap_exports(ns_no_default) is ns_no_default
+def test_is_nullable():
+    """is_nullable is True only for None."""
+    assert is_nullable(None) is True
+    assert is_nullable(0) is False
+    assert is_nullable("") is False
+    assert is_nullable(False) is False
 
 
 def test_module_status_enum():
@@ -86,19 +62,6 @@ def test_get_module_jobs_unknown_url():
     """An unknown URL returns no jobs."""
     cache = {"file:///app/other.js": {"javascript": {"url": "file:///app/other.js"}}}
     assert get_module_jobs(cache, "file:///app/missing.js") == []
-
-
-def test_unwrap_exports_es_module_with_default():
-    """__es_module + default returns the default (line 33 branch)."""
-    ns = SimpleNamespace(default="my-component", __es_module=True)
-    assert unwrap_exports(ns) == "my-component"
-
-
-def test_unwrap_exports_nested_default():
-    """Nested __es_module: inner namespace's default is returned (line 33)."""
-    inner = SimpleNamespace(default="inner-component", __es_module=True)
-    ns = SimpleNamespace(default=inner, __es_module=True)
-    assert unwrap_exports(ns) == "inner-component"
 
 
 def test_module_wrap():
