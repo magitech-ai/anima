@@ -1059,6 +1059,10 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
     A slow effect disposer holds the first reload in flight; the file is
     updated while it runs. The second reload must not join the stale one
     (which would return version 1); it waits, then reloads version 2.
+
+    A reschedule arriving after the debounce task has joined the drain
+    must not cancel the drain: cancelling a task awaiting the drain
+    cancels the drain itself (asyncio cancels the awaited task too).
     """
     ctx = Context()
     ctx.use(WatcherService)
@@ -1086,6 +1090,15 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
     assert spec.loader is not None
     spec.loader.exec_module(mod)
 
+    async def _wait_for_handover() -> None:
+        # The debounce task clears its slot once its window elapses and
+        # it joins the drain; wait for that instead of guessing a sleep.
+        for _ in range(200):
+            if hmr._debounce_task is None:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("debounce task never joined the drain")
+
     try:
         fib = ctx.use(mod.MyComponent)
         await ctx.flush()
@@ -1103,6 +1116,14 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
             "        self.v = 2\n"
         )
         _bump(mod_file)
+
+        # Route the change through the watcher path twice: the first
+        # schedules a debounce task, which joins the in-flight drain once
+        # its window elapses; the second reschedules while it is joined.
+        # Cancelling that task must not cancel the drain.
+        await hmr._on_file_change("change", mod_file)
+        await _wait_for_handover()
+        await hmr._on_file_change("change", mod_file)
 
         reloaded = await hmr.reload_module(mod_name, path=mod_file)
         assert reloaded is not None

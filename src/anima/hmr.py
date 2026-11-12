@@ -473,12 +473,15 @@ class HmrService(Service):
         """Wait out the debounce window, then drain the stash."""
         try:
             await asyncio.sleep(self._debounce_ms / 1000)
-            await self._ensure_reload_loop()
         except asyncio.CancelledError:
-            pass
-        finally:
-            if self._debounce_task is asyncio.current_task():
-                self._debounce_task = None
+            return
+        # The timer has fired: hand the drain over to the shared loop.
+        # Clear the slot now, so a later reschedule cannot cancel this
+        # task while it awaits the drain: cancelling a task awaiting the
+        # drain cancels the drain itself (asyncio cancels the awaited
+        # task too), and with it the in-flight fiber transitions.
+        self._debounce_task = None
+        await self._ensure_reload_loop()
 
     async def _ensure_reload_loop(self) -> dict[str, bool]:
         """Run partial-reload cycles until the stash is empty (single-flight).
@@ -486,11 +489,13 @@ class HmrService(Service):
         Concurrent callers share one drain task. A cycle consumes the stash
         snapshot; a file that changed again mid-cycle is picked up by a
         second cycle for the fresh content, while a re-stash of unchanged
-        content is skipped via the consumed stats.
+        content is skipped via the consumed stats. Callers await the drain
+        through a shield, so a cancelled caller cannot kill the shared
+        drain (and its in-flight fiber transitions) with it.
         """
         task = self._reload_task
         if task is not None and not task.done():
-            return await task
+            return await asyncio.shield(task)
 
         async def _drain() -> dict[str, bool]:
             outcomes: dict[str, bool] = {}
@@ -516,7 +521,7 @@ class HmrService(Service):
 
         task = asyncio.ensure_future(_drain())
         self._reload_task = task
-        return await task
+        return await asyncio.shield(task)
 
     async def reload_module(
         self,
