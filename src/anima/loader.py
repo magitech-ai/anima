@@ -146,8 +146,10 @@ class LoaderService(Service, EntryTree):
         self.ctx = tree_ctx
         self.service_ctx = ctx
         # Mirrored entry services: (disposer, value, impl) per name.
-        # See _remirror_service.
+        # See _remirror_service. _remirroring guards that method against
+        # re-entrant calls for the same name (see its docstring).
         self._mirrors: dict[str, tuple[Disposer, Any, Any]] = {}
+        self._remirroring: set[str] = set()
         self.config = cfg
         self.filename = Path(cfg["filename"]).resolve() if cfg.get("filename") else None
         self.enable_logs = bool(cfg.get("enableLogs", False))
@@ -398,10 +400,31 @@ class LoaderService(Service, EntryTree):
         on the mounting ctx (last wins, matching the old loader's silent
         overwrite). Isolated names are never mirrored. A service provided
         directly on the mounting ctx owns its slot and is never clobbered.
-        The mirror disposer is tracked here and released when no entry
-        provides the name anymore; `provide` also registers it on the
-        providing fiber's effects, so an entry unload removes the mirror.
+        The mirror disposer is tracked here and released by this method
+        when no ACTIVE entry provides the name anymore: a provider going
+        away fires `internal/service` (its fiber's state change notifies
+        its entry ctx, and the event bus is shared across the context
+        tree), this method re-runs, finds no candidate, and calls the
+        tracked disposer. Note the disposer is registered as an effect
+        on the root fiber — `provide` runs outside any fiber body — not
+        on the providing entry, so entry unload alone does not remove
+        the mirror; removal depends on this notify chain.
+        Re-entrancy: the disposer (and `provide`, and the fan-out below)
+        all emit `internal/service`, which re-enters this method for the
+        same name. The `_remirroring` guard drops those re-entrant calls,
+        and the record is popped before the disposer is invoked, so a
+        re-entrant call can never see a stale record.
         """
+        if name in self._remirroring:
+            return
+        self._remirroring.add(name)
+        try:
+            self._remirror_service_locked(name)
+        finally:
+            self._remirroring.discard(name)
+
+    def _remirror_service_locked(self, name: str) -> None:
+        """Mirror one service; caller holds the `_remirroring` guard."""
         store = self.service_ctx.reflect.store
         tracked = self._mirrors.get(name)
         current_impl = store.get(name)
@@ -428,12 +451,16 @@ class LoaderService(Service, EntryTree):
         changed = False
         if candidate is None:
             if tracked is not None:
+                # Pop the record before invoking the disposer: the
+                # disposer notifies, which re-enters this method, and
+                # the re-entrant call must not see the stale record.
+                self._mirrors.pop(name, None)
                 tracked[0]()
-                del self._mirrors[name]
                 changed = True
         else:
             if tracked is None or tracked[1] is not candidate:
                 if tracked is not None:
+                    self._mirrors.pop(name, None)
                     tracked[0]()
                 disposer = self.service_ctx.reflect.provide(name, candidate)
                 self._mirrors[name] = (

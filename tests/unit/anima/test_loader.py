@@ -1,6 +1,7 @@
 """Unit tests for the loader service surface."""
 
 import asyncio
+import logging
 import sys
 import types
 from pathlib import Path
@@ -997,6 +998,57 @@ async def test_mirror_last_provider_wins(monkeypatch) -> None:
     assert ctx.get("xsvc", strict=False).marker == "first"
     await loader.enable("second")
     assert ctx.get("xsvc", strict=False).marker == "second"
+
+
+@pytest.mark.asyncio
+async def test_mirror_no_error_records_on_disable_remove_reenable(
+    monkeypatch, caplog
+) -> None:
+    """Disabling, removing and re-enabling a provider logs no emit errors.
+
+    Regression test: _remirror_service used to re-enter itself through
+    the disposer's notify, recursing until RecursionError and leaving
+    KeyError traces that the event bus swallowed.
+    """
+    _mirror_module(monkeypatch)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "first",
+                "name": "mirror_mod:ProvidingService",
+                "config": {"marker": "first"},
+            },
+            {
+                "id": "second",
+                "name": "mirror_mod:ProvidingService",
+                "config": {"marker": "second"},
+            },
+        ]
+    )
+    await ctx.flush()
+    assert ctx.get("xsvc", strict=False).marker == "second"
+    with caplog.at_level(logging.ERROR):
+        await loader.disable("second")
+        assert ctx.get("xsvc", strict=False).marker == "first"
+        await loader.enable("second")
+        assert ctx.get("xsvc", strict=False).marker == "second"
+        await loader.disable("second")
+        assert ctx.get("xsvc", strict=False).marker == "first"
+        entry = loader.resolve("second")
+        loader.remove("second")
+        await entry.parent.ctx.flush()
+        await ctx.flush()
+        assert ctx.get("xsvc", strict=False).marker == "first"
+        entry = loader.resolve("first")
+        loader.remove("first")
+        await entry.parent.ctx.flush()
+        await ctx.flush()
+        assert not ctx.has("xsvc")
+    assert "Error in emit listener" not in caplog.text
+    assert "RecursionError" not in caplog.text
+    assert "KeyError" not in caplog.text
 
 
 @pytest.mark.asyncio
