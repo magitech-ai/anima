@@ -106,6 +106,27 @@ async def _await_res(aw: Awaitable[Any]) -> Any:
     return await aw
 
 
+def _listener_label(callback: Callable[..., Any], index: int) -> str:
+    """Return a stable, human-readable label for a listener callback."""
+    name = getattr(callback, "__qualname__", None) or repr(callback)
+    return f"[{index}] {name}"
+
+
+async def _dispatch_one(
+    listener: Listener, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Any:
+    """Invoke one listener and await its result when it is awaitable.
+
+    Invoking the callback inside a coroutine (rather than in the dispatch loop)
+    keeps a listener that raises synchronously from aborting the dispatch before
+    its siblings are even started.
+    """
+    result = listener.callback(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
 class EventBus:
     """Event bus adhering to the event dispatch specification."""
 
@@ -230,23 +251,56 @@ class EventBus:
     async def parallel(
         self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any
     ) -> list[Any]:
-        """All listeners run concurrently and are awaited together."""
+        """All listeners run concurrently and are awaited together.
+
+        Every listener is awaited to completion whether or not a sibling fails,
+        so a failing listener can neither cancel the healthy ones nor mask the
+        other failures. Failures are attributed to the listener that raised
+        them: a single failure is re-raised unchanged (callers keep the concrete
+        exception type), two or more are raised together as an ``ExceptionGroup``
+        naming each failing listener in registration order. Each raised exception
+        also carries a note identifying its listener.
+
+        Raises:
+            BaseException: The listener's own exception when exactly one listener
+                failed, or the first non-``Exception`` failure (e.g. a
+                ``CancelledError``), which is always re-raised as-is.
+            ExceptionGroup: When two or more listeners failed with exceptions.
+        """
         listeners = self._filter_listeners(event, this_arg)
-        tasks = []
-        for listener in listeners:
-            res = listener.callback(*args, **kwargs)
-            if inspect.isawaitable(res):
-                tasks.append(res)
-            else:
-
-                async def _sync_wrapper(val: Any) -> Any:
-                    return val
-
-                tasks.append(_sync_wrapper(res))
-
-        if not tasks:
+        if not listeners:
             return []
-        return await asyncio.gather(*tasks)
+        results = await asyncio.gather(
+            *(_dispatch_one(listener, args, kwargs) for listener in listeners),
+            return_exceptions=True,
+        )
+        failures: list[tuple[str, Exception]] = []
+        fatal: BaseException | None = None
+        for index, (listener, result) in enumerate(zip(listeners, results)):
+            if not isinstance(result, BaseException):
+                continue
+            label = _listener_label(listener.callback, index)
+            result.add_note(f"parallel listener {label} for event {event!r}")
+            if isinstance(result, Exception):
+                failures.append((label, result))
+            elif fatal is None:
+                # CancelledError / KeyboardInterrupt / GeneratorExit: not
+                # aggregatable (ExceptionGroup holds Exceptions only) and must
+                # never be swallowed, so re-raise it once every listener has
+                # finished.
+                fatal = result
+        if fatal is not None:
+            raise fatal
+        if not failures:
+            return list(results)
+        if len(failures) == 1:
+            raise failures[0][1]
+        labels = ", ".join(label for label, _ in failures)
+        raise ExceptionGroup(
+            f"{len(failures)} of {len(listeners)} listeners failed "
+            f"for event {event!r}: {labels}",
+            [exc for _, exc in failures],
+        )
 
     async def serial(
         self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any

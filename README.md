@@ -106,7 +106,7 @@ Load a profile with `load_profile(ctx, "anima.yaml")`. Environment variables int
 
 * **The 5 Event Modes**:
   * `emit`: Synchronous broadcast (fire-and-forget).
-  * `parallel`: Asynchronous concurrent broadcast (`asyncio.gather`).
+  * `parallel`: Asynchronous concurrent broadcast. Every listener settles before anything is reported: one failure re-raises the original exception unchanged, two or more raise an `ExceptionGroup` naming each failing listener in registration order.
   * `serial`: Sequential async execution; bails on first non-None, non-False result.
   * `bail`: Synchronous version of serial.
   * `waterfall`: Around-middleware pipeline passing `(*args, next)`. Enables non-invasive request rewrites, security guards, and vetoes.

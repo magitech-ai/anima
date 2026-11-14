@@ -1,4 +1,5 @@
 import asyncio
+import functools
 from typing import Any
 
 import pytest
@@ -84,6 +85,141 @@ async def test_parallel_dispatch_empty_and_mixed():
 
     results = await bus.parallel("mixed")
     assert results == ["async_val", "sync_val"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_aggregates_multiple_failures():
+    bus = EventBus()
+    completed = []
+
+    async def boom_first(_x):
+        raise RuntimeError("first-boom")
+
+    async def ok(_x):
+        await asyncio.sleep(0.01)
+        completed.append("ok")
+        return "ok"
+
+    async def boom_last(_x):
+        raise ValueError("second-boom")
+
+    bus.on("work", boom_first)
+    bus.on("work", ok)
+    bus.on("work", boom_last)
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        await bus.parallel("work", 1)
+
+    group = excinfo.value
+    # Both failures surface, attributed to their own listener.
+    assert [type(e).__name__ for e in group.exceptions] == [
+        "RuntimeError",
+        "ValueError",
+    ]
+    assert "2 of 3 listeners failed for event 'work'" in group.message
+    assert "boom_first" in group.message
+    assert "boom_last" in group.message
+    # The healthy listener still ran to completion (no sibling cancellation).
+    assert completed == ["ok"]
+    for exc in group.exceptions:
+        assert any("parallel listener" in n for n in getattr(exc, "__notes__", []))
+
+
+@pytest.mark.asyncio
+async def test_parallel_single_failure_keeps_concrete_exception_type():
+    bus = EventBus()
+    error = RuntimeError("only-one")
+    completed = []
+
+    def raises_sync(_x):
+        raise error
+
+    async def ok(_x):
+        completed.append("ok")
+        return "ok"
+
+    bus.on("one", raises_sync)
+    bus.on("one", ok)
+
+    # Backwards compatible: one failure re-raises the original exception object,
+    # even though the sibling is still awaited to completion.
+    with pytest.raises(RuntimeError) as excinfo:
+        await bus.parallel("one", 1)
+
+    assert excinfo.value is error
+    assert completed == ["ok"]
+    assert any("parallel listener" in n for n in error.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_parallel_failure_labels_fall_back_to_repr():
+    bus = EventBus()
+
+    async def boom(_x):
+        raise RuntimeError("boom")
+
+    # functools.partial has no __qualname__, exercising the repr() fallback.
+    bus.on("partial", functools.partial(boom))
+    bus.on("partial", functools.partial(boom))
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        await bus.parallel("partial", 1)
+
+    assert len(excinfo.value.exceptions) == 2
+    assert "partial" in excinfo.value.message
+
+
+@pytest.mark.asyncio
+async def test_parallel_base_exception_is_not_aggregated_or_swallowed():
+    class FatalSignal(BaseException):
+        """Stand-in for CancelledError / KeyboardInterrupt style failures."""
+
+    bus = EventBus()
+    completed = []
+
+    def boom(_x):
+        raise RuntimeError("boom")
+
+    def fatal_one(_x):
+        raise FatalSignal("first-fatal")
+
+    def fatal_two(_x):
+        raise FatalSignal("second-fatal")
+
+    async def ok(_x):
+        completed.append("ok")
+        return "ok"
+
+    bus.on("fatal", fatal_one)
+    bus.on("fatal", boom)
+    bus.on("fatal", fatal_two)
+    bus.on("fatal", ok)
+
+    # A BaseException cannot live inside an ExceptionGroup and silently dropping
+    # it would be worse: the first one is re-raised once every listener settled.
+    with pytest.raises(FatalSignal) as excinfo:
+        await bus.parallel("fatal", 1)
+
+    assert excinfo.value.args == ("first-fatal",)
+    assert completed == ["ok"]
+    assert any("parallel listener" in n for n in excinfo.value.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_parallel_all_succeed_returns_gather_order():
+    bus = EventBus()
+
+    async def slow():
+        await asyncio.sleep(0.02)
+        return "slow"
+
+    async def fast():
+        return "fast"
+
+    bus.on("order", slow)
+    bus.on("order", fast)
+
+    assert await bus.parallel("order") == ["slow", "fast"]
 
 
 @pytest.mark.asyncio
