@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
@@ -29,7 +30,7 @@ class DisposableList:
 
     def __init__(self) -> None:
         self._sn = 0
-        self._map: dict[int, Any] = {}
+        self._map: OrderedDict[int, Any] = OrderedDict()
         self._weak: dict[Any, int] = {}
 
     @property
@@ -45,6 +46,15 @@ class DisposableList:
         self._weak[value] = sn
         return lambda: self._map.pop(sn, None)
 
+    def unshift(self, value: Any) -> Callable[[], None]:
+        """Prepend a disposable and return a disposer that removes it."""
+        self._sn += 1
+        sn = self._sn
+        self._map[sn] = value
+        self._map.move_to_end(sn, last=False)
+        self._weak[value] = sn
+        return lambda: self._map.pop(sn, None)
+
     def delete(self, value: Any) -> bool:
         """Remove a specific disposable by identity. Returns True if found."""
         sn = self._weak.get(value)
@@ -54,11 +64,10 @@ class DisposableList:
         return self._map.pop(sn, None) is not None
 
     def clear(self) -> list[Any]:
-        """Remove and return all disposables in reverse insertion order."""
+        """Remove and return all disposables in list order (front first)."""
         values = list(self._map.values())
         self._map.clear()
         self._weak.clear()
-        values.reverse()
         return values
 
     def __iter__(self) -> Any:

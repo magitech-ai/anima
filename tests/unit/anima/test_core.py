@@ -538,14 +538,22 @@ class TestDisposableList:
         assert dl.length == 1
         assert dl.delete("a") is False  # already deleted
 
-    def test_clear_returns_reversed(self):
+    def test_clear_returns_list_order(self):
+        """clear() returns values in list order (front first), matching iteration."""
         dl = DisposableList()
         dl.push("a")
         dl.push("b")
         dl.push("c")
         values = dl.clear()
-        assert values == ["c", "b", "a"]
+        assert values == ["a", "b", "c"]  # symmetric with iteration order
         assert dl.length == 0
+
+    def test_unshift_prepends(self):
+        dl = DisposableList()
+        dl.push("b")
+        dl.unshift("a")
+        assert list(dl) == ["a", "b"]
+        assert dl.length == 2
 
     def test_iter(self):
         dl = DisposableList()
