@@ -1377,3 +1377,49 @@ async def test_on_internal_config_sync_next_fn() -> None:
     ctx = Context()
     loader = LoaderService(ctx)
     assert await loader._on_internal_config({"a": 1}, lambda: {"a": 1}) == {"a": 1}
+
+
+@pytest.mark.asyncio
+async def test_enable_disable_evaluates_jsexpr_disabled_flag(tmp_path: Path) -> None:
+    """enable()/disable() inspect evaluated !!js disabled expressions, not dict truthiness."""
+    mod_file = tmp_path / "jsexpr_toggle_mod.py"
+    mod_file.write_text(
+        "from anima import Service\n"
+        "class EnabledSvc(Service):\n"
+        "    def __init__(self, ctx, config=None):\n"
+        "        super().__init__(ctx, 'js_enabled')\n"
+        "class DisabledSvc(Service):\n"
+        "    def __init__(self, ctx, config=None):\n"
+        "        super().__init__(ctx, 'js_disabled')\n",
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(tmp_path))
+    try:
+        profile = tmp_path / "jsexpr.yaml"
+        profile.write_text(
+            "- id: en\n"
+            "  name: jsexpr_toggle_mod:EnabledSvc\n"
+            "  disabled: !!js process.platform === 'never-matches'\n"
+            "- id: dis\n"
+            "  name: jsexpr_toggle_mod:DisabledSvc\n"
+            "  disabled: !!js process.platform !== 'never-matches'\n",
+            encoding="utf-8",
+        )
+        ctx = Context()
+        loader = LoaderService(ctx)
+        loader.load(profile)
+        await ctx.flush()
+
+        assert ctx.has("js_enabled")
+        assert not ctx.has("js_disabled")
+
+        await loader.disable("en")
+        await ctx.flush()
+        assert not ctx.has("js_enabled")
+
+        await loader.enable("dis")
+        await ctx.flush()
+        assert ctx.has("js_disabled")
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("jsexpr_toggle_mod", None)

@@ -259,14 +259,14 @@ class LoaderService(Service, EntryTree):
     async def enable(self, entry_id: str) -> None:
         """Enable and mount a previously disabled entry."""
         entry = self.resolve(entry_id)
-        if entry.options.get("disabled"):
+        if entry._disabled_of(entry.options):
             await self.update(entry_id, {"disabled": False})
         await self.await_all()
 
     async def disable(self, entry_id: str) -> None:
         """Disable and unload an active entry."""
         entry = self.resolve(entry_id)
-        if not entry.options.get("disabled"):
+        if not entry._disabled_of(entry.options):
             await self.update(entry_id, {"disabled": True})
         # The dispose is scheduled on the entry ctx by Entry.update; flush
         # that ctx so the disposal is observed before returning. await_all
