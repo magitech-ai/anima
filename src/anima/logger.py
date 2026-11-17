@@ -6,6 +6,7 @@ Provides structured, namespaced logging with reversible exporters and level filt
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import sys
@@ -347,9 +348,13 @@ class Logger:
                 self._log(type_name, level, err.__cause__)
                 return
             if hasattr(err, "exceptions"):
-                for sub_err in err.exceptions:  # type: ignore[attr-defined]
-                    self._log(type_name, level, sub_err)
-                return
+                sub_errors = list(err.exceptions)  # type: ignore[attr-defined]
+                if sub_errors:
+                    for sub_err in sub_errors:
+                        self._log(type_name, level, sub_err)
+                    return
+                # Empty aggregate (or a duck-typed one): fall through and log
+                # the aggregate itself instead of swallowing it
 
         sn = self.service._next_sn()
         ts = time.time()
@@ -374,7 +379,14 @@ class Logger:
                 or self.service.default_level
             )
             if level <= target_level:
-                exporter.export(msg)
+                try:
+                    exporter.export(msg)
+                except Exception:
+                    # One broken exporter must not starve the others nor
+                    # propagate into the call site that logged.
+                    logging.getLogger("anima.logger").exception(
+                        "Error in exporter %r", exporter
+                    )
 
     def error(self, *args: Any) -> None:
         self._log("error", LoggerLevel.ERROR, *args)

@@ -447,3 +447,41 @@ def test_osc_hyperlink_text_counts_as_visible_width():
     assert out.startswith("\x1b]8;;https://example.com\x1b\\")
     assert out.endswith("click ...")
     assert "example.com" not in out.replace("\x1b]8;;https://example.com\x1b\\", "")
+def test_throwing_exporter_does_not_starve_others_or_reach_caller():
+    svc = LoggerService(Context())
+
+    class BadExporter(Exporter):
+        def export(self, message: Message):
+            raise RuntimeError("exporter exploded")
+
+    seen = []
+
+    class GoodExporter(Exporter):
+        def export(self, message: Message):
+            seen.append(message)
+
+    svc.exporter(BadExporter())
+    svc.exporter(GoodExporter())
+
+    svc.error("still delivered")
+    assert [m.args for m in seen] == [["still delivered"]]
+
+
+def test_empty_duck_typed_exception_group_still_logs_itself():
+    svc = LoggerService(Context())
+    logs = []
+
+    class CapturingExporter(Exporter):
+        def export(self, message: Message):
+            logs.append(message)
+
+    svc.exporter(CapturingExporter())
+
+    class MockEmptyGroup(Exception):
+        def __init__(self, msg):
+            super().__init__(msg)
+            self.exceptions = []
+
+    svc.error(MockEmptyGroup("bundle with no children"))
+    assert len(logs) == 1
+    assert "bundle with no children" in str(logs[0].args[0])
