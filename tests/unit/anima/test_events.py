@@ -415,3 +415,143 @@ async def test_event_bus_filtering_and_global():
 
     bus.emit("msg", "hello", this_arg=ctx1)
     assert calls == ["global:hello", "no_ctx:hello", "ctx2:hello"]
+
+
+def test_listener_removed_mid_dispatch_is_skipped():
+    bus = EventBus()
+    calls: list[str] = []
+    disposers: dict[str, Any] = {}
+
+    def second() -> None:
+        calls.append("second")
+
+    def first() -> None:
+        calls.append("first")
+        disposers["second"]()
+
+    bus.on("evt", first)
+    disposers["second"] = bus.on("evt", second)
+
+    bus.emit("evt")
+    # `first` disposes `second` before its turn: it must not fire
+    assert calls == ["first"]
+
+
+@pytest.mark.parametrize("dispatch", ["serial", "bail"])
+async def test_listener_removed_mid_serial_and_bail_dispatch_is_skipped(dispatch: str):
+    bus = EventBus()
+    calls: list[str] = []
+    disposers: dict[str, Any] = {}
+
+    def second() -> None:
+        calls.append("second")
+
+    def first() -> None:
+        calls.append("first")
+        disposers["second"]()
+
+    bus.on("evt", first)
+    disposers["second"] = bus.on("evt", second)
+
+    if dispatch == "serial":
+        await bus.serial("evt")
+    else:
+        bus.bail("evt")
+    assert calls == ["first"], dispatch
+
+
+def test_once_listener_fires_once_under_reentrant_emit():
+    bus = EventBus()
+    calls: list[str] = []
+    depth = 0
+
+    def reentrant() -> None:
+        nonlocal depth
+        calls.append("reentrant")
+        if depth == 0:
+            depth += 1
+            bus.emit("evt")
+
+    def one_shot() -> None:
+        calls.append("once")
+
+    bus.on("evt", reentrant)
+    bus.once("evt", one_shot)
+
+    bus.emit("evt")
+    # The outer snapshot still holds the one-shot listener after the inner
+    # dispatch consumed it: it must not run a second time
+    assert calls == ["reentrant", "reentrant", "once"]
+
+
+def test_once_sync_wrapper_ignores_stale_snapshot_invocation():
+    bus = EventBus()
+    calls: list[str] = []
+
+    def one_shot() -> None:
+        calls.append("once")
+
+    bus.once("evt", one_shot)
+    stale = list(bus._listeners["evt"])
+    bus.emit("evt")
+    assert calls == ["once"]
+
+    stale[0].callback()
+    assert calls == ["once"]
+
+
+async def test_once_async_wrapper_ignores_stale_snapshot_invocation():
+    bus = EventBus()
+    calls: list[str] = []
+
+    async def one_shot() -> None:
+        calls.append("once")
+
+    bus.once("evt", one_shot)
+    stale = list(bus._listeners["evt"])
+    await bus.serial("evt")
+    assert calls == ["once"]
+
+    await stale[0].callback()
+    assert calls == ["once"]
+
+
+async def test_parallel_skips_listener_removed_during_dispatch():
+    bus = EventBus()
+    calls: list[str] = []
+    disposers: dict[str, Any] = {}
+
+    def second() -> None:
+        calls.append("second")
+
+    def first() -> None:
+        calls.append("first")
+        disposers["second"]()
+
+    bus.on("evt", first)
+    disposers["second"] = bus.on("evt", second)
+
+    await bus.parallel("evt")
+    assert calls == ["first"]
+
+
+async def test_waterfall_skips_listener_removed_before_its_turn():
+    bus = EventBus()
+    calls: list[str] = []
+    disposers: dict[str, Any] = {}
+
+    def skipped(*_args: Any, next) -> Any:  # type: ignore[no-untyped-def]
+        calls.append("skipped")
+        return next()
+
+    async def first(*_args: Any, next) -> Any:  # type: ignore[no-untyped-def]
+        calls.append("first")
+        disposers["skipped"]()
+        return await next()
+
+    bus.on("evt", first)
+    disposers["skipped"] = bus.on("evt", skipped)
+
+    result = await bus.waterfall("evt", "payload")
+    assert calls == ["first"]
+    assert result == "payload"
