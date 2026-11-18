@@ -1,12 +1,17 @@
-# Baseline pins (0.2.0, Phase 0b, 2026-11-11)
+# Parity
 
-- Version: `0.2.0` (first minor bump after 0.1.0; the Phase 0a re-sync ships here).
-- Verified suites against this ref (Python 3.12, sibling-layout clones):
-  anima 538 passed (100% coverage), magitech-harness 118/118 (100%),
-  mth-plugins 260/260 (100%).
-- The Phase 0a reflect fix is in main (merge commit `fb3b9c1`):
-  the reflect service's special-property branches use
-  `object.__getattribute__` / `object.__setattr__` so a missing
-  reserved-word attribute raises `AttributeError` instead of recursing.
-- Sibling pins: magitech-harness declares `anima>=0.1,<0.2`;
-  mth-plugins declares the same range as a direct dependency.
+The authoritative 1.0 parity map lives in the harness repo:
+[`magitech-harness/PARITY.md`](../magitech-harness/PARITY.md). It is the Phase 8
+re-audit deliverable that proves acceptance criterion 1 (every in-scope item
+DONE or PARTIAL-with-accepted-gap, nothing MISSING in-scope).
+
+Anima-specific pins at the 1.0 gate:
+
+- Version `0.2.0`, audited at commit `02f728e` on `main`.
+- Suite: 1228 tests, 100% statement + branch coverage; CI green on all 6 legs.
+- Accepted anima divergences (Malcom, via the ratified conformance map):
+  PIN-01 (parallel dispatch raises the first error, not an aggregate) and
+  PIN-02 (`Context.provide` notifies at registration). Both are recorded in the
+  authoritative map and covered by conformance behavior tests.
+- The reference is frozen at `fcc0ad46…` (0.2.2-rc.1) for the 1.0 audit; rc.3
+  drift is in the post-1.0 appendix of the authoritative map.
