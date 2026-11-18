@@ -1423,3 +1423,33 @@ async def test_enable_disable_evaluates_jsexpr_disabled_flag(tmp_path: Path) -> 
     finally:
         sys.path.remove(str(tmp_path))
         sys.modules.pop("jsexpr_toggle_mod", None)
+
+
+@pytest.mark.asyncio
+async def test_load_duplicate_ids_fail_loud_before_mounting(monkeypatch):
+    """#13: two rows with the same id raise synchronously, nothing is mounted."""
+    ctx = Context()
+    dummy_mod = types.ModuleType("dup_mod")
+    dummy_mod.comp = lambda c, config=None: None
+    monkeypatch.setitem(sys.modules, "dup_mod", dummy_mod)
+    loader = LoaderService(ctx)
+    rows = [{"id": "x", "name": "dup_mod:comp"}, {"id": "x", "name": "dup_mod:comp"}]
+    with pytest.raises(ValueError, match="duplicate entry id 'x'"):
+        loader.load(rows)
+    await ctx.flush()
+    assert loader.root.data == []
+    assert loader.store == {}
+
+
+@pytest.mark.asyncio
+async def test_load_rows_without_ids_are_not_duplicates(monkeypatch):
+    """#13: the duplicate guard only looks at rows that already have an id."""
+    ctx = Context()
+    dummy_mod = types.ModuleType("noid_mod")
+    dummy_mod.comp = lambda c, config=None: None
+    monkeypatch.setitem(sys.modules, "noid_mod", dummy_mod)
+    loader = LoaderService(ctx)
+    loader.load([{"name": "noid_mod:comp"}, {"name": "noid_mod:comp"}])
+    await ctx.flush()
+    assert len(loader.root.data) == 2
+    assert len({row["id"] for row in loader.root.data}) == 2

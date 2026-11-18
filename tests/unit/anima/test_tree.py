@@ -1752,3 +1752,39 @@ async def test_volatile_ordinary_value_changed_via_env_restarts(
     assert entry.fiber is not None and entry.fiber.state == FiberState.ACTIVE
     assert entry.fiber.config["theme"].get() == "light"
     assert entry.fiber.config["level"] == 4
+    assert len(partials) == 1
+    assert volatile_updates == []
+    assert entry.fiber is not None and entry.fiber.state == FiberState.ACTIVE
+    assert entry.fiber.config["theme"].get() == "light"
+    assert entry.fiber.config["level"] == 4
+
+
+# --- duplicate entry ids fail loud (issue #13) ---
+
+
+@pytest.mark.asyncio
+async def test_create_duplicate_id_raises_and_leaves_tree_alone(mod: Any) -> None:
+    """#13: a second entry with a live id is an error, not a silent reuse."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    await loader.create(_row(id="dup"))
+    rows_before = list(loader.root.data)
+    entries_before = dict(loader.store)
+    with pytest.raises(ValueError, match="entry id 'dup' already exists"):
+        await loader.create(_row(id="dup"))
+    assert loader.root.data == rows_before
+    assert loader.store == entries_before
+
+
+@pytest.mark.asyncio
+async def test_group_update_duplicate_rows_raise_before_mutating(mod: Any) -> None:
+    """#13: a config listing the same id twice fails loud and keeps old data."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    old_rows = loader.root.data
+    with pytest.raises(
+        ValueError, match="duplicate entry id 'twice'"
+    ):
+        await loader.root.update([_row(id="twice"), _row(id="twice")])
+    assert loader.root.data is old_rows
+    assert "twice" not in loader.store

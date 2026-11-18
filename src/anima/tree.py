@@ -226,6 +226,21 @@ def _sort_options_keys(options: dict[str, Any]) -> None:
     options.update(ordered)
 
 
+def check_unique_ids(rows: list[dict[str, Any]]) -> None:
+    """Raise ValueError when two rows carry the same entry id.
+
+    Rows without an id are ignored: ids are assigned on mount.
+    """
+    seen: set[Any] = set()
+    for row in rows:
+        key = row.get("id")
+        if not key:
+            continue
+        if key in seen:
+            raise ValueError(f"duplicate entry id {key!r}; ids must be unique")
+        seen.add(key)
+
+
 def _in_fiber_scope(owner: Context, scope: Context) -> bool:
     """Whether ``owner`` is ``scope`` or descends from it.
 
@@ -352,6 +367,10 @@ class EntryTree(ABC):
         """Create an entry in the root group or a nested group; return its full id."""
         group = self.resolve_group(parent)
         entry_id = self.ensure_id(options)
+        if entry_id in self.store:
+            raise ValueError(
+                f"entry id {entry_id!r} already exists; ids must be unique"
+            )
         group.data.insert(_normalize_position(position, len(group.data)), options)
         group.tree.write()
         self.commit(EntryChange(id=entry_id, group=group, options=options))
@@ -878,12 +897,13 @@ class EntryGroup:
     async def update(self, config: list[dict[str, Any]]) -> None:
         """Replace data wholesale and reconcile entries, keeping fibers on reorder."""
         old_config = self.data
-        self.data = config
-        old_map = {row["id"]: row for row in old_config if "id" in row}
+        check_unique_ids(config)
         new_map: dict[Any, dict[str, Any]] = {}
         for row in config:
             key = row.get("id") or object()
             new_map[key] = row
+        self.data = config
+        old_map = {row["id"]: row for row in old_config if "id" in row}
         ids = list({**old_map, **new_map})
 
         async def _apply(entry_id: Any) -> None:

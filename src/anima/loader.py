@@ -23,6 +23,7 @@ from anima.tree import (
     EntryChange,
     EntryGroup,
     EntryTree,
+    check_unique_ids,
     resolve_component_target,
 )
 from anima.tree import (
@@ -244,6 +245,10 @@ class LoaderService(Service, EntryTree):
             raise TypeError("Profile configuration components must resolve to a list")
 
         entries = [_normalise_row(item) for item in interpolated_entries]
+        # Fail loud here, not inside the scheduled load: a duplicate id would
+        # otherwise collapse to one entry and surface only as an unretrieved
+        # task exception (issue #13).
+        check_unique_ids(entries)
         # Scheduled on the service ctx (not the tree ctx) so the established
         # `load(); await ctx.flush()` contract settles the load: a parent
         # flush does not observe tasks scheduled on child contexts, and the
