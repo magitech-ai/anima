@@ -1754,9 +1754,6 @@ async def test_volatile_ordinary_value_changed_via_env_restarts(
     assert entry.fiber.config["level"] == 4
     assert len(partials) == 1
     assert volatile_updates == []
-    assert entry.fiber is not None and entry.fiber.state == FiberState.ACTIVE
-    assert entry.fiber.config["theme"].get() == "light"
-    assert entry.fiber.config["level"] == 4
 
 
 # --- duplicate entry ids fail loud (issue #13) ---
@@ -1782,9 +1779,7 @@ async def test_group_update_duplicate_rows_raise_before_mutating(mod: Any) -> No
     ctx = Context()
     loader = LoaderService(ctx)
     old_rows = loader.root.data
-    with pytest.raises(
-        ValueError, match="duplicate entry id 'twice'"
-    ):
+    with pytest.raises(ValueError, match="duplicate entry id 'twice'"):
         await loader.root.update([_row(id="twice"), _row(id="twice")])
     assert loader.root.data is old_rows
     assert "twice" not in loader.store
