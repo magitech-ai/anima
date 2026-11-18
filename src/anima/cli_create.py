@@ -46,6 +46,13 @@ def is_enoent(error: Any) -> bool:
     return getattr(error, "code", None) == "ENOENT"
 
 
+def is_cwd_or_ancestor(target: Path, cwd: Path) -> bool:
+    """Return True when `target` resolves to `cwd` or to one of its ancestors."""
+    resolved = target.resolve()
+    here = cwd.resolve()
+    return resolved == here or resolved in here.parents
+
+
 def confirm(
     message: str,
     initial: bool = True,
@@ -78,7 +85,14 @@ class Scaffold:
 
     def prepare(self) -> None:
         """Create the target directory, removing it first if forced."""
+        cwd = Path.cwd()
         root_dir = self._target_dir()
+        if is_cwd_or_ancestor(root_dir, cwd):
+            print(
+                f'  error: refusing to scaffold into "{self.project}": the target '
+                "resolves to the working directory or one of its parents"
+            )
+            sys.exit(1)
         if not root_dir.exists():
             root_dir.mkdir(parents=True, exist_ok=True)
             self.root_dir = str(root_dir)

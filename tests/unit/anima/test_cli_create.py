@@ -11,6 +11,7 @@ import pytest
 from anima.cli_create import (
     Scaffold,
     confirm,
+    is_cwd_or_ancestor,
     is_enoent,
     scaffold,
     supports,
@@ -1161,3 +1162,97 @@ class TestStageYarnBinDownloadCoverage:
             # cache_file should NOT exist (extracted was None, nothing written)
             cache_file = cache_dir / "yarn-1.22.0.cjs"
             assert not cache_file.exists()
+            s._stage_yarn_bin()
+            # cache_file should NOT exist (extracted was None, nothing written)
+            cache_file = cache_dir / "yarn-1.22.0.cjs"
+            assert not cache_file.exists()
+
+
+class TestIsCwdOrAncestor:
+    def test_same_directory(self, tmp_path: Path):
+        assert is_cwd_or_ancestor(tmp_path, tmp_path) is True
+
+    def test_parent_directory(self, tmp_path: Path):
+        child = tmp_path / "child"
+        child.mkdir()
+        assert is_cwd_or_ancestor(tmp_path, child) is True
+
+    def test_grandparent_directory(self, tmp_path: Path):
+        deep = tmp_path / "a" / "b"
+        deep.mkdir(parents=True)
+        assert is_cwd_or_ancestor(tmp_path, deep) is True
+
+    def test_sibling_and_child_are_allowed(self, tmp_path: Path):
+        work = tmp_path / "work"
+        sibling = tmp_path / "sibling"
+        work.mkdir()
+        sibling.mkdir()
+        child = work / "project"
+        assert is_cwd_or_ancestor(child, work) is False
+        assert is_cwd_or_ancestor(sibling, work) is False
+
+
+class TestScaffoldRejectsAncestorTargets:
+    def test_dotdot_target_exits_and_keeps_parent(self, tmp_path: Path):
+        work = tmp_path / "work"
+        work.mkdir()
+        (tmp_path / "keep.txt").write_text("x")
+        s = Scaffold({"yes": True})
+        s.project = ".."
+        with (
+            patch("anima.cli_create.Path.cwd", return_value=work),
+            pytest.raises(SystemExit) as exc,
+        ):
+            s.prepare()
+        assert exc.value.code == 1
+        assert (tmp_path / "keep.txt").read_text() == "x"
+        assert work.is_dir()
+
+    def test_dot_target_exits_and_keeps_cwd(self, tmp_path: Path):
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "keep.txt").write_text("x")
+        s = Scaffold({"yes": True})
+        s.project = ""
+        with (
+            patch("anima.cli_create.Path.cwd", return_value=work),
+            pytest.raises(SystemExit) as exc,
+        ):
+            s.prepare()
+        assert exc.value.code == 1
+        assert (work / "keep.txt").read_text() == "x"
+
+    def test_grandparent_target_exits(self, tmp_path: Path):
+        deep = tmp_path / "a" / "b"
+        deep.mkdir(parents=True)
+        s = Scaffold({"yes": True})
+        s.project = "../.."
+        with (
+            patch("anima.cli_create.Path.cwd", return_value=deep),
+            pytest.raises(SystemExit) as exc,
+        ):
+            s.prepare()
+        assert exc.value.code == 1
+        assert (tmp_path / "a").is_dir()
+
+    def test_error_names_the_rejected_target(self, tmp_path: Path, capsys):
+        work = tmp_path / "work"
+        work.mkdir()
+        s = Scaffold({"yes": True})
+        s.project = ".."
+        with (
+            patch("anima.cli_create.Path.cwd", return_value=work),
+            pytest.raises(SystemExit),
+        ):
+            s.prepare()
+        out = capsys.readouterr().out
+        assert 'refusing to scaffold into ".."' in out
+
+    def test_nested_target_still_created(self, tmp_path: Path):
+        work = tmp_path / "work"
+        work.mkdir()
+        s = Scaffold({})
+        s.project = "nested/app"
+        with patch("anima.cli_create.Path.cwd", return_value=work):
+            s.prepare()
+        assert (work / "nested" / "app").is_dir()
