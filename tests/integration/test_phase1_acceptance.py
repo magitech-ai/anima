@@ -421,11 +421,10 @@ async def test_acceptance_dispatch_modes() -> None:
     assert ("par-slow", None) in seen
     assert ("par-fast", None) in seen
 
-    # Parallel failure: every listener still runs to completion (the
-    # oracle waits for all of them — events.ts:183-188 uses all-settled
-    # semantics — and then reports the failures as one aggregate error).
-    # Anima raises the first error instead of an aggregate; pin the
-    # shared half here (all listeners settle) and the first error.
+    # Parallel failure: every listener runs to completion (all-settled
+    # semantics), then failures are reported. One failure surfaces the
+    # original error; two or more surface an ExceptionGroup (parity with
+    # the oracle's aggregate behavior).
     failing_ctx = Context()
     settled: list[str] = []
 
@@ -443,6 +442,21 @@ async def test_acceptance_dispatch_modes() -> None:
         await failing_ctx.parallel("work", "w")
     await asyncio.sleep(0.1)
     assert settled == ["slow-ok"]
+
+    # Two failures now aggregate into an ExceptionGroup (parity: PIN-01 done).
+    group_ctx = Context()
+
+    async def boom_a(_x: Any) -> Any:
+        raise RuntimeError("failure-a")
+
+    async def boom_b(_x: Any) -> Any:
+        raise RuntimeError("failure-b")
+
+    group_ctx.on("work", boom_a, mode=EventMode.PARALLEL)
+    group_ctx.on("work", boom_b, mode=EventMode.PARALLEL)
+    with pytest.raises(ExceptionGroup) as group_info:
+        await group_ctx.parallel("work", "w")
+    assert len(group_info.value.exceptions) == 2
 
     # Waterfall: outermost wraps the chain; the default runs innermost.
     result = await ctx.waterfall(
