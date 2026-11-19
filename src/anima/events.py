@@ -122,8 +122,11 @@ async def _dispatch_one(
 
     Invoking the callback inside a coroutine (rather than in the dispatch loop)
     keeps a listener that raises synchronously from aborting the dispatch before
-    its siblings are even started.
+    its siblings are even started. A listener disposed by a sibling during
+    dispatch is skipped at invocation time.
     """
+    if listener.removed:
+        return None
     result = listener.callback(*args, **kwargs)
     if inspect.isawaitable(result):
         return await result
@@ -282,7 +285,11 @@ class EventBus:
                 ``CancelledError``), which is always re-raised as-is.
             ExceptionGroup: When two or more listeners failed with exceptions.
         """
-        listeners = [listener for listener in self._filter_listeners(event, this_arg) if not listener.removed]
+        listeners = [
+            listener
+            for listener in self._filter_listeners(event, this_arg)
+            if not listener.removed
+        ]
         if not listeners:
             return []
         results = await asyncio.gather(
