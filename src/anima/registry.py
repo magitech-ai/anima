@@ -267,9 +267,12 @@ class RegistryService:
         self.ctx.emit("internal/plugin", fiber)
 
         if fiber.check_dependencies():
+            load_coro = fiber.load()
             try:
-                self.ctx._schedule_task(fiber.load())
+                self.ctx._schedule_task(load_coro)
             except RuntimeError:
-                pass  # No running event loop
+                # Scheduling failed (e.g. no running event loop): close the
+                # coroutine so the interpreter does not leak an unawaited one.
+                load_coro.close()
 
         return fiber
