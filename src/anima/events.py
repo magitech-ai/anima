@@ -38,13 +38,21 @@ class DisposableList:
         """Return the number of disposables in the list."""
         return len(self._map)
 
+    def _make_disposer(self, sn: int, value: Any) -> Callable[[], None]:
+        def dispose() -> None:
+            self._map.pop(sn, None)
+            if self._weak.get(value) == sn:
+                self._weak.pop(value, None)
+
+        return dispose
+
     def push(self, value: Any) -> Callable[[], None]:
         """Append a disposable and return a disposer that removes it."""
         self._sn += 1
         sn = self._sn
         self._map[sn] = value
         self._weak[value] = sn
-        return lambda: self._map.pop(sn, None)
+        return self._make_disposer(sn, value)
 
     def unshift(self, value: Any) -> Callable[[], None]:
         """Prepend a disposable and return a disposer that removes it."""
@@ -53,7 +61,7 @@ class DisposableList:
         self._map[sn] = value
         self._map.move_to_end(sn, last=False)
         self._weak[value] = sn
-        return lambda: self._map.pop(sn, None)
+        return self._make_disposer(sn, value)
 
     def delete(self, value: Any) -> bool:
         """Remove a specific disposable by identity. Returns True if found."""
