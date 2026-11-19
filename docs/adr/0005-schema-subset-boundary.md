@@ -6,12 +6,12 @@ Status: accepted
 ## Context
 
 Plugin Configs are written with the schema library (`Schema`). A second,
-separate validation library is used elsewhere in the upstream project for
+a separate validation library is used elsewhere for
 RPC, protocol, and draft validation — never in a plugin Config. The earlier
 Phase 1 scope text listed constructs from that second library
 (`literal` / `enum` / `tuple` / `intersect` / `record` / `date`,
 refinements, discriminated unions) as schema targets. Verified by grep
-across the upstream project: none of those appear in a plugin Config.
+across the project: none of those appear in a plugin Config.
 Porting them would have spent the deepest port in the phase on constructs
 nothing uses, while missing the ones every Config needs.
 

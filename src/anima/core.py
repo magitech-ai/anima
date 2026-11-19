@@ -150,7 +150,7 @@ class FiberState(str, Enum):
 
 
 # Name-based wire mapping (ADR 0009): the numeric value each state
-# carries on the wire in the upstream runtime. Anima keeps its string
+# carried on the wire by the model provider. Anima keeps its string
 # enum; no code compares states numerically or relies on their order.
 FIBER_STATE_WIRE_VALUES: dict[FiberState, int] = {
     FiberState.PENDING: 0,

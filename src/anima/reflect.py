@@ -1,6 +1,6 @@
 """Reflect service for service property access and introspection.
 
-Python port of the ReflectService: manages service properties,
+Reflect service: manages service properties,
 accessors, mixins, and change notification.
 """
 

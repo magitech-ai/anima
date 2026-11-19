@@ -6,7 +6,7 @@ Status: accepted
 ## Context
 
 Anima's internal protocol keys are plain strings (`"anima.*"`) — Python
-has no equivalent of the upstream runtime's unforgeable symbols, so
+has no equivalent of an unforgeable symbol type, so
 strings are the only portable representation. The prefix gap is
 deliberate, not accidental, but the key set has drifted from upstream in
 both directions.

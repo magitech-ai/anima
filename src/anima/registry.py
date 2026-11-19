@@ -1,6 +1,6 @@
 """Registry service for component runtimes.
 
-Python port of the RegistryService: manages component runtimes, fiber
+Registry service: manages component runtimes, fiber
 tracking, and component replacement.
 """
 
