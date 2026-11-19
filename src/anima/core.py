@@ -1120,8 +1120,8 @@ class Service(metaclass=_ServiceMeta):
         ctx.reflect.provide(name, self, check)
 
         # Register unregister disposer effect
-        def _unregister() -> None:
-            ctx._unregister_service(name)
+        def _unregister() -> Awaitable[None] | None:
+            return ctx._unregister_service(name)
 
         ctx.effect(lambda: _unregister)
 
@@ -1566,15 +1566,32 @@ class Context:
             if fiber.state == FiberState.PENDING and fiber.check_dependencies():
                 self._schedule_task(fiber.load())
 
-    def _unregister_service(self, name: str) -> None:
-        """Unregister a service and dispose any dependent fibers."""
-        if name in self._services:
-            del self._services[name]
-            self.emit("internal/service-removed", name)
-            # Fibers depending on this service must be disposed
-            for fiber in list(self._fibers):
-                if fiber.state == FiberState.ACTIVE and name in fiber.inject:
-                    self._schedule_task(fiber.dispose())  # pragma: no cover
+    def _unregister_service(self, name: str) -> Awaitable[None] | None:
+        """Unregister a service and return the disposal of its dependents.
+
+        A dependent is a sibling fiber, not a child, so the provider's own
+        ``_unload`` never sees it. The returned coroutine is awaited by the
+        effect disposer that called this, which is how the provider's
+        teardown waits for the consumers it just orphaned instead of racing
+        their cleanup. Returns None when there is nothing to wait for.
+        """
+        if name not in self._services:
+            return None
+        del self._services[name]
+        self.emit("internal/service-removed", name)
+        dependents = [
+            fiber
+            for fiber in list(self._fibers)
+            if fiber.state == FiberState.ACTIVE and name in fiber.inject
+        ]
+        if not dependents:
+            return None
+        return self._dispose_dependents(dependents)
+
+    async def _dispose_dependents(self, dependents: list[Fiber]) -> None:
+        """Dispose the fibers that injected a service that just went away."""
+        for fiber in dependents:
+            await fiber.dispose()
 
     def effect(
         self, func: Callable[[], Disposer | None], label: str | None = None
@@ -1615,8 +1632,8 @@ class Context:
         """Dynamically register a named capability on this context with automatic effect cleanup."""
         self._register_service(name, value)
 
-        def _unregister() -> None:
-            self._unregister_service(name)
+        def _unregister() -> Awaitable[None] | None:
+            return self._unregister_service(name)
 
         return self.effect(lambda: _unregister, label=f'ctx.provide("{name}")')
 

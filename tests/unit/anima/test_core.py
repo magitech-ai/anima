@@ -2692,3 +2692,44 @@ async def test_fiber_update_list_config():
     await fiber.update([{"id": "a"}, {"id": "b"}], no_save=True)
     assert fiber.config == [{"id": "a"}, {"id": "b"}]
     assert fiber.raw_config == [{"id": "a"}, {"id": "b"}]
+
+
+class TestDependentDisposalAwaited:
+    """#8: a provider's teardown must outlast the consumers it orphans."""
+
+    @pytest.mark.asyncio
+    async def test_dependent_cleanup_finishes_before_provider_dispose_returns(
+        self,
+    ) -> None:
+        ctx = Context()
+        order: list[str] = []
+
+        def provider(c: Context) -> None:
+            c.provide("svc", object())
+
+            async def close() -> None:
+                await asyncio.sleep(0.01)
+                order.append("provider-close")
+
+            c.effect(lambda: close)
+
+        def consumer(c: Context) -> None:
+            async def close() -> None:
+                await asyncio.sleep(0)
+                order.append("consumer-close")
+
+            c.effect(lambda: close)
+
+        consumer.inject = ["svc"]
+
+        p = ctx.use(provider)
+        d = ctx.use(consumer)
+        await ctx.flush()
+        await p.dispose()
+        assert d.state == FiberState.DISPOSED
+        assert order == ["provider-close", "consumer-close"]
+
+    def test_unregister_without_dependents_returns_none(self) -> None:
+        ctx = Context()
+        ctx.provide("lonely", object())
+        assert ctx._unregister_service("lonely") is None
