@@ -332,8 +332,7 @@ def test_truncation_never_splits_an_escape_sequence():
     exp = Exporter(colors=True, max_length=3)
     args = ["\x1b[38;5;196mabcdefghij\x1b[0m"]
     out = Logger.format(
-        exp,
-        Message(sn=1, ts=0.0, name="n", type="info", level=2, args=args)
+        exp, Message(sn=1, ts=0.0, name="n", type="info", level=2, args=args)
     )
     assert "\x1b[38;5;196m" in out
     # Nothing but the trailing reset may follow: no half-eaten CSI at the cut
@@ -352,7 +351,7 @@ def test_truncation_recloses_open_sgr():
             type="info",
             level=2,
             args=["\x1b[1;32mabcdef"],
-        )
+        ),
     )
     assert out.endswith("...\x1b[0m")
     visible = out.replace("\x1b[1;32m", "").replace("\x1b[0m", "")
@@ -370,7 +369,7 @@ def test_truncation_leaves_already_closed_line_alone():
             type="info",
             level=2,
             args=["\x1b[31mab\x1b[0mcdef"],
-        )
+        ),
     )
     # 6 visible chars > 4: clipped mid run, but the opening color was closed by
     # the caller, so no extra reset is appended after the ellipsis
@@ -388,7 +387,7 @@ def test_truncation_is_per_line_and_keeps_short_lines():
             type="info",
             level=2,
             args=["\x1b[34mshort\x1b[0m\nabcdefgh\nok"],
-        )
+        ),
     )
     lines = out.split("\n")
     assert lines[0] == "\x1b[34mshort\x1b[0m"
@@ -407,7 +406,7 @@ def test_percent_c_truncation_closes_its_own_color():
             type="info",
             level=2,
             args=["%C", "0123456789"],
-        )
+        ),
     )
     assert out.startswith("\x1b[38;5;")
     assert out.endswith("\x1b[0m")
@@ -430,7 +429,7 @@ def test_truncation_keeps_non_sgr_escapes_whole():
             type="info",
             level=2,
             args=["\x1b[2Kabcdef"],
-        )
+        ),
     )
     # Erase-line is not an attribute: kept verbatim, and no reset is invented
     assert out == "\x1b[2Kabc..."
@@ -447,6 +446,8 @@ def test_osc_hyperlink_text_counts_as_visible_width():
     assert out.startswith("\x1b]8;;https://example.com\x1b\\")
     assert out.endswith("click ...")
     assert "example.com" not in out.replace("\x1b]8;;https://example.com\x1b\\", "")
+
+
 def test_throwing_exporter_does_not_starve_others_or_reach_caller():
     svc = LoggerService(Context())
 

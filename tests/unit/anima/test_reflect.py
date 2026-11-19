@@ -510,6 +510,7 @@ class TestReflectServiceProvideOrdering:
     def test_disposer_registered_before_notify(self):
         """provide wires the disposer before any listener can see the service."""
         ctx = Context()
+
         def handler(c):
             pass
 
