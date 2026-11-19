@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 import types
 from pathlib import Path
@@ -1453,3 +1454,53 @@ async def test_load_rows_without_ids_are_not_duplicates(monkeypatch):
     await ctx.flush()
     assert len(loader.root.data) == 2
     assert len({row["id"] for row in loader.root.data}) == 2
+
+
+class TestAtomicProfileSave:
+    """#30: a failed save must leave the previous profile readable, not truncated."""
+
+    def test_save_profile_swaps_the_file_and_leaves_no_temp(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "profile.yaml"
+        target.write_text("- old: row\n", encoding="utf-8")
+        save_profile(target, [{"name": "new_mod:comp"}])
+        assert [row["name"] for row in yaml.safe_load(target.read_text())] == [
+            "new_mod:comp"
+        ]
+        assert [p.name for p in tmp_path.iterdir()] == ["profile.yaml"]
+
+    def test_save_profile_keeps_the_previous_file_when_the_dump_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        target = tmp_path / "profile.yaml"
+        target.write_text("- old: row\n", encoding="utf-8")
+
+        def boom(entries, stream):
+            stream.write("- partial: row\n")
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr("anima.loader.dump_yaml", boom)
+        with pytest.raises(RuntimeError, match="disk full"):
+            save_profile(target, [{"name": "new_mod:comp"}])
+        assert target.read_text(encoding="utf-8") == "- old: row\n"
+        assert [p.name for p in tmp_path.iterdir()] == ["profile.yaml"]
+
+    def test_save_profile_survives_a_cleanup_that_finds_no_temp(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        target = tmp_path / "profile.yaml"
+        target.write_text("- old: row\n", encoding="utf-8")
+        real_replace = os.replace
+
+        def replace_then_drop(src, dst):
+            Path(src).unlink()  # the rename lost the temp file before failing
+            raise OSError("cross-device link")
+
+        monkeypatch.setattr("anima.loader.os.replace", replace_then_drop)
+        with pytest.raises(OSError, match="cross-device link"):
+            save_profile(target, [{"name": "new_mod:comp"}])
+        assert target.read_text(encoding="utf-8") == "- old: row\n"
+        assert [p.name for p in tmp_path.iterdir()] == ["profile.yaml"]
+        assert os.replace is replace_then_drop  # sanity: the patch was live
+        monkeypatch.setattr("anima.loader.os.replace", real_replace)

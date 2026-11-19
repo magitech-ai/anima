@@ -9,6 +9,7 @@ import inspect
 import logging
 import os
 import re
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -90,11 +91,33 @@ def interpolate_env(value: Any, env: Mapping[str, str] | None = None) -> Any:
 
 
 def save_profile(path: Path | str, entries: list[dict[str, Any]]) -> None:
-    """Save component configuration entries to a YAML file."""
+    """Save component configuration entries to a YAML file.
+
+    The file is written through a temp file in the same directory and then
+    renamed over the target, so a crash or a full disk mid-write leaves the
+    previous profile intact instead of a truncated one. ``open(p, "w")``
+    truncates first and only then fills the file: any failure between the two
+    leaves a profile that parses as empty and a loader that mounts nothing.
+    """
     p = Path(path).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        dump_yaml(entries, f)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent)
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            dump_yaml(entries, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    except BaseException:
+        # The original file is still in place and the temp file is ours alone.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _normalise_row(item: Any) -> dict[str, Any]:
