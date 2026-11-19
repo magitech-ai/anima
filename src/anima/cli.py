@@ -520,7 +520,7 @@ async def main(args: list[str] | None = None) -> int:
         try:
             ver = importlib.metadata.version("anima")
         except Exception:  # noqa: BLE001
-            ver = "0.2.0"
+            ver = "0.3.0"
         print(f"anima {ver}")
         return 0
 
