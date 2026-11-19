@@ -332,6 +332,72 @@ async def test_fiber_load_failure():
         await fiber.await_settle()
 
 
+@pytest.mark.asyncio
+async def test_load_retries_failed_fiber():
+    """load() retries a FAILED fiber instead of staying a no-op (issue #11)."""
+    ctx = Context()
+    constructions: list[int] = []
+
+    class Flaky:
+        def __init__(self, c: Context) -> None:
+            constructions.append(1)
+            if len(constructions) == 1:
+                raise RuntimeError("boom")
+
+    fiber = Fiber(ctx, Flaky, (), {})
+    assert await fiber.load() is None
+    assert fiber.state == FiberState.FAILED
+
+    instance = await fiber.load()
+    assert isinstance(instance, Flaky)
+    assert fiber.state == FiberState.ACTIVE
+    assert fiber.error is None
+    assert fiber.status()["error"] is None
+    assert len(constructions) == 2
+
+    # A later load reuses the live instance; it never re-runs the body.
+    assert await fiber.load() is instance
+    assert len(constructions) == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_load_runs_body_once():
+    """Concurrent load() calls join the in-flight init instead of re-running it."""
+    ctx = Context()
+    runs: list[int] = []
+
+    async def slow_component(c: Context):
+        runs.append(1)
+        await asyncio.sleep(0)
+
+    fiber = Fiber(ctx, slow_component, (), {})
+    await asyncio.gather(fiber.load(), fiber.load(), fiber.load())
+    assert runs == [1]
+    assert fiber.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_load_retry_without_dependency_keeps_error():
+    """A retry that cannot run keeps the previous error and stays FAILED."""
+    ctx = Context()
+    dispose_dep = ctx.reflect.provide("injected_svc", object())
+
+    def needs_dep(c: Context):
+        raise RuntimeError("boom")
+
+    needs_dep.inject = ["injected_svc"]
+    fiber = Fiber(ctx, needs_dep, (), {})
+    assert await fiber.load() is None
+    assert fiber.state == FiberState.FAILED
+
+    dispose_dep()
+    assert await fiber.load() is None
+    assert fiber.state == FiberState.FAILED
+    assert isinstance(fiber.error, RuntimeError)
+    with pytest.raises(RuntimeError, match="boom"):
+        await fiber.await_settle()
+
+
 class TestFiberLifecycleInternals:
     """Tests for fiber lifecycle internals (_store, inertia, epoch tracking)."""
 
@@ -2548,7 +2614,8 @@ class TestInstanceCheckObjectBase:
 class TestServiceInit:
     """Tests for Service.init protocol (symbols.init parity)."""
 
-    def test_service_init_called_on_load(self):
+    @pytest.mark.asyncio
+    async def test_service_init_called_on_load(self):
         """Test that Service.__init__ calls init method after construction."""
         ctx = Context()
         init_called = []
@@ -2562,13 +2629,13 @@ class TestServiceInit:
                 return "init_result"
 
         fib = ctx.use(InitService)
-        # Manually trigger load since use() may not auto-load in test context
-        import asyncio
-
-        asyncio.run(fib.load())
+        # Load inside the loop: the scheduled mount gets a loop to run on, so
+        # the load succeeds first time instead of failing and being retried.
+        await fib.load()
         assert init_called == ["init_called"]
 
-    def test_service_init_async(self):
+    @pytest.mark.asyncio
+    async def test_service_init_async(self):
         """Test that async init method is awaited."""
         ctx = Context()
         init_called = []
@@ -2582,9 +2649,7 @@ class TestServiceInit:
                 return "async_init_result"
 
         fib = ctx.use(AsyncInitService)
-        import asyncio
-
-        asyncio.run(fib.load())
+        await fib.load()
         assert init_called == ["async_init_called"]
 
     def test_service_no_init_method(self):

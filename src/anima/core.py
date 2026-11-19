@@ -278,20 +278,34 @@ class Fiber:
 
         Returns the component instance when ACTIVE, else None. A component
         failure does not raise here; it is stored on the fiber and
-        rethrown by await_settle().
+        rethrown by await_settle(). Calling load() on a FAILED fiber
+        retries the component, provided its dependencies are still
+        resolvable.
         """
         if self.state == FiberState.DISPOSED:
             return None
         if self.state == FiberState.ACTIVE:
             return self._instance
-        if self.state == FiberState.FAILED:
-            return None
         if self.inertia is not None:
             await self.inertia
             return self._instance if self.state == FiberState.ACTIVE else None
+        # A failed load stores the error and leaves the epoch INACTIVE, so
+        # nothing else would ever start a new transition; that made FAILED a
+        # permanent dead end for load() (issue #11). Clear the error so the
+        # epoch machine can re-run the component, and restore it below when
+        # the retry cannot run.
+        failure = self.error if self.state == FiberState.FAILED else None
+        if failure is not None:
+            self.error = None
         for name in self.inject:
             self._checkImpl(name)
         self._refresh()
+        if failure is not None and self._getCurrentEpoch() == "__INACTIVE__":
+            # Nothing to retry: a dependency is missing or its check predicate
+            # fails, so the fiber is waiting again, not failed. Keep the
+            # previous error visible for status() and await_settle().
+            self.error = failure
+            return None
         if self.inertia is None and self._getCurrentEpoch() != "__INACTIVE__":
             # The epoch went active while no loop was running, so no
             # transition started; start the reload now that a loop exists.
