@@ -273,6 +273,37 @@ class Fiber:
         """Check if all required services exist on context."""
         return all(self.ctx.has(service) for service in self.inject)
 
+    @property
+    def declared_provides(self) -> list[str]:
+        """Service names this component declares it will provide.
+
+        A PENDING fiber has not run, so the name it registers through
+        ``Service.__init__`` is not in the registry yet. Only a declaration
+        on the component itself is readable before it runs: the ``provide``
+        class attribute (the name ``Service.__init__`` falls back to), an
+        explicit ``name`` class attribute, and optional
+        ``provides``/``services`` lists.
+
+        A component that passes its name to ``Service.__init__`` positionally
+        (``super().__init__(ctx, "timer")``, which is what the built-in
+        services do) declares nothing here. Callers must treat an empty list
+        as "provider unknown", never as "provides nothing".
+        """
+        declared = [self._safe_getattr_static(self.target, "provide")]
+        if isinstance(self.target, type) and "name" in vars(self.target):
+            # An explicit class-level name is the identity Fiber.name uses;
+            # an inherited one is not a declaration of what this serves.
+            declared.append(vars(self.target)["name"])
+        for attr in ("provides", "services"):
+            declared.append(self._safe_getattr_static(self.target, attr))
+        names: list[str] = []
+        for value in declared:
+            if isinstance(value, str):
+                names.append(value)
+            elif isinstance(value, Iterable):
+                names.extend(v for v in value if isinstance(v, str))
+        return names
+
     async def load(self) -> Any:
         """Mount and activate the component, joining any in-flight transition.
 
@@ -1415,6 +1446,102 @@ class Context:
         for child in self._children:
             fibers.extend(child.all_fibers())
         return fibers
+
+    def check_pending_cycles(self) -> None:
+        """Fail loud when a boot drain left components that can never activate.
+
+        ``flush()`` only drains scheduled tasks, so a component whose
+        injected service never appears stays PENDING and the boot looks
+        successful. This walks the fibers that are still PENDING with an
+        unmounted dependency and raises once, reporting every one of them
+        with the services it waits for.
+
+        When the components are declared (``provide`` / ``provides`` /
+        ``services``, or an explicit ``name``), the provider edges are walked
+        to name the closed loop:
+
+            circular dependency between components: a -> b -> a
+
+        A component that provides a name it never declares counts as an
+        unknown provider, so a loop through it is not named as a cycle; it is
+        still reported as a component that did not activate. Callers should
+        run this after the boot drain; it is deliberately not folded into
+        ``flush()``, which stays a pure drain barrier for its ~200 callers.
+        """
+        blocked: dict[str, list[str]] = {}
+        for fiber in self.all_fibers():
+            if fiber.state != FiberState.PENDING:
+                continue
+            missing = [name for name in fiber.inject if not fiber.ctx.has(name)]
+            # A PENDING fiber whose dependencies are all mounted is waiting
+            # on its own scheduled load, not on a service that never arrives.
+            if missing:
+                seen = blocked.setdefault(fiber.name, [])
+                seen.extend(name for name in missing if name not in seen)
+        if not blocked:
+            return
+
+        cycle = self._find_pending_cycle(blocked)
+        if cycle:
+            raise RuntimeError(
+                "circular dependency between components: " + " -> ".join(cycle)
+            )
+        detail = "; ".join(
+            f"{name} waits for {', '.join(missing)}"
+            for name, missing in blocked.items()
+        )
+        raise RuntimeError(f"components did not activate: {detail}")
+
+    def _find_pending_cycle(self, blocked: dict[str, list[str]]) -> list[str]:
+        """Return the first closed loop of declared providers, else empty.
+
+        Nodes are service names, not components: an inject edge is written in
+        service names (``inject = ["db"]``), so the loop has to be walked in
+        the same vocabulary. A service name is a node only when the fiber
+        that declares it is itself blocked. Colour-marked depth-first walk:
+        white (unvisited) -> grey (on the stack) -> black (fully explored).
+        Reaching a grey node means the walk closed on itself, and the slice of
+        the stack from that node on is the loop.
+        """
+        providers: dict[str, str] = {}
+        for fiber in self.all_fibers():
+            for name in fiber.declared_provides:
+                providers.setdefault(name, fiber.name)
+        edges: dict[str, list[str]] = {}
+        for service, label in providers.items():
+            if label in blocked:
+                # Only a name whose provider is itself blocked can be part of
+                # a loop; anything else is a plain missing service.
+                edges[service] = [
+                    n
+                    for n in blocked[label]
+                    if n in providers and providers[n] in blocked
+                ]
+
+        WHITE, GREY, BLACK = 0, 1, 2
+        colour: dict[str, int] = dict.fromkeys(edges, WHITE)
+        stack: list[str] = []
+
+        def walk(service: str) -> list[str]:
+            colour[service] = GREY
+            stack.append(service)
+            for dependency in edges[service]:
+                if colour[dependency] == GREY:
+                    return stack[stack.index(dependency) :] + [dependency]
+                if colour[dependency] == WHITE:
+                    found = walk(dependency)
+                    if found:
+                        return found
+            stack.pop()
+            colour[service] = BLACK
+            return []
+
+        for service in edges:
+            if colour[service] == WHITE:
+                found = walk(service)
+                if found:
+                    return found
+        return []
 
     async def flush(self) -> None:
         """Wait for all pending component load and event tasks to settle.

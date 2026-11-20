@@ -2798,3 +2798,270 @@ class TestDependentDisposalAwaited:
         ctx = Context()
         ctx.provide("lonely", object())
         assert ctx._unregister_service("lonely") is None
+
+
+@pytest.mark.asyncio
+async def test_mutual_inject_cycle_is_named_by_service_name():
+    """The realistic shape: class names differ from the services they serve."""
+    ctx = Context()
+
+    class A(Service):
+        provide = "a"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    class B(Service):
+        provide = "b"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    A.inject = ["b"]
+    B.inject = ["a"]
+
+    ctx.use(A)
+    ctx.use(B)
+
+    await ctx.flush()
+    assert [f.state for f in ctx.all_fibers()] == [FiberState.PENDING] * 2
+    with pytest.raises(RuntimeError) as excinfo:
+        ctx.check_pending_cycles()
+    assert "circular dependency between components: a -> b -> a" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_cycle_through_second_inject_edge_is_found():
+    """A fiber with two pending injects must follow both, not just the first."""
+    ctx = Context()
+
+    class Entry(Service):
+        provide = "entry"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    class Y(Service):
+        provide = "y"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    # "x" is pending too, so a walk that follows the first resolvable edge
+    # takes entry -> x and never sees the real loop through y.
+    Entry.inject = ["x", "y"]
+    Y.inject = ["entry"]
+
+    ctx.use(Entry)
+    ctx.use(Y)
+
+    await ctx.flush()
+    with pytest.raises(RuntimeError) as excinfo:
+        ctx.check_pending_cycles()
+    assert "circular dependency between components: entry -> y -> entry" in str(
+        excinfo.value
+    )
+
+
+@pytest.mark.asyncio
+async def test_self_inject_cycle_is_named():
+    ctx = Context()
+
+    class SelfCycle(Service):
+        name = "self_cycle"
+        inject: ClassVar[list[str]] = ["self_cycle"]
+
+    ctx.use(SelfCycle)
+
+    await ctx.flush()
+    with pytest.raises(RuntimeError) as excinfo:
+        ctx.check_pending_cycles()
+    assert "self_cycle -> self_cycle" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_undeclared_provider_is_reported_as_blocked_not_as_a_cycle():
+    """A component that only passes its name to Service.__init__ declares
+    nothing, so the loop cannot be keyed on it. The fiber is still reported
+    with the service it waits for instead of hanging silently."""
+    ctx = Context()
+
+    class A(Service):
+        def __init__(self, c: Context) -> None:
+            super().__init__(c, "a")
+
+    class B(Service):
+        def __init__(self, c: Context) -> None:
+            super().__init__(c, "b")
+
+    A.inject = ["b"]
+    B.inject = ["a"]
+
+    ctx.use(A)
+    ctx.use(B)
+
+    await ctx.flush()
+    with pytest.raises(RuntimeError) as excinfo:
+        ctx.check_pending_cycles()
+    message = str(excinfo.value)
+    assert "components did not activate" in message
+    assert "A waits for b" in message
+    assert "B waits for a" in message
+    assert "circular dependency" not in message
+
+
+@pytest.mark.asyncio
+async def test_flush_does_not_raise_for_unrelated_pending_cycle():
+    """flush() stays a drain barrier: an unrelated cycle among other fibers
+    must not fail the drain of a context whose own component booted."""
+    ctx = Context()
+
+    class A(Service):
+        provide = "a"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    class B(Service):
+        provide = "b"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    class Good(Service):
+        provide = "good"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    A.inject = ["b"]
+    B.inject = ["a"]
+
+    ctx.use(A)
+    ctx.use(B)
+    good = ctx.use(Good)
+
+    await ctx.flush()
+    assert good.state == FiberState.ACTIVE
+    assert ctx.has("good") is True
+    with pytest.raises(RuntimeError, match="circular dependency"):
+        ctx.check_pending_cycles()
+
+
+@pytest.mark.asyncio
+async def test_check_pending_cycles_is_quiet_when_everything_activated():
+    ctx = Context()
+    ctx.provide("dep", object())
+
+    class Consumer(Service):
+        provide = "consumer"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+        inject: ClassVar[list[str]] = ["dep"]
+
+    ctx.use(Consumer)
+    await ctx.flush()
+    assert [f.state for f in ctx.all_fibers()] == [FiberState.ACTIVE]
+    ctx.check_pending_cycles()
+
+
+@pytest.mark.asyncio
+async def test_pending_fiber_waiting_on_its_own_load_is_not_reported():
+    """A PENDING fiber whose deps are mounted is mid-load, not stuck."""
+    ctx = Context()
+
+    class Slow(Service):
+        provide = "slow"
+
+    fiber = ctx.use(Slow)
+    assert fiber.state == FiberState.PENDING
+    ctx.check_pending_cycles()
+
+
+@pytest.mark.asyncio
+async def test_fiber_provides_reads_declared_service_lists():
+    ctx = Context()
+
+    class Multi(Service):
+        provides = ("p", "q")
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c, "p")
+
+    fiber = ctx.use(Multi)
+    assert fiber.declared_provides == ["p", "q"]
+
+
+@pytest.mark.asyncio
+async def test_blocked_chain_without_a_loop_is_reported_not_named_as_cycle():
+    """A blocked component whose provider only waits on an unmounted service
+    dead-ends the walk: report it, do not call it a cycle."""
+    ctx = Context()
+
+    class A(Service):
+        provide = "a"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    class B(Service):
+        provide = "b"
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    A.inject = ["b"]
+    B.inject = ["ghost"]
+
+    ctx.use(A)
+    ctx.use(B)
+
+    await ctx.flush()
+    with pytest.raises(RuntimeError) as excinfo:
+        ctx.check_pending_cycles()
+    message = str(excinfo.value)
+    assert "components did not activate" in message
+    assert "B waits for ghost" in message
+    assert "circular dependency" not in message
+
+
+@pytest.mark.asyncio
+async def test_diamond_of_blocked_components_dead_ends_without_a_cycle():
+    """A dependency already explored (black) must not be walked twice, and a
+    diamond that never closes is not a cycle."""
+    ctx = Context()
+
+    class P(Service):
+        provide = "p"
+        inject: ClassVar[list[str]] = ["q", "r"]
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    class Q(Service):
+        provide = "q"
+        inject: ClassVar[list[str]] = ["r"]
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    class R(Service):
+        provide = "r"
+        inject: ClassVar[list[str]] = ["ghost"]
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    ctx.use(P)
+    ctx.use(Q)
+    ctx.use(R)
+
+    await ctx.flush()
+    with pytest.raises(RuntimeError) as excinfo:
+        ctx.check_pending_cycles()
+    message = str(excinfo.value)
+    assert "components did not activate" in message
+    assert "R waits for ghost" in message
+    assert "circular dependency" not in message
