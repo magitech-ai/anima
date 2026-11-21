@@ -1416,6 +1416,38 @@ class Context:
             fibers.extend(child.all_fibers())
         return fibers
 
+    def _check_pending_cycles(self) -> None:
+        """Raise when PENDING fibers wait on each other in a closed loop.
+
+        A fiber that injects a service defined by another fiber which is
+        itself still PENDING can never activate: neither side ever provides
+        the service the other waits for. Without this check the boot settles
+        with both fibers parked and no error, so the caller sees a hang with
+        nothing to act on. Fibers whose dependency is merely absent (to be
+        provided later) are untouched; only a closed loop is an error.
+        """
+        pending = {
+            fiber.name: fiber
+            for fiber in self.all_fibers()
+            if fiber.state == FiberState.PENDING
+        }
+        for start in pending:
+            path: list[str] = []
+            position: dict[str, int] = {}
+            current = start
+            while current in pending and current not in position:
+                position[current] = len(path)
+                path.append(current)
+                current = next(
+                    (name for name in pending[current].inject if name in pending),
+                    "",
+                )
+            if current in position:
+                cycle = path[position[current] :] + [current]
+                raise RuntimeError(
+                    "circular dependency between components: " + " -> ".join(cycle)
+                )
+
     async def flush(self) -> None:
         """Wait for all pending component load and event tasks to settle.
 
@@ -1429,6 +1461,7 @@ class Context:
                 if t is not current and not t.done()
             ]
             if not tasks:
+                self._check_pending_cycles()
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
             for t in tasks:

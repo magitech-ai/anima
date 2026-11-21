@@ -2798,3 +2798,49 @@ class TestDependentDisposalAwaited:
         ctx = Context()
         ctx.provide("lonely", object())
         assert ctx._unregister_service("lonely") is None
+
+
+@pytest.mark.asyncio
+async def test_mutual_inject_cycle_raises_instead_of_hanging():
+    ctx = Context()
+
+    class CycleA(Service):
+        name = "cycle_a"
+
+        def __init__(self, c: Context):
+            super().__init__(c, "cycle_a")
+
+    class CycleB(Service):
+        name = "cycle_b"
+
+        def __init__(self, c: Context):
+            super().__init__(c, "cycle_b")
+
+    CycleA.inject = ["cycle_b"]
+    CycleB.inject = ["cycle_a"]
+
+    ctx.use(CycleA)
+    ctx.use(CycleB)
+
+    with pytest.raises(RuntimeError, match="circular dependency"):
+        await ctx.flush()
+    for fiber in ctx.all_fibers():
+        assert fiber.state == FiberState.PENDING
+
+
+@pytest.mark.asyncio
+async def test_self_inject_cycle_raises_instead_of_hanging():
+    ctx = Context()
+
+    class SelfCycle(Service):
+        name = "self_cycle"
+        inject: ClassVar[list[str]] = ["self_cycle"]
+
+        def __init__(self, c: Context):
+            super().__init__(c, "self_cycle")
+
+    ctx.use(SelfCycle)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await ctx.flush()
+    assert "self_cycle -> self_cycle" in str(excinfo.value)
