@@ -71,6 +71,15 @@ _access_context: ContextVar[Context | None] = ContextVar(
     "_access_context", default=None
 )
 
+# ids of fibers whose update() is in flight on this task chain. ContextVars
+# are copied into tasks spawned from the owner, so a listener that reaches
+# update() on the same fiber through create_task/gather/ensure_future is
+# still recognised as reentry; comparing against the holding Task (the old
+# _update_owner) missed exactly those and deadlocked on our own lock.
+_updating_fibers: ContextVar[frozenset[int]] = ContextVar(
+    "_updating_fibers", default=frozenset()
+)
+
 
 def _schedule_cleanup(coro: Any) -> None:
     """Schedule error logging for a fire-and-forget cleanup coroutine.
@@ -190,6 +199,15 @@ class Fiber:
         self.child_fibers: list[Fiber] = []
         self.effects: list[Disposer] = []
         self._is_root = root
+        # update() is serialised per fiber: two concurrent calls otherwise
+        # interleave their waterfalls, and one restart tears the epoch down
+        # while the other is still resolving against it (assertActive fails
+        # with INACTIVE_EFFECT on a perfectly valid update). The lock is
+        # created on first use so a fiber built outside a running loop still
+        # works. Reentry is tracked with _updating_fibers (a ContextVar), not
+        # with the holding Task: a listener that spawns a task and awaits
+        # update() on the same fiber from it must not grab our own lock.
+        self._update_lock: asyncio.Lock | None = None
         self.uid: int | None
         self.state: FiberState
         self._runner_epoch: str
@@ -643,8 +661,36 @@ class Fiber:
         keeps its old config). On a non-ACTIVE fiber resolution is
         deferred: the error is cleared and the epoch machine drives a
         fresh activation, which validates then.
+
+        Calls are serialised: a concurrent update waits for the in-flight
+        one to finish instead of racing it. The slot is held across resolve,
+        commit, the ``internal/update`` waterfall and the restart — so one
+        slow listener on a fiber delays later updates to that fiber. That is
+        deliberate: the restart tears down the epoch the other call resolved
+        against. Reentry from inside an update is recognised across task
+        boundaries (a listener that spawns a task and awaits update() on the
+        same fiber joins the in-flight update rather than deadlocking on the
+        lock its ancestor holds).
         """
         self.assertActive()
+        in_flight = _updating_fibers.get()
+        if id(self) in in_flight:
+            await self._update_locked(config, no_save)
+            return
+        if self._update_lock is None:
+            self._update_lock = asyncio.Lock()
+        async with self._update_lock:
+            token = _updating_fibers.set(in_flight | {id(self)})
+            try:
+                # Re-check once the slot is ours: the fiber may have been
+                # disposed while this call was queued behind another update.
+                self.assertActive()
+                await self._update_locked(config, no_save)
+            finally:
+                _updating_fibers.reset(token)
+
+    async def _update_locked(self, config: Any, no_save: bool) -> None:
+        """Body of update(), run with the fiber's update slot held."""
         self.raw_config = dict(config) if isinstance(config, dict) else config
 
         if self.state != FiberState.ACTIVE:
