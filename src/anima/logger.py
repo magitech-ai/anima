@@ -341,17 +341,28 @@ class Logger:
         clipped = [_clip_to_visible_width(line, exporter.max_length) for line in lines]
         return "\n".join(clipped)
 
-    def _log(self, type_name: str, level: int, *args: Any) -> None:
+    def _log(
+        self,
+        type_name: str,
+        level: int,
+        *args: Any,
+        _seen: frozenset[int] = frozenset(),
+    ) -> None:
         if len(args) == 1 and isinstance(args[0], Exception):
             err = args[0]
-            if err.__cause__ is not None:
-                self._log(type_name, level, err.__cause__)
+            # ``__cause__`` is writable, so a chain can loop back on itself
+            # (``raise a from b`` with ``b.__cause__ = a``). Recursing on it used
+            # to raise RecursionError inside the log call, turning a crash in the
+            # thing being reported into a flood of tracebacks. Following the
+            # chain with a visited set logs the node that closes the loop.
+            if err.__cause__ is not None and id(err) not in _seen:
+                self._log(type_name, level, err.__cause__, _seen=_seen | {id(err)})
                 return
             if hasattr(err, "exceptions"):
                 sub_errors = list(err.exceptions)  # type: ignore[attr-defined]
                 if sub_errors:
                     for sub_err in sub_errors:
-                        self._log(type_name, level, sub_err)
+                        self._log(type_name, level, sub_err, _seen=_seen | {id(err)})
                     return
                 # Empty aggregate (or a duck-typed one): fall through and log
                 # the aggregate itself instead of swallowing it
