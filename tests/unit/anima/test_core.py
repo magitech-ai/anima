@@ -2798,3 +2798,92 @@ class TestDependentDisposalAwaited:
         ctx = Context()
         ctx.provide("lonely", object())
         assert ctx._unregister_service("lonely") is None
+
+
+@pytest.mark.asyncio
+async def test_reproviding_a_service_moves_the_provision_to_the_new_owner():
+    """An override takes over the provision name; the old fiber stops owning it."""
+    ctx = Context()
+
+    def first(c: Context) -> None:
+        c.reflect.provide("clash_svc", "one")
+
+    first.name = "clash_first"
+    f1 = ctx.use(first)
+    await ctx.flush()
+    assert "clash_svc" in f1.provisions
+
+    def second(c: Context) -> None:
+        c.reflect.provide("clash_svc", "two")
+
+    second.name = "clash_second"
+    f2 = ctx.use(second)
+    await ctx.flush()
+    assert "clash_svc" in f2.provisions
+    assert "clash_svc" not in f1.provisions
+    impl = ctx.reflect._get_impl("clash_svc")
+    assert impl is not None
+    assert impl.value == "two"
+
+
+@pytest.mark.asyncio
+async def test_state_change_notifies_only_the_fibers_own_provisions():
+    """A transition must not notify services owned by other fibers."""
+    ctx = Context()
+    seen: list[list[str]] = []
+
+    def mine(c: Context) -> None:
+        c.reflect.provide("mine_svc", object())
+
+    mine.name = "mine"
+    other = ctx.use(mine)
+    await ctx.flush()
+
+    def theirs(c: Context) -> None:
+        c.reflect.provide("theirs_svc", object())
+
+    theirs.name = "theirs"
+    ctx.use(theirs)
+    await ctx.flush()
+
+    original = ctx.reflect.notify
+
+    def spy(names: list[str], *args: Any, **kwargs: Any) -> Any:
+        seen.append(list(names))
+        return original(names, *args, **kwargs)
+
+    ctx.reflect.notify = spy  # type: ignore[method-assign]
+    await other.restart()
+    assert ["mine_svc"] in seen
+    assert ["theirs_svc"] not in seen
+
+
+@pytest.mark.asyncio
+async def test_inject_index_survives_and_clears_correctly():
+    """The dependents index must not leak disposed fibers, and must keep the
+    buckets of fibers that are still alive."""
+    ctx = Context()
+    ctx.provide("shared_dep", object())
+
+    class NeedsShared(Service):
+        provide = "needs_shared"
+        inject: ClassVar[list[str]] = ["shared_dep"]
+
+        def __init__(self, c: Context, config: Any = None) -> None:
+            super().__init__(c)
+
+    first = ctx.use(NeedsShared)
+    second = ctx.use(NeedsShared)
+    await ctx.flush()
+    assert ctx._dependents["shared_dep"] == [first, second]
+
+    await first.dispose()
+    # The bucket survives: another fiber still waits on the same name.
+    assert ctx._dependents["shared_dep"] == [second]
+
+    await second.dispose()
+    assert "shared_dep" not in ctx._dependents
+
+    # Clearing inject after the fiber left the index is a no-op, not a leak.
+    second.inject = []
+    assert ctx._dependents == {}

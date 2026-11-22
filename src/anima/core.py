@@ -189,6 +189,9 @@ class Fiber:
         self.parent_fiber = parent_fiber
         self.child_fibers: list[Fiber] = []
         self.effects: list[Disposer] = []
+        # Service names this fiber provides in the reflect store, so a state
+        # change notifies its own services instead of scanning every impl.
+        self.provisions: set[str] = set()
         self._is_root = root
         self.uid: int | None
         self.state: FiberState
@@ -227,15 +230,17 @@ class Fiber:
         # at activation time, so a bad config leaves the fiber FAILED but
         # recoverable via update().
         inject_decl = getattr(target, "inject", None)
+        self._inject: list[str] = []
+        self.inject_config: dict[str, Any] | None = getattr(
+            target, "inject_config", None
+        )
         if isinstance(inject_decl, dict):
-            self.inject: list[str] = list(inject_decl.keys())
-            self.inject_config: dict[str, Any] | None = dict(inject_decl)
+            self.inject_config = dict(inject_decl)
+            self.inject = list(inject_decl.keys())
         elif isinstance(inject_decl, (list, tuple, set)):
             self.inject = list(inject_decl)
-            self.inject_config = getattr(target, "inject_config", None)
         else:
             self.inject = []
-            self.inject_config = getattr(target, "inject_config", None)
 
     @property
     def config_schema(self) -> Any:
@@ -268,6 +273,23 @@ class Fiber:
                 return config_schema(**config)
             return config_schema(config)
         return config
+
+    @property
+    def inject(self) -> list[str]:
+        """Service names this fiber waits for.
+
+        Assigning to it re-indexes the fiber in the context's dependents map, so
+        a fiber whose inject list changes at runtime (``replace()``, the tree
+        patch path) keeps receiving service notifications. In-place mutation of
+        the returned list is not tracked; assign a new list instead.
+        """
+        return self._inject
+
+    @inject.setter
+    def inject(self, names: Iterable[str]) -> None:
+        previous = getattr(self, "_inject", None)
+        self._inject = list(names)
+        self.ctx.reindex_fiber(self, previous)
 
     def check_dependencies(self) -> bool:
         """Check if all required services exist on context."""
@@ -373,6 +395,9 @@ class Fiber:
         if self.parent_fiber is not None and self in self.parent_fiber.child_fibers:
             self.parent_fiber.child_fibers.remove(self)
         self.uid = None
+        # A disposed fiber must stop receiving service notifications: the
+        # dependents index holds the only reference notify() trusts.
+        self.ctx.forget_fiber(self)
         # Emit before unregistering the runtime: the loader's
         # internal/plugin handler distinguishes a self-dispose (runtime
         # still registered at emit time) from a registry deletion
@@ -855,10 +880,11 @@ class Fiber:
         # Only notify changes between ACTIVE and NON-ACTIVE states
         if old_state != FiberState.ACTIVE and new_state != FiberState.ACTIVE:
             return
-        for impl in self.ctx.reflect.store.values():
-            if impl.fiber is not self:
-                continue
-            self.ctx.reflect.notify([impl.name])
+        # Notify only the services this fiber provides. Walking the whole
+        # reflect store here made every transition cost O(services), so a
+        # boot with N components spent O(N^2) on state notifications.
+        for name in self.provisions:
+            self.ctx.reflect.notify([name])
 
     def _getState(self) -> FiberState:
         """Determine current fiber state from uid, error, and runner epoch."""
@@ -1263,6 +1289,9 @@ class Context:
         self._services: dict[str, Any] = {}
         self._fibers: list[Fiber] = []
         self._pending_tasks: set[asyncio.Task[Any]] = set()
+        # Inject name -> fibers waiting on it. ReflectService.notify walks
+        # this instead of every fiber in the registry (issue #9).
+        self._dependents: dict[str, list[Fiber]] = {}
         self._event_bus: EventBus = parent._event_bus if parent else EventBus()
         # isolation map service name -> scope label (Dict<symbol>)
         self._isolated_services: dict[str, Any] = isolated_services or {}
@@ -1447,6 +1476,36 @@ class Context:
         except RuntimeError:
             asyncio.run(_run())
             return None
+
+    def reindex_fiber(self, fiber: Fiber, previous: Iterable[str] | None) -> None:
+        """Keep the inject index current when a fiber's ``inject`` changes.
+
+        ``ReflectService.notify`` walks this index instead of every fiber in
+        the registry: a fiber whose dependencies change at runtime
+        (``replace()``, the tree patch path) keeps receiving notifications for
+        its new names and stops receiving them for the old.
+        """
+        self._drop_dependents(
+            fiber, [n for n in previous or () if n not in fiber.inject]
+        )
+        for name in fiber.inject:
+            bucket = self._dependents.setdefault(name, [])
+            if fiber not in bucket:
+                bucket.append(fiber)
+
+    def forget_fiber(self, fiber: Fiber) -> None:
+        """Drop a disposed fiber from the inject index."""
+        self._drop_dependents(fiber, list(fiber.inject))
+
+    def _drop_dependents(self, fiber: Fiber, names: Iterable[str]) -> None:
+        """Remove a fiber from the buckets for ``names``, deleting empty ones."""
+        for name in names:
+            bucket = self._dependents.get(name, [])
+            if fiber not in bucket:
+                continue
+            bucket.remove(fiber)
+            if not bucket:
+                del self._dependents[name]
 
     def has(self, name: str) -> bool:
         """Check if a service is registered in this context scope."""

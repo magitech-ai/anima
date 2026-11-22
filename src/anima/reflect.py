@@ -215,6 +215,8 @@ class ReflectService:
         def disposer() -> None:
             if self.store.get(name) is impl:
                 del self.store[name]
+            if fiber is not None:  # pragma: no branch - a context has a root fiber
+                fiber.provisions.discard(name)
             self.notify([name])
 
         # The disposer and the owning fiber are wired up before the impl is
@@ -224,6 +226,15 @@ class ReflectService:
         impl.fiber = fiber
         if fiber is not None:  # pragma: no cover
             fiber.effects.append(disposer)
+            # The fiber keeps its own provision names, so a state change
+            # notifies its services without walking the whole store.
+            fiber.provisions.add(name)
+
+        previous = self.store.get(name)
+        if previous is not None and previous.fiber is not None:
+            # An override moves ownership: the earlier provider must not keep
+            # notifying for a name it no longer owns.
+            previous.fiber.provisions.discard(name)
 
         self.store[name] = impl
 
@@ -250,29 +261,31 @@ class ReflectService:
                 return True
 
         updated_fibers: list[Any] = []
-        for runtime in list(self.ctx.registry.values()):
-            if not hasattr(runtime, "fibers"):
+        # Only the fibers that inject one of these names can be affected, so
+        # walk the dependents index instead of every registered fiber: that
+        # scan made each service registration and every ACTIVE transition cost
+        # O(fibers) (issue #9).
+        candidates: dict[int, Any] = {}
+        for name in names:
+            for fiber in self.ctx._dependents.get(name, ()):
+                candidates[id(fiber)] = fiber
+        for fiber in candidates.values():
+            # The index already proves the fiber injects these names, so the
+            # only remaining filter is the caller's predicate.
+            affected = [name for name in names if filter_fn(fiber.ctx, name)]
+            if not affected:
                 continue
-            for fiber in list(runtime.fibers):
-                has_update = False
-                for name in names:
-                    if name not in getattr(fiber, "inject", []):
-                        continue
-                    if not filter_fn(fiber.ctx, name):
-                        continue
-                    has_update = True
-                    # Re-check the impl for this fiber so _refresh
-                    # recomputes the epoch from a fresh _store. A dep
-                    # that went away unloads the fiber to PENDING
-                    # instead of disposing it.
-                    fiber._checkImpl(name)
-                if not has_update:
-                    continue
-                fiber._refresh()
-                # Schedule load for PENDING fibers whose deps are now satisfied
-                if fiber.state == FiberState.PENDING and fiber.check_dependencies():
-                    self.ctx._schedule_task(fiber.load())
-                updated_fibers.append(fiber)
+            for name in affected:
+                # Re-check the impl for this fiber so _refresh
+                # recomputes the epoch from a fresh _store. A dep
+                # that went away unloads the fiber to PENDING
+                # instead of disposing it.
+                fiber._checkImpl(name)
+            fiber._refresh()
+            # Schedule load for PENDING fibers whose deps are now satisfied
+            if fiber.state == FiberState.PENDING and fiber.check_dependencies():
+                self.ctx._schedule_task(fiber.load())
+            updated_fibers.append(fiber)
 
         for name in names:
             impl = self._get_impl(name, strict=False)
