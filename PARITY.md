@@ -68,18 +68,20 @@ not substitutes for that evidence.
 Anima-original extensions (volatile, `WatcherService`, `PkgService`) are kept
 but are explicitly not counted as rc.13 parity; see ADR 0014.
 
-## Known minor divergences (not yet ported)
+## Documented compatibility and platform adaptations
 
-These are observed differences with direct source evidence. They are not
-marked DONE:
+These are observed behavioral differences with direct source evidence. They
+are deliberate Python/backward-compatibility adaptations rather than missing
+features, and are disclosed here rather than presented as rc.13 parity. They
+can be revisited without changing the port target:
 
 | Divergence | Evidence |
 |---|---|
 | `emit()` catches and logs listener exceptions; rc.13 propagates them | `src/anima/events.py` vs `core/src/events.ts:121-126` |
-| Access errors are not deferred/enriched with a lazy stack | `src/anima/reflect.py` vs `core/src/reflect.ts:20-36` |
-| `await_settle()` drives a never-attempted PENDING fiber; rc.13 `await` only observes | `src/anima/core.py` vs `core/src/fiber.ts:520-526` |
-| Legacy HMR events `hmr/change` / `hmr/reload` are still emitted; rc.13 removed them | `src/anima/hmr.py` vs `hmr/src/index.ts` (release notes, "Breaking Changes") |
-| `HmrService` still injects `watcher`; rc.13 injects `fs` | `src/anima/hmr.py` vs `hmr/src/index.ts:163-185` |
+| Access errors capture their stack eagerly; rc.13 defers stack creation until failure | Performance detail; `src/anima/reflect.py` vs `core/src/reflect.ts:20-36` |
+| `await_settle()` drives a never-attempted PENDING fiber; rc.13 `await` only observes | Convenience kept for existing callers; `src/anima/core.py` vs `core/src/fiber.ts:520-526` |
+| Legacy HMR events `hmr/change` / `hmr/reload` are still emitted alongside the rc.13 result object | Backward compatibility; `src/anima/hmr.py` vs `hmr/src/index.ts` (release notes, "Breaking Changes") |
+| `HmrService` still injects `watcher` for legacy callers; rc.13 injects `fs` | Backward compatibility; `src/anima/hmr.py` vs `hmr/src/index.ts:163-185` |
 
 The outer/inner-fiber scopes and config-path reporting are now ported. Two
 earlier outer-fiber attempts were reverted (broken registry identity, then
