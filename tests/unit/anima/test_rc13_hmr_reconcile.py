@@ -6,7 +6,9 @@ lines 286-301 (transaction) and 525-753 (stages), and `Hmr.Result` at 785-836.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import inspect
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -14,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from anima import Context
+from anima import Context, FsService, LocalFs
 from anima.hmr import HmrService, SkipReason
 from anima.watcher import WatcherService
 
@@ -245,7 +247,96 @@ def test_reconcile_helpers_guard_odd_modules(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reconcile_rejects_nested_transactions(tmp_path: Path) -> None:
+async def test_watch_config_validation(tmp_path: Path) -> None:
+    """rc.13's watch block is validated at mount time."""
+    ctx = Context()
+    bad_configs = [
+        {"watch": []},
+        {"watch": {"enabled": "yes"}},
+        {"watch": {"files": "*.py"}},
+        {"watch": {"files": [1]}},
+        {"watch": {"debounce": "100"}},
+        {"watch": {"debounce": -1}},
+    ]
+    for config in bad_configs:
+        with pytest.raises((TypeError, ValueError)):
+            HmrService(ctx, {"root": str(tmp_path), **config})
+
+
+@pytest.mark.asyncio
+async def test_watch_disabled_does_not_start_watching(tmp_path: Path) -> None:
+    ctx = Context()
+    ctx.use(WatcherService)
+    ctx.use(HmrService, {"root": str(tmp_path), "watch": {"enabled": False}})
+    await ctx.flush()
+    assert ctx.hmr._active is False
+
+
+@pytest.mark.asyncio
+async def test_watch_enabled_uses_fs_service_and_reconciles(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    ctx = Context()
+    ctx.use(WatcherService)
+    ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)  # BaseFs mounts itself at file:
+    hmr = HmrService(
+        ctx,
+        {
+            "root": str(tmp_path),
+            "watch": {"enabled": True, "files": ["*.py"], "debounce": 1},
+        },
+    )
+    hmr.init()
+    assert hmr._active is True
+
+    seen: list[set[Path]] = []
+
+    async def fake_reconcile(callback: Any) -> Any:
+        seen.append(
+            set(await callback() if inspect.isawaitable(callback()) else callback())
+        )
+        return None
+
+    monkeypatch.setattr(hmr, "reconcile", fake_reconcile)
+    target = tmp_path / "changed.py"
+    hmr._fs_watch.emit("change", target.as_uri())
+    # A rapid second change cancels the pending debounce task.
+    hmr._fs_watch.emit("change", (tmp_path / "other.py").as_uri())
+    await asyncio.sleep(0.05)
+    assert seen == [{target, tmp_path / "other.py"}]
+
+    pending = asyncio.ensure_future(asyncio.sleep(10))
+    result = hmr._stop_fs_watch(hmr._fs_watch, pending)
+    if result is not None and inspect.isawaitable(result):
+        await result
+    assert hmr._active is False
+
+    class SyncWatch:
+        def dispose(self) -> None:
+            return None
+
+    hmr._fs_watch = SyncWatch()
+    hmr.stop()
+    assert hmr._active is False
+
+    # No pending task and an awaitable disposer are both accepted paths.
+    hmr._stop_fs_watch(SyncWatch(), None)
+
+    class AsyncWatch:
+        def dispose(self) -> Any:
+            async def done() -> None:
+                return None
+
+            return done()
+
+    hmr._active = True
+    hmr._fs_watch = AsyncWatch()
+    hmr.stop()
+    await asyncio.sleep(0)
+    assert hmr._active is False
+
     """A transaction cannot be started from inside another one."""
     ctx = Context()
     hmr = await _service(ctx, tmp_path)

@@ -42,7 +42,7 @@ Items proven against rc.13 so far:
 | `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
 | Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
-Verified counts at this checkpoint: 1366 passed, 100% statement and branch coverage.
+Verified counts at this checkpoint: 1368 passed, 100% statement and branch coverage.
 
 ## rc.13 work items and current verdicts
 
@@ -59,8 +59,9 @@ not substitutes for that evidence.
 | `fs` service with mountable providers and `ctx.fs.watch()` | DONE | `src/anima/fs.py`; 14 probes in `test_fs.py` (upstream `packages/fs/src/index.ts:39-148`, `watcher.ts:35-111`, `packages/fs-node/src/index.ts:23-29`) |
 | Loader explicit injection scopes (outer/inner fiber) and config-file error locations | OPEN | `loader/src/index.ts` |
 | `entry.fiber` → `entry.innerFiber` rename | DONE (alias) | `Entry.innerFiber` read/write alias; rc.13 probe (release notes, "Breaking Changes"). The legacy `fiber` name remains as internal storage until callers migrate |
-| Volatile updates, `rawConfig`/`effectiveConfig`, include journal | VERIFYING | `vendor/cordis/README.md`; `src/anima/volatile.py`, `include.py` |
+| HMR file watching opt-in (`watch.enabled`, `ctx.fs.watch()`) | DONE (rc.13 path) | `HmrService._start_fs_watch` uses `ctx.fs.watch()` and calls `reconcile()`; enabled/disabled/config validation probes (upstream `hmr/src/index.ts:192-243,756-779`). Legacy watcher remains when no `watch` block is supplied |
+| Unload drains notified dependents before inverses | OPEN | `core/src/fiber.ts:481-487`; context-level `provide` drains, reflect-provided services do not. A naive wait inside the provide disposer deadlocked nested unloads and was reverted |
+| Volatile updates, `rawConfig`/`effectiveConfig`, include journal | EXTENSION (not a port item) | Canonical rc.13 has no volatile mechanism; this is DSH-fork behavior kept as an Anima extension — ADR 0014 |
 
-The DeepSeek fork's volatile mechanism is not present in canonical rc.13; its
-status is recorded as `VERIFYING` because it is an Anima-original extension
-rather than a port item, and it must not be presented as rc.13 parity.
+Anima-original extensions (volatile, `WatcherService`, `PkgService`) are kept
+but are explicitly not counted as rc.13 parity; see ADR 0014.

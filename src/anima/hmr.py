@@ -19,7 +19,7 @@ import inspect
 import logging
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
@@ -153,6 +153,36 @@ class HmrService(Service):
         root = cfg.get("root")
         ignored = cfg.get("ignored")
         interval = cfg.get("interval", 0.5)
+        # rc.13 moves file watching into an opt-in `watch` block served by
+        # ctx.fs.watch(). When the block is absent, the legacy always-on
+        # WatcherService path remains for existing callers.
+        self._watch_config: dict[str, Any] | None = None
+        if "watch" in cfg:
+            watch = cfg["watch"]
+            if not isinstance(watch, dict):
+                raise TypeError(f"watch must be a dict, got {watch!r}")
+            enabled = watch.get("enabled", False)
+            files = watch.get("files", ["."])
+            watch_debounce = watch.get("debounce", 100)
+            if not isinstance(enabled, bool):
+                raise TypeError(f"watch.enabled must be a bool, got {enabled!r}")
+            if not isinstance(files, list) or not all(
+                isinstance(item, str) for item in files
+            ):
+                raise TypeError(f"watch.files must be a list of strings, got {files!r}")
+            if isinstance(watch_debounce, bool) or not isinstance(
+                watch_debounce, (int, float)
+            ):
+                raise TypeError(
+                    f"watch.debounce must be a number, got {watch_debounce!r}"
+                )
+            if watch_debounce < 0:
+                raise ValueError("watch.debounce must be >= 0")
+            self._watch_config = {
+                "enabled": enabled,
+                "files": files,
+                "debounce": float(watch_debounce),
+            }
         super().__init__(ctx, "hmr")
         self.root = Path(root).resolve() if root else Path.cwd().resolve()
         external_paths: set[Path] = set()
@@ -181,6 +211,7 @@ class HmrService(Service):
         self._externals_paths = external_paths
         self._externals_names = external_names
         self._disposer: Disposer | None = None
+        self._fs_watch: Any = None
         self._active = False
         # Pending changes: module name -> file stat at stash time.
         self._stashed: dict[str, _Stat] = {}
@@ -195,7 +226,48 @@ class HmrService(Service):
 
     def init(self) -> None:
         """Lifecycle hook when mounted as a component."""
+        if self._watch_config is not None:
+            if self._watch_config["enabled"]:
+                self._start_fs_watch()
+            return
         self.start()
+
+    def _start_fs_watch(self) -> None:
+        """Serve file changes through ctx.fs.watch() and reconcile them."""
+        from anima.fs import WatchOptions
+
+        watch_cfg = self._watch_config
+        assert watch_cfg is not None
+        watch = self.ctx.fs.watch(self.root, WatchOptions(filter=watch_cfg["files"]))
+        stashed: set[Path] = set()
+        task: asyncio.Task[None] | None = None
+
+        def on_change(url: str) -> None:
+            stashed.add(Path(url.removeprefix("file:")))
+            nonlocal task
+            if task is not None and not task.done():
+                task.cancel()
+            task = asyncio.get_running_loop().create_task(self._flush_fs_watch(stashed))
+
+        watch.on("change", on_change)
+        self._fs_watch = watch
+        self._active = True
+        self.ctx.effect(lambda: lambda: self._stop_fs_watch(watch, task))
+
+    async def _flush_fs_watch(self, stashed: set[Path]) -> None:
+        await asyncio.sleep(self._watch_config["debounce"] / 1000)  # type: ignore[index]
+        roots = set(stashed)
+        stashed.clear()
+        await self.reconcile(lambda: roots)
+
+    def _stop_fs_watch(
+        self, watch: Any, task: asyncio.Task[None] | None
+    ) -> Awaitable[None] | None:
+        if task is not None and not task.done():
+            task.cancel()
+        self._active = False
+        result: Awaitable[None] | None = watch.dispose()
+        return result
 
     def start(self) -> None:
         """Start watching root directory for Python module changes."""
@@ -221,6 +293,11 @@ class HmrService(Service):
         if self._disposer is not None:
             self._disposer()
             self._disposer = None
+        if self._fs_watch is not None:
+            result = self._fs_watch.dispose()
+            if result is not None and inspect.isawaitable(result):
+                asyncio.ensure_future(result)
+            self._fs_watch = None
         self._active = False
 
     # -- dependency graph (L13) ------------------------------------------------
