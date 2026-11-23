@@ -162,13 +162,13 @@ class ServerStatic:
                 for idx_name in self.config.index:
                     idx_path = (target_candidate / idx_name).resolve()
                     if idx_path.is_file():
-                        rel = str(idx_path.relative_to(self.base_dir))
+                        rel = idx_path.relative_to(self.base_dir).as_posix()
                         if not self._is_excluded(rel):
                             return self._serve_file(idx_path, res)
 
             # Exact file handling
             if target_candidate.is_file():
-                rel = str(target_candidate.relative_to(self.base_dir))
+                rel = target_candidate.relative_to(self.base_dir).as_posix()
                 if not self._is_excluded(rel):
                     return self._serve_file(target_candidate, res)
 
@@ -176,7 +176,7 @@ class ServerStatic:
             for ext in self.config.extensions:
                 cand = Path(f"{target_candidate}{ext}").resolve()
                 if cand.is_file():
-                    rel = str(cand.relative_to(self.base_dir))
+                    rel = cand.relative_to(self.base_dir).as_posix()
                     if not self._is_excluded(rel):
                         return self._serve_file(cand, res)
 
