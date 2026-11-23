@@ -21,7 +21,7 @@ reused here.
   `uv run python -m mypy src`: green.
 - `filterwarnings = ["error", "ignore::ResourceWarning"]` is configured, so
   unawaited coroutines and other unexpected warnings fail the suite.
-- 24 executable rc.13 core conformance probes live in
+- 34 executable rc.13 core conformance probes live in
   `tests/unit/anima/test_rc13_core_conformance.py`. Each cites the upstream
   `file:line` it validates.
 
