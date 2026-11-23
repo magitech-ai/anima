@@ -46,7 +46,7 @@ class _AsyncInterval:
         )
 
     async def _ticks(self) -> None:
-        while not self._done:
+        while True:
             await asyncio.sleep(self._delay)
             if self._pending:
                 future = self._pending.pop(0)

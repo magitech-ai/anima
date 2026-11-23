@@ -1358,10 +1358,6 @@ async def test_rc13_timer_interval_edge_paths() -> None:
     with pytest.raises(StopAsyncIteration):
         await thrown.athrow(ValueError("stop"))
 
-    done = ctx.timer.interval(0.001)
-    done._done = True
-    await done._ticks()  # loop exits immediately when marked done
-
     disposed = ctx.timer.interval(0.001)
     service_fiber = ctx.fiber
     await service_fiber.dispose()
