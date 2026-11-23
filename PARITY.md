@@ -66,3 +66,23 @@ not substitutes for that evidence.
 
 Anima-original extensions (volatile, `WatcherService`, `PkgService`) are kept
 but are explicitly not counted as rc.13 parity; see ADR 0014.
+
+## Known minor divergences (not yet ported)
+
+These are observed differences with direct source evidence. They are not
+marked DONE:
+
+| Divergence | Evidence |
+|---|---|
+| `parallel()` returns the result list on success; rc.13 resolves `void` | `src/anima/events.py` vs `core/src/events.ts:110-119` |
+| `emit()` catches and logs listener exceptions; rc.13 propagates them | `src/anima/events.py` vs `core/src/events.ts:121-126` |
+| Access errors are not deferred/enriched with a lazy stack | `src/anima/reflect.py` vs `core/src/reflect.ts:20-36` |
+| `await_settle()` drives a never-attempted PENDING fiber; rc.13 `await` only observes | `src/anima/core.py` vs `core/src/fiber.ts:520-526` |
+| Legacy HMR events `hmr/change` / `hmr/reload` are still emitted; rc.13 removed them | `src/anima/hmr.py` vs `hmr/src/index.ts` (release notes, "Breaking Changes") |
+| `HmrService` still injects `watcher`; rc.13 injects `fs` | `src/anima/hmr.py` vs `hmr/src/index.ts:163-185` |
+
+The two OPEN architectural items above (loader injection scopes / error
+locations, and the dependent-drain guard on unload) remain the substantive
+gaps. Two attempted dependently-drained teardowns deadlocked nested unloads
+and were reverted; a correct fix needs the rc.13 `Impl.dependents`/`release`
+protocol rather than waiting on an existing transition.
