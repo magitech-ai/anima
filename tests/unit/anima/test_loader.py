@@ -362,6 +362,76 @@ async def test_loader_persistence_no_auto_save(tmp_path: Path):
     assert re_read[0]["config"] == {"opt": 999}
 
 
+@pytest.mark.asyncio
+async def test_failed_update_does_not_write_back_to_the_entry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A restart that rejects the new config does not reach the entry.
+
+    ``internal/commit`` runs the loader's write-back: the entry options get the
+    new config in memory, and a file-backed tree rewrites its file. Emitting it
+    before the update waterfall settled meant a rejected config was recorded
+    for an entry whose fiber never loaded it.
+    """
+    ctx = Context()
+    profile = tmp_path / "profile.yaml"
+
+    dummy_mod = types.ModuleType("reject_mod")
+
+    class Reject:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            if dict(config or {}).get("reject"):
+                raise RuntimeError("refuses this config")
+
+    dummy_mod.Reject = Reject
+    monkeypatch.setitem(sys.modules, "reject_mod", dummy_mod)
+
+    loader = LoaderService(ctx, {"filename": profile})
+    loader.load([{"id": "r", "name": "reject_mod:Reject", "config": {"v": 1}}])
+    await ctx.flush()
+
+    fiber = loader.resolve("r").fiber
+    assert fiber is not None
+    with pytest.raises(RuntimeError, match="refuses this config"):
+        await fiber.update({"reject": True})
+
+    assert loader.resolve("r").options["config"] == {"v": 1}
+    assert fiber.config == {"v": 1}
+
+
+@pytest.mark.asyncio
+async def test_failed_update_does_not_leave_a_config_key_behind(
+    monkeypatch,
+) -> None:
+    """Rolling back an entry that never had a config drops the added key."""
+    ctx = Context()
+
+    dummy_mod = types.ModuleType("reject_nokey_mod")
+    reject_cfg: dict[str, Any] = {"reject": True}
+
+    class Reject:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            if config and config.get("reject"):
+                raise RuntimeError("refuses this config")
+
+    dummy_mod.Reject = Reject
+    monkeypatch.setitem(sys.modules, "reject_nokey_mod", dummy_mod)
+
+    loader = LoaderService(ctx)
+    loader.load([{"id": "n", "name": "reject_nokey_mod:Reject"}])
+    await ctx.flush()
+    entry = loader.resolve("n")
+    assert "config" not in entry.options
+
+    fiber = entry.fiber
+    assert fiber is not None
+    with pytest.raises(RuntimeError, match="refuses this config"):
+        await fiber.update(reject_cfg)
+
+    assert "config" not in entry.options
+    assert fiber.config == {}
+
+
 def test_load_profile_error_handling(tmp_path: Path):
     ctx = Context()
 

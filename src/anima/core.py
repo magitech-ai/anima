@@ -654,19 +654,46 @@ class Fiber:
             return
 
         resolved = await self._resolve_config(config)
+        entry = self.entry
+        previous_config = self.config
+        # Snapshot of the entry's own options before the commit writes the
+        # candidate into them. The rollback below restores this exact dict, so
+        # an entry that had no ``config`` key does not gain one back as null.
+        previous_options = dict(entry.options) if entry is not None else None
+        applied = False
         if not no_save:
             self.ctx.emit("internal/commit", self, resolved)
 
         async def _default(cfg: Any) -> None:
+            nonlocal applied
             self.config = cfg
             self.error = None
             await self.restart()
+            applied = True
 
-        await self.ctx.waterfall(
-            "internal/update",
-            resolved,
-            default_handler=_default,
-        )
+        try:
+            await self.ctx.waterfall(
+                "internal/update",
+                resolved,
+                default_handler=_default,
+            )
+        except BaseException:
+            # The commit fired before the waterfall and already wrote the
+            # candidate into the entry options (and, for a file-backed tree,
+            # into the file). The commit has to stay there: an entry-owned
+            # Group reconciles an update in place only when the config object
+            # it receives is the one the commit just adopted, and moving the
+            # emit past the waterfall turns every equal-content group update
+            # into a full restart. So an update that never applied is undone
+            # here with a second, compensating commit instead: the fiber goes
+            # back to its previous config, the entry options go back to their
+            # snapshot, and the journal records the change back so the next
+            # boot reads the config that was actually running.
+            if not applied:
+                self.config = previous_config
+                if not no_save and previous_options is not None:
+                    self.ctx.emit("internal/commit-rollback", self, previous_options)
+            raise
 
     def status(self) -> dict[str, Any]:
         """Return diagnostic status snapshot of this fiber."""
