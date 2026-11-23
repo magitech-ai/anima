@@ -17,6 +17,25 @@ Anima is at `0.3.0` and under active development. **The API is not yet stable an
 
 ---
 
+## Lineage
+
+Anima is the Python implementation of the kernel paradigm formalized in
+Cordis — *"A Programming Paradigm for Spatiotemporal Composability"*
+([arXiv:2608.25512](https://arxiv.org/abs/2608.25512)) — as realized by
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), the
+Cordis-powered harness whose plugin kernel is built on reversible effects,
+reactive coeffects and a shared context.
+
+The 0.3.0 kernel was built and conformance-checked against DeepSeek Harness at
+pin `fcc0ad46` (`dsh v0.2.2-rc.1`). The frozen pin and every DONE/PARTIAL verdict
+are recorded in [PARITY.md](PARITY.md) and in the
+[magitech-harness parity map](https://github.com/magitech-ai/magitech-harness/blob/main/PARITY.md).
+Anima is Magitech's
+Python kernel: the asyncio runtime, component surface and product built on top
+are ours; the theory and reference kernel are credited in [NOTICE](NOTICE).
+
+---
+
 ## Install
 
 Anima is not published to PyPI. Install from a repository checkout:
@@ -157,6 +176,8 @@ See [AGENTS.md](AGENTS.md) for the full engineering standards.
 * [CONTEXT.md](CONTEXT.md) — canonical vocabulary: context, service, component entrypoint, waterfall, disposer.
 * [docs/adr/](docs/adr/) — architecture decision records (waterfall pipeline, disposer callables, hierarchical contexts).
 * [docs/agents/](docs/agents/) — domain docs, issue tracker, and triage labels.
+* [NOTICE](NOTICE) — upstream MIT attributions and lineage.
+* [PARITY.md](PARITY.md) — conformance target and verdicts.
 
 ## Contributing
 
