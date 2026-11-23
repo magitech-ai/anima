@@ -50,7 +50,6 @@ from anima.include import (
 )
 from anima.jsexpr import load_yaml
 from anima.loader import LoaderService
-from anima.schema import Schema
 
 
 @pytest.fixture
@@ -200,21 +199,7 @@ def test_diff_treats_js_expr_as_opaque() -> None:
 
 
 # ---------------------------------------------------------------------------
-# P1-6 — equal_except_volatile (schema-aware config diff)
 # ---------------------------------------------------------------------------
-
-_VOLATILE_SCHEMA = Schema.object(
-    {
-        "theme": Schema.string(),
-        "level": Schema.number(),
-        "nested": Schema.object(
-            {
-                "label": Schema.string(),
-                "count": Schema.number(),
-            }
-        ),
-    }
-)
 
 
 # ---------------------------------------------------------------------------

@@ -1607,20 +1607,6 @@ def test_conformance_s14_unported_type_fails_loud() -> None:
         Schema("date").validate("2026-01-01")
 
 
-_L_VOLATILE_SCHEMA = Schema.object(
-    {
-        "theme": Schema.string(),
-        "level": Schema.number(),
-        "nested": Schema.object(
-            {
-                "label": Schema.string(),
-                "count": Schema.number(),
-            }
-        ),
-    }
-)
-
-
 def _l_repo_root() -> Path:
     """Return the anima repo root (two levels above this file)."""
     return Path(__file__).resolve().parents[2]
@@ -3247,7 +3233,7 @@ async def test_conformance_l10_journal_wired_into_include(
 
 
 # ---------------------------------------------------------------------------
-# L11 — equal_except_volatile + diff_entries
+# L11 — diff_entries
 # ---------------------------------------------------------------------------
 
 

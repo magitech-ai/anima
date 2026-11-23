@@ -155,9 +155,8 @@ class HmrService(Service):
         root = cfg.get("root")
         ignored = cfg.get("ignored")
         interval = cfg.get("interval", 0.5)
-        # rc.13 moves file watching into an opt-in `watch` block served by
-        # ctx.fs.watch(). When the block is absent, the legacy always-on
-        # WatcherService path remains for existing callers.
+        # rc.13 uses an opt-in `watch` block served by ctx.fs.watch();
+        # without it, start() still watches through the fs service.
         self._watch_config: dict[str, Any] | None = None
         if "watch" in cfg:
             watch = cfg["watch"]

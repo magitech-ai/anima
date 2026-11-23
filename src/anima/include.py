@@ -9,9 +9,6 @@ patch list, never written into the file.
 
 Two diffs live here and must not be conflated (see the design doc):
 
-- ``diff_entries`` is the P1-6 schema-aware diff: volatile fields
-  compare equal, absent objects compare to schema defaults, JsExpr
-  nodes are opaque. It serves the loader's volatile fast path.
 - ``diff_options`` is the journal's plain deep-equal diff, used only
   by journal ``record()``. A removed key yields ``None``: in a changes
   dict None deletes the key, it is never stored as a value.
@@ -111,8 +108,8 @@ def diff_options(legacy: dict[str, Any], options: dict[str, Any]) -> dict[str, A
     """Calculate the plain deep-equal delta between two entry dicts.
 
     A removed key yields ``None`` (deletion, never a stored value).
-    This is the journal's diff: unlike ``diff_entries`` it knows
-    nothing about schemas or volatile fields.
+    This is the journal's diff: unlike ``diff_entries`` it compares
+    strictly by raw equality.
     """
     changes: dict[str, Any] = {}
     for key in set(legacy) | set(options):

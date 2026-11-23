@@ -501,7 +501,7 @@ class Fiber:
 
         Runs the ``internal/config`` waterfall, then schema validation,
         and returns the resolved candidate. The running config, raw
-        input, and volatile references are untouched. Raises when
+        input is untouched. Raises when
         validation fails.
         """
         return await self._resolve_config(config)

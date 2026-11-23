@@ -61,7 +61,7 @@ class ConsumerPlugin:
 
     Declares its dependency as a plain ``inject`` list (oracle
     registry.ts:75-90, array form) and its config as a schema with a
-    volatile field (oracle schema index.ts:480-482). ``apply`` runs
+    config schema. ``apply`` runs
     with ``(ctx, config)`` (oracle fiber.ts:250-259) and registers
     listeners, a provided value, and disposers.
     """
@@ -529,5 +529,4 @@ async def test_acceptance_validation_errors() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Part 2 — volatile config updates without reload (P1-6 acceptance, re-pinned)
 # ---------------------------------------------------------------------------

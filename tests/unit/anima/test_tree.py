@@ -1247,7 +1247,6 @@ async def test_case5_owner_fiber_alive_marks_disabled(mod: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# P1-6 — Volatile live-update commit path
 # ---------------------------------------------------------------------------
 
 
