@@ -44,10 +44,11 @@ Items proven against rc.13 so far:
 
 Verified counts at this checkpoint: 1348 passed, 100% statement and branch coverage.
 
-## Open gaps against rc.13
+## rc.13 work items and current verdicts
 
-These are recorded as **OPEN**, not DONE or PARTIAL-with-accepted-gap. They are
-tracked work, not hidden divergences:
+Items marked **OPEN** are tracked work, not hidden divergences. A gap is closed
+only by an executable probe plus a green full gate; agent-accepted reasons are
+not substitutes for that evidence.
 
 | Item | Status | Upstream evidence |
 |---|---|---|
@@ -59,6 +60,6 @@ tracked work, not hidden divergences:
 | `entry.fiber` → `entry.innerFiber` rename | DONE (alias) | `Entry.innerFiber` read/write alias; rc.13 probe (release notes, "Breaking Changes"). The legacy `fiber` name remains as internal storage until callers migrate |
 | Volatile updates, `rawConfig`/`effectiveConfig`, include journal | VERIFYING | `vendor/cordis/README.md`; `src/anima/volatile.py`, `include.py` |
 
-A gap is closed only when an executable probe citing the upstream source is
-added and the full gate is green. Agent-accepted reasons are not accepted
-substitutes for that evidence.
+The DeepSeek fork's volatile mechanism is not present in canonical rc.13; its
+status is recorded as `VERIFYING` because it is an Anima-original extension
+rather than a port item, and it must not be presented as rc.13 parity.
