@@ -42,7 +42,7 @@ Items proven against rc.13 so far:
 | `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
 | Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
-Verified counts at this checkpoint: 1369 passed, 100% statement and branch coverage.
+Verified counts at this checkpoint: 1395 passed, 100% statement and branch coverage.
 
 ## rc.13 work items and current verdicts
 
@@ -63,25 +63,34 @@ not substitutes for that evidence.
 | `entry.fiber` → `entry.innerFiber` rename | DONE (alias) | `Entry.innerFiber` read/write alias; rc.13 probe (release notes, "Breaking Changes"). The legacy `fiber` name remains as internal storage until callers migrate |
 | HMR file watching opt-in (`watch.enabled`, `ctx.fs.watch()`) | DONE (rc.13 path) | `HmrService._start_fs_watch` uses `ctx.fs.watch()` and calls `reconcile()`; enabled/disabled/config validation probes (upstream `hmr/src/index.ts:192-243,756-779`). Legacy watcher remains when no `watch` block is supplied |
 | Unload drains notified dependents before inverses | DONE | `Impl.dependents` / `release` protocol in `core.py`/`reflect.py`; probe asserts dependents' disposers run before the provider's (paper Algorithm 5, upstream `fiber.ts:481-487`) |
+| Intercept and inject config values are interpolated | DONE | `LoaderService._on_patch_context` and `Entry._init` evaluate `__jsExpr` values; probes (upstream `loader/config/entry.ts:155,169-179`) |
+| Include anonymous-id stability across reads | DONE | `Include._assign_ids()` reuses ids for deep-equal rows with the same parent; probe (upstream `include/index.ts:628-675`) |
+| `EntryGroup.remove` adoption guard | DONE | `entry.parent is self` check; probe (upstream `loader/config/group.ts:64-68`) |
+| Entry-options validation | DONE | `validate_options()` / `EntryValidationError` on create paths; probes (upstream `loader/config/utils.ts:163-209`) |
+| `emit()` propagates listener exceptions | DONE | `EventBus.emit` no longer swallows sync errors; probes (upstream `core/src/events.ts:121-126`) |
 | Volatile updates, `rawConfig`/`effectiveConfig`, include journal | EXTENSION (not a port item) | Canonical rc.13 has no volatile mechanism; this is DSH-fork behavior kept as an Anima extension — ADR 0014 |
 
 Anima-original extensions (volatile, `WatcherService`, `PkgService`) are kept
 but are explicitly not counted as rc.13 parity; see ADR 0014.
 
-## Documented compatibility and platform adaptations
+## Remaining divergences — awaiting user ratification
 
 These are observed behavioral differences with direct source evidence. They
-are deliberate Python/backward-compatibility adaptations rather than missing
-features, and are disclosed here rather than presented as rc.13 parity. They
-can be revisited without changing the port target:
+are **not ratified**: an agent decision is not an accepted gap. They are listed
+here rather than claimed as parity. The user must decide whether each is an
+accepted platform/compatibility adaptation or work still to be done.
 
 | Divergence | Evidence |
 |---|---|
-| `emit()` catches and logs listener exceptions; rc.13 propagates them | `src/anima/events.py` vs `core/src/events.ts:121-126` |
-| Access errors capture their stack eagerly; rc.13 defers stack creation until failure | Performance detail; `src/anima/reflect.py` vs `core/src/reflect.ts:20-36` |
-| `await_settle()` drives a never-attempted PENDING fiber; rc.13 `await` only observes | Convenience kept for existing callers; `src/anima/core.py` vs `core/src/fiber.ts:520-526` |
-| Legacy HMR events `hmr/change` / `hmr/reload` are still emitted alongside the rc.13 result object | Backward compatibility; `src/anima/hmr.py` vs `hmr/src/index.ts` (release notes, "Breaking Changes") |
-| `HmrService` still injects `watcher` for legacy callers; rc.13 injects `fs` | Backward compatibility; `src/anima/hmr.py` vs `hmr/src/index.ts:163-185` |
+| Access errors capture their stack eagerly; rc.13 defers stack creation until failure | `src/anima/reflect.py` vs `core/src/reflect.ts:20-36` |
+| `await_settle()` drives a never-attempted PENDING fiber; rc.13 `await` only observes | `src/anima/core.py` vs `core/src/fiber.ts:520-526` |
+| Legacy HMR events `hmr/change` / `hmr/reload` are still emitted alongside the rc.13 result object | `src/anima/hmr.py` vs `hmr/src/index.ts` (release notes, "Breaking Changes") |
+| `HmrService` still injects `watcher` for legacy callers; rc.13 injects `fs` | `src/anima/hmr.py` vs `hmr/src/index.ts:163-185` |
+
+Port target itself is also awaiting user confirmation: ADR 0013 selected
+canonical `cordis@4.0.0-rc.13` from evidence (npm `latest`, GitHub release),
+but the user has not ratified that choice over the newer DSH fork
+`@deepseek-ai/cordis@4.2.0-alpha.1`.
 
 The outer/inner-fiber scopes and config-path reporting are now ported. Two
 earlier outer-fiber attempts were reverted (broken registry identity, then

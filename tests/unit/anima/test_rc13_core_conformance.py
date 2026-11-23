@@ -983,6 +983,149 @@ async def test_rc13_loader_expression_error_without_location(
 
 
 @pytest.mark.asyncio
+async def test_rc13_intercept_values_are_interpolated(monkeypatch: Any) -> None:
+    """A ``__jsExpr`` in entry intercept is evaluated before use."""
+    module = types.ModuleType("rc13_intercept_mod")
+    seen: list[Any] = []
+
+    def comp(c: Any, config: Any = None) -> None:
+        seen.append(c.resolve_intercept("svc"))
+
+    module.comp = comp
+    monkeypatch.setitem(sys.modules, "rc13_intercept_mod", module)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "e",
+                "name": "rc13_intercept_mod:comp",
+                "intercept": {"svc": {"mode": {"__jsExpr": "'turbo'"}}},
+            }
+        ]
+    )
+    await ctx.flush()
+    assert seen == [{"mode": "turbo"}]
+
+
+@pytest.mark.asyncio
+async def test_rc13_inject_values_are_interpolated(monkeypatch: Any) -> None:
+    """A ``__jsExpr`` in entry inject config is evaluated for the outer fiber."""
+    module = types.ModuleType("rc13_inject_mod")
+
+    def comp(_c: Any, config: Any = None) -> None:
+        return None
+
+    module.comp = comp
+    monkeypatch.setitem(sys.modules, "rc13_inject_mod", module)
+    ctx = Context()
+    ctx.provide("inject_svc", object())
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "e",
+                "name": "rc13_inject_mod:comp",
+                "inject": {"inject_svc": {"level": {"__jsExpr": "'three'"}}},
+            }
+        ]
+    )
+    await ctx.flush()
+    entry = loader.resolve("e")
+    assert entry.outer_fiber is not None
+    assert entry.outer_fiber.inject_config == {"inject_svc": {"level": "three"}}
+
+
+@pytest.mark.asyncio
+async def test_rc13_group_remove_respects_adoption(monkeypatch: Any) -> None:
+    """A group cannot remove an entry another group already adopted."""
+    module = types.ModuleType("rc13_adopt_mod")
+
+    def comp(_c: Any, config: Any = None) -> None:
+        return None
+
+    module.comp = comp
+    monkeypatch.setitem(sys.modules, "rc13_adopt_mod", module)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "g1",
+                "target": "group",
+                "entries": [{"id": "e", "name": "rc13_adopt_mod:comp"}],
+            },
+            {"id": "g2", "target": "group", "entries": []},
+        ]
+    )
+    await ctx.flush()
+    entry = loader.resolve("e")
+    old_group = loader.resolve_group("g1")
+    new_group = loader.resolve_group("g2")
+    # Simulate a file-driven move that adopted the row into g2.
+    entry.parent = new_group
+    old_group.remove("e")
+    assert loader.resolve("e") is entry
+    assert entry.parent is new_group
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        (42, "entry must be an object"),
+        ({"id": "a"}, "name is required"),
+        ({"name": "m:c", "id": "a:b"}, 'id must not contain ":"'),
+        ({"name": "m:c", "group": True}, "config is required"),
+        ({"name": "m:c", "disabled": 1}, "disabled must be a boolean"),
+        ({"name": "m:c", "inject": ["ok", 2]}, "inject.1 must be a string"),
+        ({"name": "m:c", "intercept": "bad"}, "intercept must be an object"),
+        (
+            {"name": "m:c", "isolate": {"svc": 3}},
+            "isolate.svc must be true or a string",
+        ),
+    ],
+)
+def test_rc13_entry_options_validation(options: Any, expected: str) -> None:
+    """Entry rows are validated against the rc.13 contract."""
+    from anima.tree import validate_options
+
+    messages = [issue["message"] for issue in validate_options(options)]
+    assert expected in messages
+
+
+def test_rc13_entry_options_validation_accepts_valid_rows() -> None:
+    from anima.tree import validate_options
+
+    options: dict[str, Any] = {
+        "name": "m:c",
+        "disabled": {"__jsExpr": "false"},
+        "inject": {"svc": {"level": 1}},
+        "isolate": {"svc": True},
+        "intercept": {"svc": {"mode": "x"}},
+    }
+    assert validate_options(options) == []
+    nested = {"name": "group", "group": True, "config": [{"id": "bad"}]}
+    issues = validate_options(nested, deep=True)
+    assert issues[0]["path"] == ["config", 0, "name"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_create_rejects_invalid_options() -> None:
+    from anima.tree import EntryValidationError
+
+    ctx = Context()
+    loader = LoaderService(ctx)
+    with pytest.raises(EntryValidationError, match="name is required"):
+        await loader.create({"id": "bad"})
+
+    loader.load([{"id": "g", "name": "group", "group": True, "config": []}])
+    await ctx.flush()
+    group = loader.resolve_group("g")
+    with pytest.raises(EntryValidationError, match="name is required"):
+        await group.create({"id": "bad"})
+
+
+@pytest.mark.asyncio
 async def test_rc13_fiber_state_unloading_exists() -> None:
     """rc.13 keeps the six fiber states, including UNLOADING (fiber.ts:90-97)."""
     assert {state.name for state in FiberState} == {

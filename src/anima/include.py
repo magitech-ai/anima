@@ -903,6 +903,9 @@ class Include(Service, EntryTree):
         ctx.on("internal/update", self._on_internal_update, mode=EventMode.WATERFALL)
 
         self._locations: dict[str, dict[tuple[Any, ...], tuple[int, int]]] = {}
+        # Ids assigned to rows that the file leaves anonymous, so an edit to a
+        # neighbor does not restart them (upstream include/index.ts:628-675).
+        self._anonymous: dict[str, tuple[str | None, dict[str, Any]]] = {}
         self._cache: dict[str, Any] | None = None
         self._journal: Journal = {}
         self._index: PatchIndex | None = None
@@ -1104,6 +1107,52 @@ class Include(Service, EntryTree):
         finally:
             self._draining = None
 
+    def _assign_ids(self, data: list[dict[str, Any]]) -> None:
+        """Give anonymous rows stable ids across reads of the config file."""
+        used: set[str] = set()
+
+        def collect(rows: list[dict[str, Any]]) -> None:
+            for row in rows:
+                if row.get("id"):
+                    used.add(row["id"])
+                if row.get("group") and isinstance(row.get("config"), list):
+                    collect(row["config"])
+
+        collect(data)
+        for patch in self.config.get("patches") or []:
+            if isinstance(patch.get("insert"), list):
+                collect(patch["insert"])
+
+        previous = self._anonymous
+        assigned: dict[str, tuple[str | None, dict[str, Any]]] = {}
+
+        def assign(rows: list[dict[str, Any]], parent: str | None) -> None:
+            for row in rows:
+                if not row.get("id"):
+                    candidate: str | None = None
+                    for ident, (old_parent, options) in previous.items():
+                        if (
+                            old_parent == parent
+                            and ident not in used
+                            and deep_equal(options, row)
+                        ):
+                            candidate = ident
+                            del previous[ident]
+                            break
+                    if candidate is None:
+                        while True:
+                            candidate = secrets.token_hex(4)
+                            if candidate not in used and candidate not in self.store:
+                                break
+                    used.add(candidate)
+                    assigned[candidate] = (parent, copy.deepcopy(row))
+                    row["id"] = candidate
+                if row.get("group") and isinstance(row.get("config"), list):
+                    assign(row["config"], row.get("id"))
+
+        assign(data, None)
+        self._anonymous = assigned
+
     def get_location(
         self, entry_id: str, path: tuple[Any, ...]
     ) -> tuple[int, int] | None:
@@ -1136,6 +1185,7 @@ class Include(Service, EntryTree):
         for row in data:
             if not isinstance(row, dict):
                 raise TypeError("entry must be an object")
+        self._assign_ids(data)
         return data
 
     def _dump(self, data: list[dict[str, Any]]) -> str:

@@ -33,7 +33,7 @@ async def test_event_bus_prepend_and_dispose():
 
 
 @pytest.mark.asyncio
-async def test_emit_async_listeners_and_error_handling():
+async def test_emit_async_listeners_and_error_handling(caplog: Any):
     bus = EventBus()
     async_calls = []
 
@@ -47,10 +47,26 @@ async def test_emit_async_listeners_and_error_handling():
     bus.on("async_event", failing_listener)
     bus.on("async_event", async_listener)
 
-    # Emitter should catch exception from failing_listener and schedule async_listener
-    bus.emit("async_event", "hello")
+    # rc.13: a throwing listener aborts the broadcast and reaches the caller.
+    with pytest.raises(RuntimeError, match="boom"):
+        bus.emit("async_event", "hello")
+    assert async_calls == []
+
+    # Async listeners are still scheduled when no earlier listener throws.
+    bus2 = EventBus()
+    bus2.on("async_event", async_listener)
+    bus2.emit("async_event", "hello")
     await asyncio.sleep(0.05)
     assert async_calls == ["hello"]
+
+    async def bad_async(_val: Any) -> None:
+        raise ValueError("async boom")
+
+    bus3 = EventBus()
+    bus3.on("async_event", bad_async)
+    bus3.emit("async_event", "hello")
+    await asyncio.sleep(0.05)
+    assert "Error in async emit listener" in caplog.text
 
 
 def test_emit_sync_fallback():

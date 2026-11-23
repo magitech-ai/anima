@@ -409,7 +409,12 @@ class LoaderService(Service, EntryTree):
         entry.ctx._isolated_services.update(new_map)
         # Intercept: replace the entry ctx's map wholesale with the entry's
         # own intercept dict (parent-chain resolution supplies inheritance).
-        entry.ctx._intercept_configs = dict(entry.options.get("intercept") or {})
+        # Upstream entry.ts:169-179 interpolates the intercept options before
+        # they reach the component: a ``__jsExpr`` value must be evaluated,
+        # not stored verbatim.
+        entry.ctx._intercept_configs = interpolate(
+            entry.ctx, entry.options.get("intercept") or {}
+        )
         # Notify when the isolate map actually changed, so dependent fibers
         # re-resolve through the epoch machinery.
         changed = {

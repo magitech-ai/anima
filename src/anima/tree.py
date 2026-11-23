@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, TypeGuard, cast
 from anima.core import Context, Fiber, FiberState, is_js_expr
 from anima.events import EventMode
 from anima.jsexpr import evaluate as evaluate_js_expr
+from anima.jsexpr import interpolate as interpolate_js_expr
 from anima.registry import resolve_inject
 from anima.schema import _UNDEFINED, Schema, deep_equal
 from anima.volatile import update_volatile, volatile_entries
@@ -226,6 +227,94 @@ def _sort_options_keys(options: dict[str, Any]) -> None:
     options.update(ordered)
 
 
+class EntryValidationError(ValueError):
+    """Raised when an entry row violates the rc.13 option contract."""
+
+    def __init__(self, issues: list[dict[str, Any]]) -> None:
+        self.issues = issues
+        super().__init__(
+            "invalid entry options: " + "; ".join(issue["message"] for issue in issues)
+        )
+
+
+def validate_options(
+    options: Any, sep: str = ":", deep: bool = False
+) -> list[dict[str, Any]]:
+    """Validate an entry row against the rc.13 contract.
+
+    Mirrors ``loader/config/utils.ts:163-209``: ids are strings without the
+    tree separator, name is required, booleans and the inject/isolate/intercept
+    shapes are checked, and a group's config must be an entry list.
+    """
+    issues: list[dict[str, Any]] = []
+    if not isinstance(options, dict):
+        return [{"message": "entry must be an object", "path": []}]
+
+    def check(key: str, expected: str, valid: Any, required: bool = False) -> None:
+        value = options.get(key)
+        if value is None:
+            if required:
+                issues.append({"message": f"{key} is required", "path": [key]})
+        elif not valid(value):
+            issues.append({"message": f"{key} must be {expected}", "path": [key]})
+
+    check("id", "a string", lambda v: isinstance(v, str))
+    ident = options.get("id")
+    if isinstance(ident, str) and sep in ident:
+        issues.append({"message": f'id must not contain "{sep}"', "path": ["id"]})
+    check("name", "a string", lambda v: isinstance(v, str), required=True)
+    check("group", "a boolean", lambda v: isinstance(v, bool))
+    check(
+        "disabled",
+        "a boolean",
+        lambda v: isinstance(v, bool) or is_js_expr(v),
+    )
+    if options.get("group") is True:
+        check("config", "an array", lambda v: isinstance(v, list), required=True)
+    check(
+        "inject",
+        "an array or an object",
+        lambda v: isinstance(v, (list, dict)),
+    )
+    inject = options.get("inject")
+    if isinstance(inject, list):
+        for index, name in enumerate(inject):
+            if not isinstance(name, str):
+                issues.append(
+                    {
+                        "message": f"inject.{index} must be a string",
+                        "path": ["inject", index],
+                    }
+                )
+    check("intercept", "an object", lambda v: isinstance(v, dict))
+    check("isolate", "an object", lambda v: isinstance(v, dict))
+    isolate = options.get("isolate")
+    if isinstance(isolate, dict):
+        for name, label in isolate.items():
+            if label is True or isinstance(label, str):
+                continue
+            issues.append(
+                {
+                    "message": f"isolate.{name} must be true or a string",
+                    "path": ["isolate", name],
+                }
+            )
+    if (
+        deep
+        and options.get("group") is True
+        and isinstance(options.get("config"), list)
+    ):
+        for index, child in enumerate(options["config"]):
+            for issue in validate_options(child, sep, True):
+                issues.append(
+                    {
+                        "message": issue["message"],
+                        "path": ["config", index, *issue["path"]],
+                    }
+                )
+    return issues
+
+
 def check_unique_ids(rows: list[dict[str, Any]]) -> None:
     """Raise ValueError when two rows carry the same entry id.
 
@@ -371,6 +460,9 @@ class EntryTree(ABC):
         position: float = math.inf,
     ) -> str:
         """Create an entry in the root group or a nested group; return its full id."""
+        issues = validate_options(options, EntryTree.sep, deep=True)
+        if issues:
+            raise EntryValidationError(issues)
         group = self.resolve_group(parent)
         entry_id = self.ensure_id(options)
         if entry_id in self.store:
@@ -851,9 +943,17 @@ class Entry:
             # service mirroring and entry identity are preserved.
             entry = self
 
+            inject_values = resolve_inject(inject_opt, {})
+            # Upstream entry.ts:155 interpolates each declared dependency's
+            # config before the outer fiber resolves it.
+            inject_values = {
+                name: interpolate_js_expr(entry.ctx, value)
+                for name, value in inject_values.items()
+            }
+
             class Outer:
                 name = "loader:outer"
-                inject = resolve_inject(inject_opt, {})
+                inject = inject_values
 
                 @staticmethod
                 async def apply(_ctx: Context) -> None:
@@ -916,6 +1016,9 @@ class EntryGroup:
 
     async def create(self, options: dict[str, Any]) -> str:
         """Create (or re-parent) the entry for a row; return its full id."""
+        issues = validate_options(options, EntryTree.sep)
+        if issues:
+            raise EntryValidationError(issues)
         entry_id = self.tree.ensure_id(options)
         entry = self.tree.store.get(entry_id)
         if entry is None:
@@ -938,7 +1041,10 @@ class EntryGroup:
     def remove(self, entry_id: str, is_dispose: bool = False) -> None:
         """Dispose an entry's fiber, unlink its row, and drop it from the store."""
         entry = self.tree.store.get(entry_id)
-        if entry is None:
+        # rc.13 group.ts:64-68: an entry already adopted by another group
+        # (a file-driven move) belongs to that group now; removing it from
+        # its former parent must be a no-op.
+        if entry is None or entry.parent is not self:
             return
         if entry.fiber is not None:
             if entry.fiber.uid is not None:

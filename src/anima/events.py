@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger("anima.events")
 
 Disposer = Callable[[], None | Awaitable[None]]
 
@@ -285,19 +288,25 @@ class EventBus:
         for listener in listeners:
             if listener.removed:
                 continue
-            try:
-                res = listener.callback(*args, **kwargs)
-                if inspect.isawaitable(res):
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(_await_res(res))
-                    except RuntimeError:
-                        asyncio.run(_await_res(res))
-            except Exception:
-                # Observers do not crash the emitter
-                import logging
+            # Upstream events.ts:121-126 does not catch listener errors: a
+            # throwing observer aborts the broadcast and reaches the caller.
+            res = listener.callback(*args, **kwargs)
+            if inspect.isawaitable(res):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(_await_res(res))
+                else:
+                    task = loop.create_task(_await_res(res))
 
-                logging.getLogger("anima.events").exception("Error in emit listener")
+                    def report(done: Any) -> None:
+                        if not done.cancelled() and done.exception():
+                            logger.exception(
+                                "Error in async emit listener",
+                                exc_info=done.exception(),
+                            )
+
+                    task.add_done_callback(report)
 
     async def parallel(
         self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any

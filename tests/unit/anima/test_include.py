@@ -12,6 +12,7 @@ import errno
 import json
 import os
 import re
+import secrets
 import sys
 import types
 from pathlib import Path
@@ -1720,6 +1721,42 @@ async def test_include_on_internal_update_sync_next_fn(
     )
     assert result == "sync_done"
     assert inc.root.data[0]["config"]["level"] == 1
+
+
+@pytest.mark.asyncio
+async def test_include_anonymous_ids_survive_neighbor_edits(
+    tmp_path: Path, mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unchanged anonymous row keeps its id when a neighbor changes."""
+    first = (
+        "- name: tree_test_mod:comp\n"
+        "  config:\n"
+        "    level: 1\n"
+        "- name: tree_test_mod:comp\n"
+        "  config:\n"
+        "    level: 2\n"
+    )
+    second = first.replace("level: 2", "level: 3")
+    _ctx, _loader, _inc_id, _entry, inc = await _boot(tmp_path, first)
+    rows1 = inc._parse(first)
+    rows2 = inc._parse(second)
+    assert rows1[0]["id"] and rows2[0]["id"] == rows1[0]["id"]
+    assert rows1[0]["id"] != rows1[1]["id"]
+
+    # A generated id that collides is retried.
+    original = secrets.token_hex
+    values = iter([rows1[0]["id"], "fresh_id"])
+
+    def fake_token_hex(_n: int) -> str:
+        return next(values)
+
+    monkeypatch.setattr(secrets, "token_hex", fake_token_hex)
+    try:
+        inc._anonymous = {}
+        rows3 = inc._parse("- name: tree_test_mod:comp\n  config:\n    level: 9\n")
+        assert rows3[0]["id"] == "fresh_id"
+    finally:
+        monkeypatch.setattr(secrets, "token_hex", original)
 
 
 @pytest.mark.asyncio
