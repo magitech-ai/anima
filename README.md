@@ -13,7 +13,7 @@ Documentation: [AGENTS.md](AGENTS.md) · [CONTEXT.md](CONTEXT.md) · [docs/adr/]
 
 ## Status
 
-Anima is at `0.3.0` and under active development. **The API is not yet stable and may change without notice.**
+Anima is at `0.3.0` and under active development. **The API is not yet stable and may change without notice.** The port target is canonical Cordis `v4.0.0-rc.13`; see [PARITY.md](PARITY.md) for what is proven and what remains open against that target. The former rc.1 "1.0 gate" is historical context, not a claim of rc.13 parity (ADR 0013).
 
 ---
 
@@ -26,13 +26,16 @@ Cordis — *"A Programming Paradigm for Spatiotemporal Composability"*
 Cordis-powered harness whose plugin kernel is built on reversible effects,
 reactive coeffects and a shared context.
 
-The 0.3.0 kernel was built and conformance-checked against DeepSeek Harness at
-pin `fcc0ad46` (`dsh v0.2.2-rc.1`). The frozen pin and every DONE/PARTIAL verdict
-are recorded in [PARITY.md](PARITY.md) and in the
+The 0.3.0 kernel was originally built and conformance-checked against DeepSeek
+Harness at pin `fcc0ad46` (`dsh v0.2.2-rc.1`); that pin and its DONE/PARTIAL
+verdicts are historical and are recorded in the
 [magitech-harness parity map](https://github.com/magitech-ai/magitech-harness/blob/main/PARITY.md).
-Anima is Magitech's
-Python kernel: the asyncio runtime, component surface and product built on top
-are ours; the theory and reference kernel are credited in [NOTICE](NOTICE).
+On 2026-11-23 the port target was moved to canonical Cordis `v4.0.0-rc.13`
+(commit `bc9fae7`), the latest published `cordis` release; the current verdicts
+and open gaps are in [PARITY.md](PARITY.md) and the decision in
+[ADR 0013](docs/adr/0013-rc13-port-target.md). Anima is Magitech's Python
+kernel: the asyncio runtime, component surface and product built on top are
+ours; the theory and reference kernel are credited in [NOTICE](NOTICE).
 
 ---
 
@@ -143,9 +146,9 @@ Every capability is a service mounted on a `Context`. The kernel ships these mod
 | Area | Modules | What they do |
 | --- | --- | --- |
 | Core | `core`, `events`, `tree`, `registry`, `reflect` | Context and service registry, the 5 event modes, loader entry tree and composite component groups, component runtime registry, service introspection |
-| Loading & config | `loader`, `include`, `schema`, `pkg`†, `cli_env`†, `utils` | YAML profile loading, module resolution, multi-file includes with journaling and patches, declarative schema validation, `uv` package management, cascading environment variables, shared utility helpers (plain-object checks, time, binary) |
+| Loading & config | `loader`, `include`, `schema`, `cli_env`†, `utils` | YAML profile loading, module resolution, multi-file includes with journaling and patches, declarative schema validation, cascading environment variables, shared utility helpers (plain-object checks, time, binary) |
 | Server & network | `server`†, `server_acl`†, `server_echo`†, `server_proxy`†, `server_static`†, `http`†, `http_socks`† | Async HTTP and WebSocket server, host/loopback access control, echo, reverse proxy, and static file routes; async HTTP client with SOCKS4/5 support |
-| Runtime services | `timer`, `watcher`†, `logger`, `hmr` | Reversible timers (timeouts, intervals, debounce, throttle), filesystem change detection, structured namespaced logging, hot module replacement |
+| Runtime services | `timer`, `logger`, `hmr`, `fs` | Reversible timers (timeouts, intervals, debounce, throttle), structured namespaced logging, hot module replacement, and the rc.13 filesystem service with mountable providers and routed watches |
 | Interface | `cli`†, `cli_create`† | Command router and profile execution substrate; interactive project scaffolding via the `create` subcommand (`anima create <name>`, default `my-app`) or the `Scaffold` library API (`from anima.cli_create import Scaffold`; `Scaffold.start()` runs the flow; template fetched from the npm registry) |
 
 † Anima-original surface: not part of the ported kernel.
@@ -163,7 +166,7 @@ uv run ruff format --check src tests
 uv run mypy src
 ```
 
-* `tests/unit/anima/`: Mirrors `src/` 1:1 — core, events, loader, CLI, server, HTTP, timer, watcher, and every other module.
+* `tests/unit/anima/`: Mirrors `src/` 1:1 — core, events, loader, CLI, server, HTTP, timer, fs, and every other module.
 * `tests/integration/`: End-to-end multi-component agent pipeline, cascade disposal, subagent isolation, and extension seams.
 
 See [AGENTS.md](AGENTS.md) for the full engineering standards.

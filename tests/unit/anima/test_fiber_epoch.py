@@ -130,6 +130,7 @@ async def test_await_fiber_returns_fiber():
     """await fiber settles the lifecycle and returns the fiber itself."""
     ctx = Context()
     fib = ctx.use(lambda c: None)
+    await ctx.flush()
     result = await fib
     assert result is fib
     assert fib.state == FiberState.ACTIVE
@@ -140,6 +141,7 @@ async def test_await_alias_returns_fiber():
     """await_() is an alias for await_settle()."""
     ctx = Context()
     fib = ctx.use(lambda c: None)
+    await ctx.flush()
     result = await fib.await_()
     assert result is fib
     assert fib.state == FiberState.ACTIVE
@@ -154,6 +156,7 @@ async def test_await_fiber_rethrows_startup_error():
 
     ctx = Context()
     fib = Fiber(ctx, failing, (), {})
+    await fib.load()
     with pytest.raises(RuntimeError, match="boom"):
         await fib
     assert fib.state == FiberState.FAILED

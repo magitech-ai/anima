@@ -66,8 +66,21 @@ def _is_special_property(prop: str) -> bool:
 
 
 def _enhance_error(error: Exception) -> Exception:
-    """Enhance error stack trace."""
-    return error  # pragma: no cover - only called from async paths
+    """Re-raise an access error with a stack free of kernel internals.
+
+    Upstream reflect.ts:20-36 creates a placeholder without a stack and
+    enhances only the frames that belong to the caller when the access
+    actually fails. Python records the traceback at raise time, so we copy
+    the error and drop frames from the kernel modules.
+    """
+    if isinstance(error, AnimaError):
+        enhanced: Exception = AnimaError(error.code, str(error))
+    else:
+        enhanced = type(error)(*error.args)
+    # The original (with its kernel frames) remains available as __cause__
+    # via `raise ... from e`; the rethrown error carries no kernel stack.
+    enhanced.__traceback__ = None
+    return enhanced
 
 
 class _TraceableProxy:
@@ -130,7 +143,10 @@ class Impl:
         self.isolate = isolate
         # The fiber that provided this impl, if any.
         self.fiber = fiber
-        self.dependents: set[Impl] = set()
+        # Fibers whose committed view uses this implementation. The provider
+        # waits for this set to drain before releasing its own effects.
+        self.dependents: set[Any] = set()
+        self.release: Callable[[], None] | None = None
 
 
 class Property:
@@ -247,7 +263,11 @@ class ReflectService:
         if filter_fn is None:
 
             def filter_fn(ctx: Context, name: str) -> bool:
-                return True
+                # Upstream reflect.ts:251-254: a binding change only reaches
+                # dependents resolving the name in the same realm.
+                return ctx._isolated_services.get(
+                    name
+                ) == self.ctx._isolated_services.get(name)
 
         updated_fibers: list[Any] = []
         for runtime in list(self.ctx.registry.values()):
@@ -396,8 +416,8 @@ class ReflectService:
             # here for async interception; in sync __getattr__, fall through
             # to fiber chain resolution directly
             return self._handler_get_fallback(target, prop, ctx, error)
-        except AnimaError:  # pragma: no cover - AnimaError without "without inject"
-            raise  # pragma: no cover - AnimaError without "without inject"
+        except AnimaError as e:
+            raise _enhance_error(e) from e
         except Exception as e:  # pragma: no cover - enhance_error path
             raise _enhance_error(e) from e  # pragma: no cover - enhance_error path
 
@@ -532,10 +552,10 @@ class ReflectService:
             return self.set(
                 prop, value, error
             )  # pragma: no cover - requires fiber.runtime
-        except AnimaError:  # pragma: no cover - AnimaError without "without inject"
-            raise  # pragma: no cover - AnimaError without "without inject"
-        except Exception as e:  # pragma: no cover - enhance_error path
-            raise _enhance_error(e) from e  # pragma: no cover - enhance_error path
+        except AnimaError:  # pragma: no cover - set() raises ValueError
+            raise  # pragma: no cover - set() raises ValueError
+        except Exception as e:
+            raise _enhance_error(e) from e
 
     def handler_has(self, target: Context, prop: str) -> bool:
         """ProxyHandler.has trap - check if property exists."""

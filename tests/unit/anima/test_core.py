@@ -722,8 +722,7 @@ async def test_context_parallel_and_bail_delegation():
     # Parallel (line 352)
     ctx.on("compute", lambda x: x * 2)
     ctx.on("compute", lambda x: x * 3)
-    p_results = await ctx.parallel("compute", 5)
-    assert p_results == [10, 15]
+    assert await ctx.parallel("compute", 5) is None
 
     # Serial (line 356)
     ctx.on("first_match", lambda x: "matched" if x == 1 else None)
@@ -807,35 +806,6 @@ async def test_fiber_resolve_config_waterfall():
     resolved = await fib._resolve_config({"foo": "bar"})
     assert config_holder == {"foo": "bar"}
     assert resolved == {"foo": "bar"}
-
-
-@pytest.mark.asyncio
-async def test_fiber_resolve_config_candidate_is_not_published():
-    """Fiber.resolve_config validates a candidate without publishing it."""
-    from anima.volatile import is_volatile
-
-    schema = Schema.object(
-        {"theme": Schema.string().volatile(), "level": Schema.number()}
-    )
-
-    class VolatileComp:
-        Config = schema
-
-        def __init__(self, c: Context, config: Any = None) -> None:
-            self.config = config
-
-    ctx = Context()
-    fib = ctx.use(VolatileComp, theme="dark", level=3)
-    await ctx.flush()
-    assert fib.state == FiberState.ACTIVE
-    assert fib.config_schema is schema
-
-    candidate = await fib.resolve_config({"theme": "light", "level": 3})
-    assert is_volatile(candidate["theme"])
-    assert candidate["theme"].get() == "light"
-    # Nothing published: the running config and raw input are untouched.
-    assert fib.config["theme"].get() == "dark"
-    assert fib.raw_config == {"theme": "dark", "level": 3}
 
 
 def test_fiber_config_schema_lookup():
@@ -998,7 +968,14 @@ async def test_fiber_restart_and_update():
         received_updates.append(cfg["val"])
         # Return without next_fn to accept in-place
 
-    ctx.on("internal/update", update_interceptor, mode=EventMode.WATERFALL)
+    # rc.13 scopes internal/update to the registering fiber; a context-wide
+    # interceptor must be marked global.
+    ctx.on(
+        "internal/update",
+        update_interceptor,
+        mode=EventMode.WATERFALL,
+        global_=True,
+    )
 
     committed = []
     ctx.on("internal/commit", lambda f, cfg: committed.append(cfg))
@@ -2403,8 +2380,9 @@ class TestContextGetSet:
         svc = CoreService(ctx)
         assert ctx.get("core_svc") is svc
 
-        # Create a new service and set it via Context.set
+        # rc.13: set() only updates an already-provided name.
         CoreService(ctx, {"name": "new_core_svc"})
+        ctx.reflect.provide("renamed_svc", None)
         ctx.set("renamed_svc", svc)
         assert ctx.get("renamed_svc") is svc
 

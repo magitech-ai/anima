@@ -225,7 +225,7 @@ async def test_declarative_profile_integration(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_full_microkernel_ecosystem_integration(tmp_path: Path):
-    """Verify integration of logger, timer, group, watcher, hmr, and loader."""
+    """Verify integration of logger, timer, group, fs, and loader."""
     import asyncio
 
     profile_data = {
@@ -233,7 +233,7 @@ async def test_full_microkernel_ecosystem_integration(tmp_path: Path):
         "components": [
             {"id": "log_svc", "target": "logger"},
             {"id": "time_svc", "target": "timer"},
-            {"id": "watch_svc", "target": "watcher"},
+            {"id": "fs_svc", "target": "fs"},
             {
                 "id": "work_group",
                 "target": "group",
@@ -257,7 +257,7 @@ async def test_full_microkernel_ecosystem_integration(tmp_path: Path):
     # Verify all expected services are mounted
     assert ctx.has("logger")
     assert ctx.has("timer")
-    assert ctx.has("watcher")
+    assert ctx.has("fs")
     assert ctx.has("loader")
     assert "work_group" in loader.store
 
@@ -278,22 +278,6 @@ async def test_full_microkernel_ecosystem_integration(tmp_path: Path):
     await asyncio.sleep(0.03)
 
     assert any("system ready: online" in m for m in log_messages)
-
-    # Watcher detecting file creation in tmp_path
-    detected_files = []
-    disp_watch = ctx.watcher.watch(
-        tmp_path,
-        lambda ev, p: detected_files.append((ev, p.name)),
-        interval=0.01,
-        ignore_initial=True,
-    )
-    await asyncio.sleep(0.02)
-
-    marker = tmp_path / "marker.txt"
-    marker.write_text("ok")
-    await asyncio.sleep(0.03)
-    assert any(name == "marker.txt" for _, name in detected_files)
-    disp_watch()
 
     # Dynamic group disable and re-enable
     assert "group_component" in loader.store

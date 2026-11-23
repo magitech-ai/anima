@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger("anima.events")
 
 Disposer = Callable[[], None | Awaitable[None]]
 
@@ -107,7 +110,9 @@ class Listener:
         prepend: bool = False,
         ctx: Any | None = None,
         global_: bool = False,
+        owner: Any | None = None,
     ):
+        self.owner = owner
         self.event = event
         self.callback = callback
         self.mode = mode
@@ -156,8 +161,20 @@ class EventBus:
     def __init__(self) -> None:
         self._listeners: dict[str, list[Listener]] = {}
 
-    def _filter_listeners(self, event: str, this_arg: Any = None) -> list[Listener]:
+    def _filter_listeners(
+        self, event: str, this_arg: Any = None, owner: Any = None
+    ) -> list[Listener]:
         listeners = list(self._listeners.get(event, []))
+        if event == "internal/update" and owner is not None:
+            # rc.13 routes non-global internal/update listeners into the
+            # registering fiber's hook list (events.ts:54-79). The owner is
+            # passed explicitly by Fiber.update(), since the ambient fiber may
+            # belong to the caller of a nested update.
+            listeners = [
+                listener
+                for listener in listeners
+                if listener.global_ or listener.owner is None or listener.owner is owner
+            ]
         if this_arg is None or not hasattr(this_arg, "match"):
             return listeners
         filtered: list[Listener] = []
@@ -175,6 +192,7 @@ class EventBus:
         prepend: bool = False,
         ctx: Any | None = None,
         global_: bool = False,
+        owner: Any | None = None,
     ) -> Disposer:
         """Register an event listener. Returns a disposer function."""
         listener = Listener(
@@ -184,6 +202,7 @@ class EventBus:
             prepend=prepend,
             ctx=ctx,
             global_=global_,
+            owner=owner,
         )
         if event not in self._listeners:
             self._listeners[event] = []
@@ -269,38 +288,44 @@ class EventBus:
         for listener in listeners:
             if listener.removed:
                 continue
-            try:
-                res = listener.callback(*args, **kwargs)
-                if inspect.isawaitable(res):
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(_await_res(res))
-                    except RuntimeError:
-                        asyncio.run(_await_res(res))
-            except Exception:
-                # Observers do not crash the emitter
-                import logging
+            # Upstream events.ts:121-126 does not catch listener errors: a
+            # throwing observer aborts the broadcast and reaches the caller.
+            res = listener.callback(*args, **kwargs)
+            if inspect.isawaitable(res):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(_await_res(res))
+                else:
+                    task = loop.create_task(_await_res(res))
 
-                logging.getLogger("anima.events").exception("Error in emit listener")
+                    def report(done: Any) -> None:
+                        if not done.cancelled() and done.exception():
+                            logger.exception(
+                                "Error in async emit listener",
+                                exc_info=done.exception(),
+                            )
+
+                    task.add_done_callback(report)
 
     async def parallel(
         self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any
-    ) -> list[Any]:
+    ) -> None:
         """All listeners run concurrently and are awaited together.
 
         Every listener is awaited to completion whether or not a sibling fails,
         so a failing listener can neither cancel the healthy ones nor mask the
-        other failures. Failures are attributed to the listener that raised
-        them: a single failure is re-raised unchanged (callers keep the concrete
-        exception type), two or more are raised together as an ``ExceptionGroup``
-        naming each failing listener in registration order. Each raised exception
-        also carries a note identifying its listener.
+        other failures. All ``Exception`` failures are aggregated into one
+        ``ExceptionGroup`` — including a single failure, which becomes a group
+        with one member. This is the Cordis rc.13 contract: ``parallel`` throws
+        ``AggregateError`` whenever any listener rejects (``events.ts:110-119``).
+        A non-``Exception`` ``BaseException`` (e.g. ``CancelledError``) cannot be
+        grouped and is re-raised as-is once every listener has finished. Each
+        failure carries a note identifying its listener.
 
         Raises:
-            BaseException: The listener's own exception when exactly one listener
-                failed, or the first non-``Exception`` failure (e.g. a
-                ``CancelledError``), which is always re-raised as-is.
-            ExceptionGroup: When two or more listeners failed with exceptions.
+            BaseException: The first non-``Exception`` failure, re-raised as-is.
+            ExceptionGroup: Whenever one or more listeners failed with exceptions.
         """
         listeners = [
             listener
@@ -308,7 +333,7 @@ class EventBus:
             if not listener.removed
         ]
         if not listeners:
-            return []
+            return
         results = await asyncio.gather(
             *(_dispatch_one(listener, args, kwargs) for listener in listeners),
             return_exceptions=True,
@@ -331,9 +356,7 @@ class EventBus:
         if fatal is not None:
             raise fatal
         if not failures:
-            return list(results)
-        if len(failures) == 1:
-            raise failures[0][1]
+            return
         labels = ", ".join(label for label, _ in failures)
         raise ExceptionGroup(
             f"{len(failures)} of {len(listeners)} listeners failed "
@@ -364,8 +387,22 @@ class EventBus:
                 continue
             res = listener.callback(*args, **kwargs)
             if inspect.isawaitable(res):
-                # Cannot block safely in synchronous bail if awaitable returned
-                res = asyncio.run(_await_res(res))
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    # No loop to block: the historical sync-only path remains.
+                    res = asyncio.run(_await_res(res))
+                else:
+                    # A synchronous bail cannot block on an awaitable inside a
+                    # running loop, and returning it would leak an unawaited
+                    # coroutine. Fail loudly instead.
+                    close = getattr(res, "close", None)
+                    if close is not None:
+                        close()
+                    raise TypeError(
+                        "bail() cannot dispatch an async listener inside a "
+                        "running event loop; use serial() instead"
+                    )
             if is_bailed(res):
                 return res
         return None
@@ -376,6 +413,7 @@ class EventBus:
         *args: Any,
         this_arg: Any = None,
         default_handler: Callable[..., Any] | None = None,
+        owner: Any = None,
         **kwargs: Any,
     ) -> Any:
         """Around-middleware pipeline.
@@ -384,7 +422,7 @@ class EventBus:
         Calling `await next(*args)` passes control down the chain.
         Returning without calling `next()` short-circuits.
         """
-        listeners = self._filter_listeners(event, this_arg)
+        listeners = self._filter_listeners(event, this_arg, owner)
 
         async def dispatch(
             index: int, *current_args: Any, **current_kwargs: Any
@@ -402,7 +440,14 @@ class EventBus:
             if current_listener.removed:
                 return await dispatch(index + 1, *current_args, **current_kwargs)
 
+            called = False
+
             async def next_fn(*next_args: Any, **next_kwargs: Any) -> Any:
+                nonlocal called
+                if called:
+                    # Upstream events.ts:155-157 rejects a second delegation.
+                    raise RuntimeError("next() called multiple times")
+                called = True
                 call_args = next_args if next_args else current_args
                 merged_kwargs = {**current_kwargs, **next_kwargs}
                 return await dispatch(index + 1, *call_args, **merged_kwargs)

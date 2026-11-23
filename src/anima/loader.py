@@ -16,10 +16,9 @@ from typing import Any
 
 from anima.core import Context, Fiber, FiberState, Service, _current_fiber
 from anima.events import Disposer, EventMode
-from anima.jsexpr import dump_yaml, interpolate, load_yaml
+from anima.jsexpr import JsExprError, dump_yaml, interpolate, load_yaml
 from anima.tree import (
     _UNSET,
-    BUILTIN_ALIASES,
     Entry,
     EntryChange,
     EntryGroup,
@@ -42,8 +41,6 @@ __all__ = [
 logger = logging.getLogger("anima.loader")
 
 ENV_PATTERN = re.compile(r"\$\{(?:env\.)?([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}")
-
-_BUILTIN_ALIASES: dict[str, str] = BUILTIN_ALIASES
 
 
 def interpolate_env(value: Any, env: Mapping[str, str] | None = None) -> Any:
@@ -162,7 +159,7 @@ class LoaderService(Service, EntryTree):
     def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
         # 1. Tree first: sets self.ctx to the extended child ctx, plus
-        #    root/store/owner/owner_fiber/builtins.
+        #    root/store/owner/owner_fiber.
         EntryTree.__init__(self, ctx, loader=self)
         tree_ctx = self.ctx
         # 2. Service second, on the ORIGINAL ctx: registers "loader" where
@@ -178,7 +175,6 @@ class LoaderService(Service, EntryTree):
         self.config = cfg
         self.filename = Path(cfg["filename"]).resolve() if cfg.get("filename") else None
         self.enable_logs = bool(cfg.get("enableLogs", False))
-        self.builtins = dict(BUILTIN_ALIASES)
         if cfg.get("baseUrl"):
             self.ctx.baseUrl = cfg["baseUrl"]
         # 3. Hooks, registered on the ORIGINAL ctx.
@@ -225,10 +221,6 @@ class LoaderService(Service, EntryTree):
             if nxt is None or nxt is fiber:
                 return None
             fiber = nxt
-
-    def exit(self) -> None:
-        """Hook for hosts that can restart the process on full-reload requests."""
-        return
 
     def _loader_check(self) -> bool:
         """False while config.await is set and the loader still has tasks."""
@@ -348,7 +340,17 @@ class LoaderService(Service, EntryTree):
             return resolved
         if EntryGroup.is_tree_carrier(fiber.target):
             return resolved
-        return interpolate(fiber.ctx, resolved)
+        try:
+            return interpolate(fiber.ctx, resolved)
+        except JsExprError as error:
+            entry = fiber.entry
+            error.add_note(f"in entry {entry.id!r}")
+            location = entry.get_location(error.path)
+            if location is not None:
+                filename = getattr(entry.parent.tree, "filename", None)
+                where = f"{filename}:" if filename else ""
+                error.add_note(f"at {where}{location[0]}:{location[1]}")
+            raise
 
     def _on_commit(self, fiber: Fiber, config: Any) -> None:
         """Write a runtime config change back into the owning entry's options.
@@ -399,7 +401,12 @@ class LoaderService(Service, EntryTree):
         entry.ctx._isolated_services.update(new_map)
         # Intercept: replace the entry ctx's map wholesale with the entry's
         # own intercept dict (parent-chain resolution supplies inheritance).
-        entry.ctx._intercept_configs = dict(entry.options.get("intercept") or {})
+        # Upstream entry.ts:169-179 interpolates the intercept options before
+        # they reach the component: a ``__jsExpr`` value must be evaluated,
+        # not stored verbatim.
+        entry.ctx._intercept_configs = interpolate(
+            entry.ctx, entry.options.get("intercept") or {}
+        )
         # Notify when the isolate map actually changed, so dependent fibers
         # re-resolve through the epoch machinery.
         changed = {

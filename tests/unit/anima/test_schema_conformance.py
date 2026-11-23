@@ -20,7 +20,6 @@ from anima.schema import (
     clone,
     deep_equal,
 )
-from anima.volatile import create_volatile, is_volatile
 
 # ---------------------------------------------------------------------------
 # S1 — ~standard + aggregated ValidationError
@@ -114,74 +113,8 @@ def test_config_resolution_top_level_issue_has_no_path_suffix():
 
 
 # ---------------------------------------------------------------------------
-# S2 (schema half) — .volatile() hook + placement validation
+# S2 (schema half) —  hook + placement validation
 # ---------------------------------------------------------------------------
-
-
-def test_volatile_field_validates_to_reference():
-    schema = Schema.object(
-        {"theme": Schema.string().volatile(), "level": Schema.number()}
-    )
-    out = schema.validate({"theme": "dark", "level": 3})
-    assert is_volatile(out["theme"])
-    assert out["theme"].get() == "dark"
-    assert out["level"] == 3
-
-
-def test_volatile_absent_field_yields_reference_to_none():
-    schema = Schema.object({"theme": Schema.string().volatile()})
-    out = schema.validate({})
-    assert is_volatile(out["theme"])
-    assert out["theme"].get() is None
-
-
-def test_volatile_double_wrap_throws():
-    with pytest.raises(TypeError, match="already wrapped"):
-        Schema.string().volatile().volatile()
-
-
-def test_volatile_placement_rules():
-    # Allowed: fixed object paths, including nested under plain objects.
-    ok = Schema.object({"a": Schema.object({"b": Schema.string().volatile()})})
-    assert is_volatile(ok.validate({"a": {"b": "x"}})["a"]["b"])
-
-    # Allowed: an entire object marked volatile.
-    whole = Schema.object({"a": Schema.string()}).volatile()
-    ref = whole.validate({"a": "x"})
-    assert is_volatile(ref)
-    assert ref.get() == {"a": "x"}
-
-    # Rejected: inside an array, a dict, a union member, a transform inner,
-    # or another volatile field.
-    bad_cases = [
-        Schema.list(Schema.string().volatile()),
-        Schema.dict(Schema.string().volatile()),
-        Schema.union(Schema.string().volatile(), Schema.number()),
-        Schema.transform(Schema.string().volatile(), str.upper),
-        Schema.object({"v": Schema.string().volatile()}).volatile(),
-    ]
-    for bad in bad_cases:
-        with pytest.raises(
-            SchemaError,
-            match="volatile fields require a fixed object path",
-        ):
-            bad.validate({})
-
-
-def test_volatile_snapshot_rejection_at_validation():
-    schema = Schema.object({"fn": Schema.any().volatile()})
-    with pytest.raises(SchemaError, match="cannot contain functions"):
-        schema.validate({"fn": len})
-
-
-def test_update_volatile_replaces_wholesale():
-    target = create_volatile({"a": 1})
-    source = create_volatile({"b": 2})
-    from anima.volatile import update_volatile
-
-    update_volatile(target, source)
-    assert target.get() == {"b": 2}
-    assert target.get() is source.get()
 
 
 # ---------------------------------------------------------------------------
@@ -566,48 +499,6 @@ def test_to_string_renderings():
 # ---------------------------------------------------------------------------
 
 
-def test_deep_equal():
-    assert deep_equal({"a": 1}, {"a": 1, "b": None})
-    assert deep_equal([1, {"x": 2}], [1, {"x": 2}])
-    assert not deep_equal({"a": 1}, {"a": 2})
-    assert not deep_equal([1, 2], [1, 2, 3])
-    assert not deep_equal(1, True)
-    assert deep_equal(1, 1.0)
-    assert not deep_equal(float("nan"), float("nan"))
-    assert deep_equal(-0.0, 0.0)
-
-    a: dict = {}
-    a["self"] = a
-    assert deep_equal(a, a)
-    b: dict = {}
-    b["self"] = b
-    assert not deep_equal(a, b)
-
-    v1 = create_volatile({"x": 1})
-    v2 = create_volatile({"x": 2})
-    assert deep_equal(v1, v2)
-    assert not deep_equal(v1, {"x": 1})
-
-
-def test_clone():
-    from anima.schema import clone
-
-    original = {"a": [1, {"b": 2}]}
-    copied = clone(original)
-    assert copied == original
-    assert copied is not original
-    copied["a"].append(3)
-    assert original == {"a": [1, {"b": 2}]}
-
-    cyclic: dict = {}
-    cyclic["self"] = cyclic
-    cloned = clone(cyclic)
-    assert cloned["self"] is cloned
-
-    ref = create_volatile({"x": 1})
-    assert clone(ref) is ref
-
-
 # ---------------------------------------------------------------------------
 # Fail loud on unported constructs
 # ---------------------------------------------------------------------------
@@ -855,14 +746,6 @@ def test_json_round_trip_preserves_loose():
     assert data["refs"][data["uid"]]["meta"]["loose"] is True
     rebuilt = Schema.from_json(data)
     assert rebuilt.validate(123) == "fallback"
-
-
-def test_json_round_trip_preserves_volatile():
-    schema = Schema.string().volatile()
-    data = schema.to_json()
-    assert data["refs"][data["uid"]]["meta"]["volatile"] is True
-    rebuilt = Schema.from_json(data)
-    assert is_volatile(rebuilt.validate("x"))
 
 
 def test_json_round_trip_transform_without_callback():

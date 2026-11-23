@@ -4,8 +4,8 @@ P1-8 replaces the single-module reload with the graph reload: changing a
 shared dependency reloads its plugin dependents, a failed reload rolls
 back to the old code, externals trigger the full-reload hook, rapid
 changes debounce into one reload, and config-file changes refresh the
-include tree. Events align to the oracle: ``hmr/change(url)`` and
-``hmr/reload(reloads)`` only.
+include tree. Reload results are exposed through ``reconcile()`` / ``last_reload``;
+the legacy ``hmr/change`` and ``hmr/reload`` events were removed in rc.13.
 """
 
 import asyncio
@@ -23,11 +23,26 @@ from unittest.mock import patch
 import pytest
 
 from anima.core import Context, FiberState
+from anima.fs import FsService, LocalFs
 from anima.hmr import HmrService, Reload, handle_error
 from anima.loader import LoaderService
-from anima.watcher import WatcherService
 
 # --- helpers ----------------------------------------------------------------
+
+
+def _watch_reloads(hmr: HmrService) -> list[dict[Any, Reload]]:
+    """Record reload maps without the removed legacy hmr/reload event."""
+    seen: list[dict[Any, Reload]] = []
+    original = hmr._partial_reload
+
+    async def wrapped(stashed: Any) -> bool:
+        result = await original(stashed)
+        if result:
+            seen.append(dict(hmr.last_reload))
+        return result
+
+    hmr._partial_reload = wrapped  # type: ignore[method-assign]
+    return seen
 
 
 def _write(tmp_path: Path, name: str, source: str) -> Path:
@@ -63,7 +78,9 @@ def _pop(*names: str) -> None:
 @pytest.mark.asyncio
 async def test_hmr_service_lifecycle_and_start_stop(tmp_path: Path):
     ctx = Context()
-    ctx.use(WatcherService)
+    ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)
     ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
 
@@ -328,8 +345,7 @@ async def test_hmr_shared_dependency_reloads_dependents(tmp_path: Path):
     other = _load("p18_other", other_path)
     alone = _load("p18_alone", alone_path)
 
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         fib = ctx.use(plugin.Comp)
         fib_other = ctx.use(other.Other)
@@ -382,8 +398,7 @@ async def test_hmr_cyclic_imports_reload_without_hang(tmp_path: Path):
     finally:
         sys.path.remove(str(tmp_path))
     assert a_mod.A_VAL == 11
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         a_path.write_text("import p18_cyc_b as b\nVALUE = 2\nA_VAL = b.VALUE + 1\n")
         _bump(a_path)
@@ -416,8 +431,7 @@ async def test_hmr_failed_reload_rolls_back(tmp_path: Path):
     hmr = HmrService(ctx, {"root": tmp_path})
     shared = _load("p18_rb_shared", shared_path)
     plugin = _load("p18_rb_plugin", plugin_path)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     sys.path.insert(0, str(tmp_path))
     try:
         fib = ctx.use(plugin.Comp)
@@ -597,8 +611,7 @@ async def test_hmr_external_change_triggers_full_reload_hook(
         ctx, {"root": tmp_path, "full_reload": lambda url: hooks.append(url)}
     )
     ext_mod = _load("p18_ext", ext_path)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         ext_path.write_text("VALUE = 2\n")
         _bump(ext_path)
@@ -727,8 +740,7 @@ async def test_hmr_debounce_coalesces_rapid_changes(tmp_path: Path):
     hmr = HmrService(ctx, {"root": tmp_path, "debounce": 50})
     shared = _load("p18_db_shared", shared_path)
     plugin = _load("p18_db_plugin", plugin_path)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         fib = ctx.use(plugin.Comp)
         await ctx.flush()
@@ -750,13 +762,14 @@ async def test_hmr_debounce_coalesces_rapid_changes(tmp_path: Path):
 async def test_hmr_stop_cancels_pending_debounce(tmp_path: Path):
     shared_path = _write(tmp_path, "p18_stop_shared.py", "VALUE = 1\n")
     ctx = Context()
-    ctx.use(WatcherService)
+    ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)
     ctx.use(HmrService, root=tmp_path, interval=0.01, debounce=200)
     await ctx.flush()
     hmr: HmrService = ctx.hmr
     shared = _load("p18_stop_shared", shared_path)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         shared_path.write_text("VALUE = 2\n")
         _bump(shared_path)
@@ -802,7 +815,6 @@ async def test_hmr_config_change_refreshes_include(tmp_path: Path):
     hmr = HmrService(ctx, {"root": tmp_path})
     changes: list[str] = []
     reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/change", lambda url: changes.append(url))
     ctx.on("hmr/reload", lambda m: reloads.append(m))
     try:
         cfg.write_text(
@@ -819,7 +831,7 @@ async def test_hmr_config_change_refreshes_include(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_hmr_config_change_no_match_emits_change(tmp_path: Path):
+async def test_hmr_config_change_no_match_is_ignored(tmp_path: Path):
     cfg = tmp_path / "other.yaml"
     cfg.write_text("- name: hmr_inc_test_mod:comp\n  id: e0\n")
     ctx = Context()
@@ -837,25 +849,19 @@ async def test_hmr_config_change_no_match_emits_change(tmp_path: Path):
     assert entry.ctx.get("include", strict=False) is not None
 
     hmr = HmrService(ctx, {"root": tmp_path})
-    changes: list[str] = []
-    ctx.on("hmr/change", lambda url: changes.append(url))
     try:
         await hmr._on_file_change("change", cfg)
-        assert changes == [cfg.resolve().as_uri()]
     finally:
         _pop("hmr_inc_test_mod")
 
 
 @pytest.mark.asyncio
-async def test_hmr_config_change_without_loader_emits_change(tmp_path: Path):
+async def test_hmr_config_change_without_loader_is_ignored(tmp_path: Path):
     cfg = tmp_path / "lonely.yaml"
     cfg.write_text("- name: x\n")
     ctx = Context()
     hmr = HmrService(ctx, {"root": tmp_path})
-    changes: list[str] = []
-    ctx.on("hmr/change", lambda url: changes.append(url))
     await hmr._on_file_change("change", cfg)
-    assert changes == [cfg.resolve().as_uri()]
 
 
 # --- watcher routing / change events ------------------------------------------
@@ -866,7 +872,6 @@ async def test_hmr_on_file_change_filtering(tmp_path: Path):
     ctx = Context()
     hmr = HmrService(ctx, {"root": tmp_path})
     changes: list[str] = []
-    ctx.on("hmr/change", lambda url: changes.append(url))
 
     # Action not change or add: ignored entirely.
     await hmr._on_file_change("unlink", tmp_path / "foo.py")
@@ -879,14 +884,11 @@ async def test_hmr_on_file_change_filtering(tmp_path: Path):
 
     # Untracked non-Python file: change event, no reload.
     await hmr._on_file_change("change", tmp_path / "foo.txt")
-    assert changes == [(tmp_path / "foo.txt").resolve().as_uri()]
+    assert changes == []
 
     # Untracked Python file: change event, no reload.
     await hmr._on_file_change("change", tmp_path / "untracked.py")
-    assert changes == [
-        (tmp_path / "foo.txt").resolve().as_uri(),
-        (tmp_path / "untracked.py").resolve().as_uri(),
-    ]
+    assert changes == []
 
     # Module successfully matched and reloaded via _on_file_change
     valid_file = tmp_path / "valid_change.py"
@@ -900,8 +902,7 @@ async def test_hmr_on_file_change_filtering(tmp_path: Path):
     assert spec.loader is not None
     spec.loader.exec_module(vmod)
 
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         valid_file.write_text("X = 2\n")
         _bump(valid_file)
@@ -930,7 +931,9 @@ async def test_hmr_reload_class_component(tmp_path: Path):
     )
 
     ctx = Context()
-    ctx.use(WatcherService)
+    ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)
     ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
 
@@ -945,8 +948,7 @@ async def test_hmr_reload_class_component(tmp_path: Path):
     assert spec.loader is not None
     spec.loader.exec_module(mod)
 
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
 
     try:
         # Mount component
@@ -1005,8 +1007,7 @@ async def test_hmr_reload_concurrent_deduped(tmp_path: Path):
     assert spec.loader is not None
     spec.loader.exec_module(mod)
 
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
 
     try:
         mod_file.write_text("VALUE = 2\n")
@@ -1027,7 +1028,6 @@ async def test_hmr_reload_concurrent_deduped(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_hmr_reload_instance_and_function_components(tmp_path: Path):
     ctx = Context()
-    ctx.use(WatcherService)
     hmr = HmrService(ctx, {"root": tmp_path})
 
     mod_file = tmp_path / "variants_component.py"
@@ -1112,8 +1112,7 @@ async def test_hmr_reload_callable_instance_component(tmp_path: Path):
         "        pass\n",
     )
     mod = _load("p18_callable_inst", mod_path)
-    reloads: list[dict] = []
-    ctx.on("hmr/reload", lambda r: reloads.append(r))
+    reloads = _watch_reloads(hmr)
     try:
         handler = mod.Handler()
         assert callable(handler)
@@ -1220,7 +1219,9 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
 async def test_hmr_reload_missing_file_returns_none(tmp_path: Path):
     """reload_module on a missing file returns None instead of raising."""
     ctx = Context()
-    ctx.use(WatcherService)
+    ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)
     ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
     hmr: HmrService = ctx.hmr
@@ -1244,8 +1245,7 @@ async def test_hmr_reload_broken_new_component_rolls_back_fiber(tmp_path: Path):
     ctx = Context()
     hmr = HmrService(ctx, {"root": tmp_path})
     mod = _load("flaky_component", mod_file)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         fib = ctx.use(mod.Comp)
         await ctx.flush()
@@ -1346,8 +1346,7 @@ async def test_hmr_none_module_entry_restarts_fiber(tmp_path: Path):
     ctx = Context()
     hmr = HmrService(ctx, {"root": tmp_path, "debounce": 50})
     mod = _load("p18_none_entry", mod_file)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         fib = ctx.use(mod.Comp)
         await ctx.flush()

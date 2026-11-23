@@ -18,14 +18,14 @@ import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 
 from anima.core import Context, Fiber, FiberState, is_js_expr
 from anima.events import EventMode
 from anima.jsexpr import evaluate as evaluate_js_expr
+from anima.jsexpr import interpolate as interpolate_js_expr
 from anima.registry import resolve_inject
-from anima.schema import _UNDEFINED, Schema, deep_equal
-from anima.volatile import update_volatile, volatile_entries
+from anima.schema import deep_equal
 
 if TYPE_CHECKING:
     from anima.loader import LoaderService
@@ -34,68 +34,6 @@ logger = logging.getLogger("anima.loader")
 
 # Distinct from None: "argument not supplied" for EntryTree.update's parent.
 _UNSET: Any = object()
-
-
-def _is_schema(value: Any) -> bool:
-    """Whether ``value`` carries the schema seam.
-
-    The local seam vendor is ``anima``; anything without it compares by
-    strict raw equality.
-    """
-    seam = getattr(value, "~standard", None)
-    return seam is not None and getattr(seam, "vendor", None) == "anima"
-
-
-def _is_record(value: Any) -> TypeGuard[dict[str, Any]]:
-    """Whether ``value`` is a plain record (not a JsExpr node)."""
-    return isinstance(value, dict) and not is_js_expr(value)
-
-
-def equal_except_volatile(previous: Any, next_config: Any, schema: Any) -> bool:
-    """Compare two raw configs, treating volatile fields as equal.
-
-    Volatile fields at fixed object paths compare equal regardless of
-    value; an absent object compares equal to its schema default; schema
-    backedges, JsExpr/opaque values, unknown fields, and non-object
-    schemas keep strict raw equality. Nothing is evaluated, validated,
-    or mutated.
-
-    Moved here from ``anima.include`` in P1-7: ``Include`` must subclass
-    ``EntryTree``, and this module is the only runtime consumer, so the
-    function lives with the loader tree (the oracle's diff lives in the
-    loader package). ``anima.include`` re-exports it unchanged.
-    """
-    if not _is_schema(schema):
-        return deep_equal(previous, next_config, strict=True)
-
-    ancestors: set[int] = set()
-
-    def equal(a: Any, b: Any, node: Schema | None) -> bool:
-        if node is not None and node._volatile:
-            return True
-        if (
-            node is None
-            or node.type_name != "object"
-            or node._properties is None
-            or id(node) in ancestors
-        ):
-            return deep_equal(a, b, strict=True)
-        default = node._default if node._default is not _UNDEFINED else None
-        left = a if a is not None else default
-        right = b if b is not None else default
-        if not _is_record(left) or not _is_record(right):
-            return deep_equal(left, right, strict=True)
-        props = node._properties
-        ancestors.add(id(node))
-        try:
-            return all(
-                equal(left.get(key), right.get(key), props.get(key))
-                for key in set(left) | set(right)
-            )
-        finally:
-            ancestors.discard(id(node))
-
-    return equal(previous, next_config, schema)
 
 
 def _members(entry: Entry, tree: EntryTree) -> list[Entry]:
@@ -143,9 +81,8 @@ BUILTIN_ALIASES: dict[str, str] = {
     "include": "anima.include:Include",
     "logger": "anima.logger:LoggerService",
     "timer": "anima.timer:TimerService",
-    "watcher": "anima.watcher:WatcherService",
+    "fs": "anima.fs:FsService",
     "hmr": "anima.hmr:HmrService",
-    "pkg": "anima.pkg:PkgService",
 }
 
 
@@ -226,6 +163,94 @@ def _sort_options_keys(options: dict[str, Any]) -> None:
     options.update(ordered)
 
 
+class EntryValidationError(ValueError):
+    """Raised when an entry row violates the rc.13 option contract."""
+
+    def __init__(self, issues: list[dict[str, Any]]) -> None:
+        self.issues = issues
+        super().__init__(
+            "invalid entry options: " + "; ".join(issue["message"] for issue in issues)
+        )
+
+
+def validate_options(
+    options: Any, sep: str = ":", deep: bool = False
+) -> list[dict[str, Any]]:
+    """Validate an entry row against the rc.13 contract.
+
+    Mirrors ``loader/config/utils.ts:163-209``: ids are strings without the
+    tree separator, name is required, booleans and the inject/isolate/intercept
+    shapes are checked, and a group's config must be an entry list.
+    """
+    issues: list[dict[str, Any]] = []
+    if not isinstance(options, dict):
+        return [{"message": "entry must be an object", "path": []}]
+
+    def check(key: str, expected: str, valid: Any, required: bool = False) -> None:
+        value = options.get(key)
+        if value is None:
+            if required:
+                issues.append({"message": f"{key} is required", "path": [key]})
+        elif not valid(value):
+            issues.append({"message": f"{key} must be {expected}", "path": [key]})
+
+    check("id", "a string", lambda v: isinstance(v, str))
+    ident = options.get("id")
+    if isinstance(ident, str) and sep in ident:
+        issues.append({"message": f'id must not contain "{sep}"', "path": ["id"]})
+    check("name", "a string", lambda v: isinstance(v, str), required=True)
+    check("group", "a boolean", lambda v: isinstance(v, bool))
+    check(
+        "disabled",
+        "a boolean",
+        lambda v: isinstance(v, bool) or is_js_expr(v),
+    )
+    if options.get("group") is True:
+        check("config", "an array", lambda v: isinstance(v, list), required=True)
+    check(
+        "inject",
+        "an array or an object",
+        lambda v: isinstance(v, (list, dict)),
+    )
+    inject = options.get("inject")
+    if isinstance(inject, list):
+        for index, name in enumerate(inject):
+            if not isinstance(name, str):
+                issues.append(
+                    {
+                        "message": f"inject.{index} must be a string",
+                        "path": ["inject", index],
+                    }
+                )
+    check("intercept", "an object", lambda v: isinstance(v, dict))
+    check("isolate", "an object", lambda v: isinstance(v, dict))
+    isolate = options.get("isolate")
+    if isinstance(isolate, dict):
+        for name, label in isolate.items():
+            if label is True or isinstance(label, str):
+                continue
+            issues.append(
+                {
+                    "message": f"isolate.{name} must be true or a string",
+                    "path": ["isolate", name],
+                }
+            )
+    if (
+        deep
+        and options.get("group") is True
+        and isinstance(options.get("config"), list)
+    ):
+        for index, child in enumerate(options["config"]):
+            for issue in validate_options(child, sep, True):
+                issues.append(
+                    {
+                        "message": issue["message"],
+                        "path": ["config", index, *issue["path"]],
+                    }
+                )
+    return issues
+
+
 def check_unique_ids(rows: list[dict[str, Any]]) -> None:
     """Raise ValueError when two rows carry the same entry id.
 
@@ -239,22 +264,6 @@ def check_unique_ids(rows: list[dict[str, Any]]) -> None:
         if key in seen:
             raise ValueError(f"duplicate entry id {key!r}; ids must be unique")
         seen.add(key)
-
-
-def _in_fiber_scope(owner: Context, scope: Context) -> bool:
-    """Whether ``owner`` is ``scope`` or descends from it.
-
-    The oracle's volatile-update filter tests ``owner.fiber is fiber``;
-    anima never binds a non-root fiber to its context, so scope ancestry
-    is the equivalent test: listeners registered on the fiber's context
-    or a descendant of it belong to that fiber's scope.
-    """
-    ctx: Context | None = owner
-    while ctx is not None:
-        if ctx is scope:
-            return True
-        ctx = ctx._parent
-    return False
 
 
 class EntryOptions(TypedDict, total=False):
@@ -275,11 +284,16 @@ class EntryTree(ABC):
 
     sep: ClassVar[str] = ":"
 
+    def get_location(
+        self, entry_id: str, path: tuple[Any, ...]
+    ) -> tuple[int, int] | None:
+        """Return the config value's source location, when the tree tracks it."""
+        return None
+
     def __init__(self, ctx: Context, loader: LoaderService | None = None) -> None:
         self.ctx = ctx.extend()
         object.__setattr__(self.ctx, "baseUrl", ctx.baseUrl)
         self.store: dict[str, Entry] = {}
-        self.builtins: dict[str, str] = {}
         self.enable_logs = False
         self.root = EntryGroup(self.ctx, self)
         self.loader: LoaderService | None = loader
@@ -365,6 +379,9 @@ class EntryTree(ABC):
         position: float = math.inf,
     ) -> str:
         """Create an entry in the root group or a nested group; return its full id."""
+        issues = validate_options(options, EntryTree.sep, deep=True)
+        if issues:
+            raise EntryValidationError(issues)
         group = self.resolve_group(parent)
         entry_id = self.ensure_id(options)
         if entry_id in self.store:
@@ -503,8 +520,8 @@ class EntryTree(ABC):
 
     def import_(self, name: str, outer_stack: list[str] | None = None) -> Any:
         """Import a plugin from a specifier or builtin alias."""
-        if name in self.builtins:
-            name = self.builtins[name]
+        if name in BUILTIN_ALIASES:
+            name = BUILTIN_ALIASES[name]
         return resolve_component_target(name)
 
     @abstractmethod
@@ -534,6 +551,10 @@ class Entry:
         self.loader = loader
         self.ctx = loader.ctx.extend()
         self.fiber: Fiber | None = None
+        self.outer_fiber: Fiber | None = None
+        # rc.13 renamed `entry.fiber` to `entry.innerFiber`. Keep the old name
+        # as the storage attribute (existing internal callers) and expose the
+        # new name as the canonical read/write alias.
         self.module_namespace: Any = None
         self.options: dict[str, Any] = {}
         self.subgroup: EntryGroup | None = None
@@ -546,6 +567,15 @@ class Entry:
         # set flag can never suppress a genuine self-dispose.
         self._loader_disposing = False
         self.ctx.emit("loader/entry-init", self)
+
+    @property
+    def innerFiber(self) -> Fiber | None:
+        """The component fiber owned by this entry (rc.13 name)."""
+        return self.fiber
+
+    @innerFiber.setter
+    def innerFiber(self, fiber: Fiber | None) -> None:
+        self.fiber = fiber
 
     @property
     def context(self) -> Context:
@@ -650,89 +680,31 @@ class Entry:
                     self.options.get(key), legacy.get(key), key == "config"
                 )
             ]
-            # Volatile-only fast path: a change confined to volatile
-            # fields commits into the running fiber without a restart.
-            # The fiber must be ACTIVE and the entry ctx must still be
-            # parented to its group ctx (a short-circuited
-            # loader/patch-context waterfall leaves it on the loader
-            # ctx, which disables the fast path).
-            fiber = self.fiber
-            volatile_only = (
-                changes == ["config"]
-                and fiber.state is FiberState.ACTIVE
-                and self.ctx._parent is self.parent.ctx
-                and equal_except_volatile(
-                    legacy.get("config"),
-                    self.options.get("config"),
-                    fiber.config_schema,
-                )
-            )
-            if volatile_only:
-                raw = self.options.get("config")
-                fiber.raw_config = dict(raw) if isinstance(raw, dict) else raw
-            pending = [] if volatile_only and await self._commit_volatile() else changes
+            # Upstream entry.ts:243-248: identity (`name`) and the entry's
+            # declared `inject` are rebuild triggers. Patching the context in
+            # place keeps the old component running, which is wrong when the
+            # component itself or its dependency set changed.
+            rebuild_keys = {"name", "inject"}
+            if self.outer_fiber is not None:
+                # Realm changes re-evaluate the outer fiber's dependencies.
+                rebuild_keys.add("isolate")
+            if rebuild_keys.intersection(changes):
+                # The outer guard above already guarantees a live fiber.
+                old = self.fiber
+                assert old is not None
+                self._loader_disposing = True
+                self.fiber = None
+                await old.dispose()
+                await self.init()
+                return
+
+            pending = changes
             if not pending and not force:
                 return
             self.ctx.emit("loader/partial-dispose", self, legacy, True)
             await self._patch_context(pending)
         else:
             await self.init()
-
-    async def _commit_volatile(self) -> bool:
-        """Commit a volatile-only raw config change into the live fiber.
-
-        Re-validates the candidate; refuses it (leaving the running
-        references unchanged) when validation fails, and reports False
-        when an ordinary effective value changed so the caller runs the
-        ordinary update lifecycle. Otherwise commits the changed
-        volatile snapshots and emits ``loader/volatile-update`` with the
-        changed paths, scoped to this fiber's listeners.
-        """
-        # The caller guarantees a live fiber (the volatile-only path is
-        # only reached with one); the cast mirrors the oracle's
-        # non-null assertion.
-        fiber = cast(Fiber, self.fiber)
-        refs = volatile_entries(fiber.config)
-        if not refs:
-            return True
-        raw = self.options.get("config")
-        try:
-            candidate = await fiber.resolve_config(raw)
-        except Exception as exc:  # noqa: BLE001 - any resolve failure refuses the commit
-            logger.warning(
-                "volatile config update failed for %s", self.options.get("id")
-            )
-            logger.warning("%s", exc)
-            return True
-        if not deep_equal(fiber.config, candidate, strict=True):
-            logger.debug(
-                "ordinary config values of %s changed with its volatile "
-                "values; applying the ordinary update",
-                self.options.get("id"),
-            )
-            return False
-        paths: list[list[str]] = []
-        for item in refs:
-            path = item["path"]
-            ref = item["ref"]
-            source: Any = candidate
-            for key in path:
-                source = source[key]
-            if deep_equal(ref.get(), source.get(), strict=True):
-                continue
-            update_volatile(ref, source)
-            paths.append(list(path))
-        if not paths:
-            return True
-        # Scope the event to this fiber's listeners. The filtered ctx is
-        # detached afterwards: filter() registers it on the parent, and
-        # a throwaway ctx per emit would leak one per volatile update.
-        scoped = fiber.ctx.filter(lambda owner: _in_fiber_scope(owner, fiber.ctx))
-        try:
-            scoped.emit("loader/volatile-update", paths)
-        finally:
-            fiber.ctx._children.remove(scoped)
-        return True
 
     async def _patch_context(self, diff: list[str]) -> None:
         """Re-parent the entry ctx and, when the diff touches config, update the fiber."""
@@ -803,23 +775,52 @@ class Entry:
         config = self.options.get("config")
         if config is None:
             config = {}
-        fiber = self.ctx.registry.use(plugin, config)
-        fiber.entry = self
         # A fresh mount clears any loader-disposing mark.
         self._loader_disposing = False
-        # Entry-level inject merge: the merge runs synchronously after
-        # registry.use returns and before any await, so the scheduled
-        # load sees the merged set.
         inject_opt = self.options.get("inject")
         if inject_opt:
-            merged = resolve_inject(inject_opt, {})
-            names = list(merged)
-            fiber.inject = names + [n for n in fiber.inject if n not in names]
-            entry_cfg = {k: v for k, v in merged.items() if isinstance(v, dict)}
-            base = fiber.inject_config or {}
-            fiber.inject_config = {**base, **entry_cfg}
+            # rc.13 evaluates the entry's `inject` in its own outer fiber;
+            # the component is mounted in an inner fiber once those
+            # dependencies are satisfied (upstream loader entry.ts:35-46,
+            # 353-372). Both fibers use the entry context's registry so
+            # service mirroring and entry identity are preserved.
+            entry = self
+
+            inject_values = resolve_inject(inject_opt, {})
+            # Upstream entry.ts:155 interpolates each declared dependency's
+            # config before the outer fiber resolves it.
+            inject_values = {
+                name: interpolate_js_expr(entry.ctx, value)
+                for name, value in inject_values.items()
+            }
+
+            class Outer:
+                name = "loader:outer"
+                inject = inject_values
+
+                @staticmethod
+                async def apply(_ctx: Context) -> None:
+                    fiber = entry._start_inner(plugin, config)
+                    await fiber.await_settle()
+
+            fiber = self.ctx.registry.use(Outer())
+            self.outer_fiber = fiber
+        else:
+            fiber = self._start_inner(plugin, config)
+        fiber.entry = self
         self.fiber = fiber
         self.module_namespace = namespace
+
+    def _start_inner(self, plugin: Any, config: Any) -> Fiber:
+        """Mount the component itself on the entry's context registry."""
+        fiber = self.ctx.registry.use(plugin, config)
+        fiber.entry = self
+        self.fiber = fiber
+        return fiber
+
+    def get_location(self, path: tuple[Any, ...]) -> tuple[int, int] | None:
+        """Return the 1-based line/column of this entry's config value."""
+        return self.parent.tree.get_location(self.id, path)
 
     def get_outer_stack(self) -> list[str]:
         """Return the import-failure stack through owning entries."""
@@ -858,6 +859,9 @@ class EntryGroup:
 
     async def create(self, options: dict[str, Any]) -> str:
         """Create (or re-parent) the entry for a row; return its full id."""
+        issues = validate_options(options, EntryTree.sep)
+        if issues:
+            raise EntryValidationError(issues)
         entry_id = self.tree.ensure_id(options)
         entry = self.tree.store.get(entry_id)
         if entry is None:
@@ -880,7 +884,10 @@ class EntryGroup:
     def remove(self, entry_id: str, is_dispose: bool = False) -> None:
         """Dispose an entry's fiber, unlink its row, and drop it from the store."""
         entry = self.tree.store.get(entry_id)
-        if entry is None:
+        # rc.13 group.ts:64-68: an entry already adopted by another group
+        # (a file-driven move) belongs to that group now; removing it from
+        # its former parent must be a no-op.
+        if entry is None or entry.parent is not self:
             return
         if entry.fiber is not None:
             if entry.fiber.uid is not None:

@@ -1,7 +1,7 @@
 """Declarative configuration schema AST and validation engine for Anima.
 
 Ports the Config-used subset of the upstream schema library: the
-``~standard`` seam, volatile references, ``natural``/``step``, ``pattern``,
+``~standard`` seam, ``natural``/``step``, ``pattern``,
 object/union error semantics, required-before-default ordering, ``const``
 via deep equality, ``role``/``loose``/``extra``/``never``/``transform``,
 and schema JSON round-trip. Unported constructs fail loud: the builder
@@ -20,10 +20,6 @@ import re
 from typing import Any
 
 from anima.utils import is_plain_object
-from anima.volatile import (
-    create_volatile,
-    is_volatile,
-)
 
 _UNDEFINED = object()
 
@@ -204,8 +200,7 @@ def _is_multiple_of(data: float, min_value: float, step: float) -> bool:
 def deep_equal(a: Any, b: Any, strict: bool = False) -> bool:
     """Compare values recursively, mirroring the oracle's deepEqual.
 
-    Two volatile references compare equal regardless of value. Non-strict
-    mode treats null and undefined as equal. Cycles compare unequal unless
+    Non-strict mode treats null and undefined as equal. Cycles compare unequal unless
     identical. Plain dicts/lists compare by content; other object types
     compare by identity only.
     """
@@ -214,8 +209,6 @@ def deep_equal(a: Any, b: Any, strict: bool = False) -> bool:
     def compare(left: Any, right: Any) -> bool:
         if left is right:
             return True
-        if is_volatile(left) or is_volatile(right):
-            return is_volatile(left) and is_volatile(right)
         if (
             not strict
             and (left is None or left is _UNDEFINED)
@@ -257,12 +250,9 @@ def deep_equal(a: Any, b: Any, strict: bool = False) -> bool:
 def clone(value: Any, _refs: dict[int, Any] | None = None) -> Any:
     """Deep-clone plain config data, preserving cycles.
 
-    Volatile references are returned as-is (references are stable).
     Prototypes and property descriptors are not preserved; plain dicts,
     lists, tuples, and primitives round-trip exactly.
     """
-    if is_volatile(value):
-        return value
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     refs = {} if _refs is None else _refs
@@ -353,39 +343,6 @@ class _StandardProps:
             return {"issues": [{"message": str(err), "path": list(err.path)}]}
 
 
-def _validate_volatile_schema(
-    schema: Schema,
-    path: list[str | int] | None = None,
-    blocked: bool = False,
-    seen: set[tuple[int, bool]] | None = None,
-) -> None:
-    """Reject volatile fields without a fixed object path.
-
-    A volatile field must sit at a fixed object path, or mark an entire
-    object/array volatile. Volatile inside an array, dict, union member,
-    transform inner, or another volatile field is rejected.
-    """
-    seen_set = set() if seen is None else seen
-    key = (id(schema), blocked)
-    if key in seen_set:
-        return
-    seen_set.add(key)
-    current_path = list(path) if path else []
-    if schema._volatile and blocked:
-        raise SchemaError(
-            "volatile fields require a fixed object path without an "
-            "enclosing volatile field",
-            current_path,
-        )
-    nested = blocked or schema._volatile
-    for prop_key, child in (schema._properties or {}).items():
-        _validate_volatile_schema(child, [*current_path, prop_key], nested, seen_set)
-    if schema._inner is not None:
-        _validate_volatile_schema(schema._inner, [*current_path, "*"], True, seen_set)
-    for index, child in enumerate(schema._schemas or []):
-        _validate_volatile_schema(child, [*current_path, str(index)], True, seen_set)
-
-
 def _resolve_property(
     data: Any,
     key: Any,
@@ -433,7 +390,6 @@ class Schema:
         self._pattern_source: str | None = None
         self._pattern_flags: str = ""
         self._pattern_re_flags: int = re.ASCII
-        self._volatile: bool = False
         self._loose: bool = False
         self._role: str | None = None
         self._role_extra: Any = _UNDEFINED
@@ -600,13 +556,6 @@ class Schema:
             raise TypeError("pattern must be a string or compiled pattern")
         return self
 
-    def volatile(self) -> Schema:
-        """Mark this node as a volatile (live-updating) reference."""
-        if self._volatile:
-            raise TypeError("volatile schema is already wrapped")
-        self._volatile = True
-        return self
-
     def loose(self, val: bool = True) -> Schema:
         """Return the default instead of throwing when validation fails."""
         self._loose = val
@@ -632,7 +581,6 @@ class Schema:
             segments.extend(path.split(".") if path else [])
         else:
             segments.extend(path)
-        _validate_volatile_schema(self)
         value, _adapted = self._resolve(data, segments)
         return None if value is _UNDEFINED else value
 
@@ -667,18 +615,6 @@ class Schema:
         ``adapted`` is ``_UNDEFINED`` unless a transform produced an adapted
         input. Raises ``SchemaError`` on failure.
         """
-        if self._volatile:
-            inner = copy.copy(self)
-            inner._volatile = False
-            value, adapted = inner._resolve(data, path, strict)
-            try:
-                # Absent input resolves to undefined; the snapshot holds
-                # None at the boundary (the closest Python equivalent).
-                snapshot = None if value is _UNDEFINED else value
-                return create_volatile(snapshot), adapted
-            except (TypeError, ValueError) as err:
-                raise SchemaError(str(err), path) from err
-
         if data is _UNDEFINED or data is None:
             if self._required:
                 raise SchemaError("missing required value", path)
@@ -888,8 +824,6 @@ class Schema:
             meta["hidden"] = True
         if self._required:
             meta["required"] = True
-        if self._volatile:
-            meta["volatile"] = True
         if self._loose:
             meta["loose"] = True
         if self._role is not None:
@@ -970,7 +904,6 @@ class Schema:
             schema._pattern_source = None
             schema._pattern_flags = ""
             schema._pattern_re_flags = re.ASCII
-            schema._volatile = False
             schema._loose = False
             schema._role = None
             schema._role_extra = _UNDEFINED
@@ -996,8 +929,6 @@ class Schema:
                 schema._hidden = True
             if meta.get("required"):
                 schema._required = True
-            if meta.get("volatile"):
-                schema._volatile = True
             if meta.get("loose"):
                 schema._loose = True
             if "role" in meta:
@@ -1027,7 +958,6 @@ class Schema:
                     "description",
                     "hidden",
                     "required",
-                    "volatile",
                     "loose",
                     "role",
                     "extra",

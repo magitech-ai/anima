@@ -149,23 +149,6 @@ class RegistryService:
         key, _ = forwarded
         return key in self._internal
 
-    def delete(self, component: Any) -> ComponentRuntime | None:
-        """Dispose every running fiber for a component and remove its runtime record.
-
-        RegistryService.delete(component) parity.
-        """
-        forwarded = self._forward(component)  # pragma: no cover
-        if forwarded is None:  # pragma: no cover
-            return None  # pragma: no cover
-        key, _ = forwarded  # pragma: no cover
-        runtime = self._internal.get(key)  # pragma: no cover
-        if not runtime:  # pragma: no cover
-            return None  # pragma: no cover
-        self._internal.pop(key, None)  # pragma: no cover
-        for fiber in list(runtime.fibers):  # pragma: no cover
-            self.ctx._schedule_task(fiber.dispose())  # pragma: no cover
-        return runtime  # pragma: no cover
-
     def _unregister(self, runtime: ComponentRuntime) -> None:
         """Unregister a runtime by its callback."""
         self._internal.pop(runtime.callback, None)

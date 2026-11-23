@@ -316,8 +316,49 @@ class Fiber:
             await self.inertia
         return self._instance if self.state == FiberState.ACTIVE else None
 
+    def _adopt_impls(self, old_impls: set[Any]) -> None:
+        """Track which providers this fiber's committed view depends on."""
+        new_impls = set((self.store or {}).values())
+        for impl in old_impls - new_impls:
+            self._drop_dependent(impl)
+        for impl in new_impls:
+            if impl.fiber is not self:
+                impl.dependents.add(self)
+
+    def _drop_dependent(self, impl: Any) -> None:
+        impl.dependents.discard(self)
+        if not impl.dependents and impl.release is not None:
+            impl.release()
+            impl.release = None
+
+    async def _drain_provisions(self) -> None:
+        """Wait until no fiber still reads a service this fiber provides."""
+        provisions = [
+            impl for impl in self.ctx.reflect.store.values() if impl.fiber is self
+        ]
+        futures: dict[Any, asyncio.Future[None]] = {}
+        for impl in provisions:
+            if not impl.dependents:
+                continue
+            future = asyncio.get_running_loop().create_future()
+            futures[impl] = future
+
+            def release(future: asyncio.Future[None] = future) -> None:
+                if not future.done():
+                    future.set_result(None)
+
+            impl.release = release
+        if futures:
+            await asyncio.gather(*futures.values())
+        for impl in futures:
+            impl.release = None
+
     async def _unload(self) -> None:
         """Unwind child fibers and effect disposers in reverse order (LIFO)."""
+        # Leave our providers' dependent sets before waiting on our own.
+        for impl in (self.store or {}).values():
+            self._drop_dependent(impl)
+        await self._drain_provisions()
         # Dispose child fibers first
         for child in reversed(list(self.child_fibers)):
             await child.dispose()
@@ -413,7 +454,9 @@ class Fiber:
         the component body. A component failure is logged and stored on the
         fiber, not raised; await_settle() rethrows it.
         """
+        old_impls = set((self.store or {}).values())
         self.store = dict(self._store)
+        self._adopt_impls(old_impls)
         old_epoch = epoch
         self._load_attempted = True
         try:
@@ -458,7 +501,7 @@ class Fiber:
 
         Runs the ``internal/config`` waterfall, then schema validation,
         and returns the resolved candidate. The running config, raw
-        input, and volatile references are untouched. Raises when
+        input is untouched. Raises when
         validation fails.
         """
         return await self._resolve_config(config)
@@ -592,13 +635,31 @@ class Fiber:
             await self._collect_effect(await result, epoch)
             return
         if isinstance(result, AsyncIterable):
-            async for item in result:
-                if self._getCurrentEpoch() != epoch:
-                    return
-                self._collect_item(item)
+            # Close the generator when the epoch moves so its `finally` blocks
+            # run deterministically (upstream rc.13 fiber.ts:267-285, #268).
+            iterator = result.__aiter__()
+            try:
+                while True:
+                    if self._getCurrentEpoch() != epoch:
+                        break
+                    try:
+                        item = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    # The body may change the epoch while producing the item.
+                    if self._getCurrentEpoch() != epoch:
+                        break
+                    self._collect_item(item)
+            finally:
+                aclose = getattr(iterator, "aclose", None)
+                if aclose is not None:
+                    await aclose()
             return
         if isinstance(result, Iterable):
+            # Algorithm 1 consults the guard at every iteration boundary.
             for item in result:
+                if self._getCurrentEpoch() != epoch:
+                    break
                 self._collect_item(item)
             return
         raise TypeError("Invalid effect")
@@ -618,6 +679,9 @@ class Fiber:
             return
 
         self.target = new_target
+        # Upstream _replace() clears the failure before recomputing the target:
+        # a replacement is an explicit recovery, unlike a notification.
+        self.error = None
         self.name = getattr(
             new_target, "name", getattr(new_target, "__name__", str(new_target))
         )
@@ -647,6 +711,12 @@ class Fiber:
         self.assertActive()
         self.raw_config = dict(config) if isinstance(config, dict) else config
 
+        # Upstream fiber.ts:540-542: persistence receives the raw input, on
+        # every fiber, before resolution. Committing the resolved value would
+        # bake expressions and schema defaults into the stored profile.
+        if not no_save:
+            self.ctx.emit("internal/commit", self, self.raw_config)
+
         if self.state != FiberState.ACTIVE:
             self.error = None
             self._setEpoch("__INACTIVE__")
@@ -654,8 +724,6 @@ class Fiber:
             return
 
         resolved = await self._resolve_config(config)
-        if not no_save:
-            self.ctx.emit("internal/commit", self, resolved)
 
         async def _default(cfg: Any) -> None:
             self.config = cfg
@@ -666,6 +734,7 @@ class Fiber:
             "internal/update",
             resolved,
             default_handler=_default,
+            owner=self,
         )
 
     def status(self) -> dict[str, Any]:
@@ -683,21 +752,10 @@ class Fiber:
     async def await_settle(self) -> Fiber:
         """Wait for current lifecycle work and rethrow startup errors.
 
-        Fiber.await() parity. Awaits any in-flight inertia (load/unload)
-        transition, then rethrows any startup error stored on the fiber.
-        A PENDING fiber with no transition in flight drives its own load
-        first, so awaiting a fiber whose load was only scheduled still
-        settles it; a fiber that already completed a load cycle is left
-        alone, so awaiting a fiber that deliberately settled to PENDING
-        does not reload it. Returns the fiber so `await fiber` yields the
-        fiber itself.
+        Upstream fiber.ts:520-526: only observes the in-flight transition
+        and rethrows a startup error. It never starts a transition of its
+        own; callers must use load()/restart() to drive one.
         """
-        if (
-            self.state == FiberState.PENDING
-            and self.inertia is None
-            and not self._load_attempted
-        ):
-            await self.load()
         while self.inertia is not None:
             await self.inertia
         if self.error is not None:
@@ -775,6 +833,10 @@ class Fiber:
         """
         old_epoch = self._getCurrentEpoch()
         if epoch == old_epoch:
+            return
+        # Upstream fiber.ts:435-436: a failed fiber only recovers through
+        # update(), which clears the error before restarting it.
+        if self.error is not None:
             return
         self._setCurrentEpoch(epoch)
         if self.inertia is not None:
@@ -1266,6 +1328,11 @@ class Context:
         self._event_bus: EventBus = parent._event_bus if parent else EventBus()
         # isolation map service name -> scope label (Dict<symbol>)
         self._isolated_services: dict[str, Any] = isolated_services or {}
+        # A string isolate label names a global realm: every context using the
+        # same label resolves the same binding (paper §5.2.1, Algorithm 7).
+        self._shared_isolated: dict[tuple[Any, str], Any] = (
+            {} if parent is None else self.root._shared_isolated
+        )
         self._scope_label = scope_label
         # intercept map service name -> config (Dict)
         self._intercept_configs: dict[str, dict[str, Any]] = (
@@ -1306,12 +1373,13 @@ class Context:
 
     # Context methods
     def set(self, name: str, value: Any) -> None:
-        """Context.set(name, value) - Set service value by name."""
-        # If not yet registered via provide, register it first
-        if name not in self.reflect.store:
-            self.reflect.provide(name, value)
-        else:
-            self.reflect.set(name, value)  # pragma: no cover
+        """Set an already-provided service by name.
+
+        Upstream ``reflect.ts:200-211`` rejects a write to an unprovided name;
+        auto-providing would hide a missing declaration and break the coeffect
+        contract. ``ReflectService.set`` performs that check.
+        """
+        self.reflect.set(name, value)
 
     def accessor(self, name: str, options: dict[str, Any]) -> Any:
         """Context.accessor(name, options) - Create property accessor."""
@@ -1448,6 +1516,13 @@ class Context:
             asyncio.run(_run())
             return None
 
+    def _shared_key(self, name: str) -> tuple[Any, str] | None:
+        """Return the global-realm key for a named service, if it has one."""
+        label = self._isolated_services.get(name)
+        if isinstance(label, str) and not label.startswith("__entry__:"):
+            return (label, name)
+        return None
+
     def has(self, name: str) -> bool:
         """Check if a service is registered in this context scope."""
         if name in self._services:
@@ -1455,7 +1530,8 @@ class Context:
         if self.reflect._get_impl(name, strict=False) is not None:
             return True
         if name in self._isolated_services:
-            return False
+            key = self._shared_key(name)
+            return key in self._shared_isolated if key is not None else False
         return self._parent.has(name) if self._parent else False
 
     def get(self, name: str, default: Any = None, strict: bool = True) -> Any:
@@ -1466,6 +1542,9 @@ class Context:
         if name in self._services:
             return self._services[name]  # pragma: no cover
         if name in self._isolated_services:
+            key = self._shared_key(name)
+            if key is not None and key in self._shared_isolated:
+                return self._shared_isolated[key]
             return default
         # pragma: no cover - parent context fallback is defensive code
         if self._parent:
@@ -1574,11 +1653,17 @@ class Context:
         """Register a service and re-evaluate any PENDING fibers waiting on it."""
         self._services[name] = service
         self.emit("internal/service", name, service)
+        key = self._shared_key(name)
+        if key is not None:
+            self._shared_isolated[key] = service
 
-        # Check pending fibers across this context and children
-        for fiber in list(self._fibers):
+        # Check pending fibers across this context and children; a global
+        # realm can have dependents in sibling contexts (paper Algorithm 7).
+        candidates = self.root.all_fibers() if key is not None else list(self._fibers)
+        scheduler = self.root if key is not None else self
+        for fiber in candidates:
             if fiber.state == FiberState.PENDING and fiber.check_dependencies():
-                self._schedule_task(fiber.load())
+                scheduler._schedule_task(fiber.load())
 
     def _unregister_service(self, name: str) -> Awaitable[None] | None:
         """Unregister a service and return the disposal of its dependents.
@@ -1591,7 +1676,10 @@ class Context:
         """
         if name not in self._services:
             return None
-        del self._services[name]
+        service = self._services.pop(name)
+        key = self._shared_key(name)
+        if key is not None and self._shared_isolated.get(key) is service:
+            del self._shared_isolated[key]
         self.emit("internal/service-removed", name)
         dependents = [
             fiber
@@ -1607,10 +1695,16 @@ class Context:
         for fiber in dependents:
             await fiber.dispose()
 
-    def effect(
-        self, func: Callable[[], Disposer | None], label: str | None = None
-    ) -> Disposer:
+    def effect(self, func: Callable[[], Any], label: str | None = None) -> Disposer:
         """Register a cleanup-aware reversible effect on the active fiber.
+
+        ``func`` may return any effect shape accepted by Cordis rc.13
+        (``fiber.ts:60-76, 240-289``): a disposer, nothing, an iterable of
+        disposers, a promise of one of those, or an async iterable of
+        disposers. Every yielded disposer is collected and run once, in
+        reverse registration order, when the returned disposer is called or
+        the owning fiber unloads. An async iterable is closed when the fiber's
+        epoch changes so its ``finally`` blocks run deterministically.
 
         The returned disposer carries effect metadata
         (``{"label": ..., "children": []}``) and is itself the entry
@@ -1619,26 +1713,126 @@ class Context:
         A disposer runs at most once: disposing it directly marks it
         spent, so a parent effect wrapping it will not run it again.
         """
-        fiber = _current_fiber.get()
-        disposer = func()
+        # Upstream binds `effect` to `ctx.fiber`, so the effect belongs to the
+        # fiber that owns this context scope, including the root fiber when
+        # registered outside a component body.
+        fiber = self.fiber
         meta: dict[str, Any] = {"label": label or "anonymous", "children": []}
+        disposables: list[Callable[[], Any]] = []
+        state: dict[str, Any] = {"armed": True, "task": None}
 
-        def _cleanup() -> Any:
-            if getattr(_cleanup, "_spent", False):
-                return None
-            # The spent flag must live on the disposer itself so a
-            # parent effect wrapper can see a manual dispose.
-            setattr(_cleanup, "_spent", True)  # noqa: B010
-            if fiber is not None and _cleanup in fiber.effects:
-                fiber.effects.remove(_cleanup)
-            if callable(disposer):
-                res = disposer()
-                return res
+        def collect(item: Any) -> None:
+            if item is None:
+                return
+            if callable(item):
+                item_meta = getattr(item, symbols["effect"], None)
+                if item_meta is not None:
+                    if item in fiber.effects:
+                        fiber.effects.remove(item)
+                    meta["children"].append(item_meta)
+                disposables.append(item)
+                return
+            if isinstance(item, Iterable) and not isinstance(
+                item, (str, bytes, bytearray)
+            ):
+                for sub in item:
+                    collect(sub)
+                return
+            raise TypeError("Invalid effect")
+
+        def run_disposers() -> Any:
+            items = list(reversed(disposables))
+            disposables.clear()
+            for index, item in enumerate(items):
+                res = item()
+                if inspect.isawaitable(res):
+
+                    async def chain(res: Any = res, start: int = index + 1) -> None:
+                        await res
+                        for rest in items[start:]:
+                            res_rest = rest()
+                            if inspect.isawaitable(res_rest):
+                                await res_rest
+
+                    return chain()
             return None
 
+        async def awaitable_effect(result: Any) -> None:
+            collect(await result)
+
+        async def async_iterable_effect(result: AsyncIterable[Any]) -> None:
+            epoch = fiber._getCurrentEpoch()
+            iterator = result.__aiter__()
+            try:
+                while True:
+                    if fiber._getCurrentEpoch() != epoch:
+                        break
+                    try:
+                        item = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    if fiber._getCurrentEpoch() != epoch:
+                        break
+                    collect(item)
+            finally:
+                aclose = getattr(iterator, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+
+        def start(coro: Any) -> Any:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(coro)
+            task = loop.create_task(coro)
+
+            def report(done: Any) -> None:
+                if not done.cancelled():
+                    error = done.exception()
+                    if error is not None:
+                        logger.exception(
+                            "Effect %s collection failed", label, exc_info=error
+                        )
+
+            task.add_done_callback(report)
+            return task
+
+        result = func()
+        if inspect.isawaitable(result):
+            state["task"] = start(awaitable_effect(result))
+        elif isinstance(result, AsyncIterable):
+            state["task"] = start(async_iterable_effect(result))
+        else:
+            collect(result)
+
+        def _cleanup() -> Any:
+            if not state["armed"]:
+                return None
+            state["armed"] = False
+            setattr(_cleanup, "_spent", True)  # noqa: B010
+            if _cleanup in fiber.effects:
+                fiber.effects.remove(_cleanup)
+            task = state["task"]
+            if task is not None and not task.done():
+
+                async def after_collection() -> Any:
+                    try:
+                        await task
+                    except Exception:
+                        logger.exception("Effect %s collection failed", label)
+                    return run_disposers()
+
+                return after_collection()
+            if task is not None and task.exception() is not None:
+                logger.exception(
+                    "Effect %s collection failed",
+                    label,
+                    exc_info=task.exception(),
+                )
+            return run_disposers()
+
         setattr(_cleanup, symbols["effect"], meta)
-        if callable(disposer) and fiber is not None:
-            fiber.effects.append(_cleanup)
+        fiber.effects.append(_cleanup)
 
         return _cleanup
 
@@ -1711,7 +1905,13 @@ class Context:
     ) -> Disposer:
         """Register an event listener as an effect."""
         disposer = self._event_bus.on(
-            event, callback, mode=mode, prepend=prepend, ctx=self, global_=global_
+            event,
+            callback,
+            mode=mode,
+            prepend=prepend,
+            ctx=self,
+            global_=global_,
+            owner=self.fiber if event == "internal/update" and not global_ else None,
         )
         self.effect(lambda: disposer, label=f'ctx.on("{event}")')
         return disposer
@@ -1736,9 +1936,9 @@ class Context:
         """Synchronously broadcast an event."""
         self._event_bus.emit(event, *args, this_arg=self, **kwargs)
 
-    async def parallel(self, event: str, *args: Any, **kwargs: Any) -> list[Any]:
+    async def parallel(self, event: str, *args: Any, **kwargs: Any) -> None:
         """Concurrently broadcast an event and await all listeners."""
-        return await self._event_bus.parallel(event, *args, this_arg=self, **kwargs)
+        await self._event_bus.parallel(event, *args, this_arg=self, **kwargs)
 
     async def serial(self, event: str, *args: Any, **kwargs: Any) -> Any:
         """Sequential async execution; stops on first non-None."""
@@ -1754,11 +1954,17 @@ class Context:
         event: str,
         *args: Any,
         default_handler: Callable[..., Any] | None = None,
+        owner: Any = None,
         **kwargs: Any,
     ) -> Any:
         """Around-middleware pipeline passing (*args, next)."""
         return await self._event_bus.waterfall(
-            event, *args, this_arg=self, default_handler=default_handler, **kwargs
+            event,
+            *args,
+            this_arg=self,
+            default_handler=default_handler,
+            owner=owner,
+            **kwargs,
         )
 
     def isolate(self, service_name: str, label: Any | None = None) -> Context:

@@ -9,9 +9,6 @@ patch list, never written into the file.
 
 Two diffs live here and must not be conflated (see the design doc):
 
-- ``diff_entries`` is the P1-6 schema-aware diff: volatile fields
-  compare equal, absent objects compare to schema defaults, JsExpr
-  nodes are opaque. It serves the loader's volatile fast path.
 - ``diff_options`` is the journal's plain deep-equal diff, used only
   by journal ``record()``. A removed key yields ``None``: in a changes
   dict None deletes the key, it is never stored as a value.
@@ -34,13 +31,12 @@ from typing import Any, cast
 
 from anima.core import Context, Service, is_js_expr
 from anima.events import EventMode
-from anima.jsexpr import dump_yaml, load_yaml
+from anima.jsexpr import dump_yaml, load_yaml_with_locations
 from anima.schema import deep_equal
 from anima.tree import (
     EntryChange,
     EntryGroup,
     EntryTree,
-    equal_except_volatile,
 )
 
 __all__ = [
@@ -61,7 +57,6 @@ __all__ = [
     "diff_options",
     "ensure_ids",
     "ensure_insert_ids",
-    "equal_except_volatile",
     "flatten",
     "merge",
     "merge_records",
@@ -113,8 +108,8 @@ def diff_options(legacy: dict[str, Any], options: dict[str, Any]) -> dict[str, A
     """Calculate the plain deep-equal delta between two entry dicts.
 
     A removed key yields ``None`` (deletion, never a stored value).
-    This is the journal's diff: unlike ``diff_entries`` it knows
-    nothing about schemas or volatile fields.
+    This is the journal's diff: unlike ``diff_entries`` it compares
+    strictly by raw equality.
     """
     changes: dict[str, Any] = {}
     for key in set(legacy) | set(options):
@@ -135,8 +130,6 @@ def diff_entries(
 
     A removed key yields ``None``: in a changes dict None deletes the
     key, it is never stored as a value. The ``config`` key compares with
-    the schema-aware diff when ``config_schema`` is given, so a
-    volatile-only config change produces no diff entry; without a schema
     every key compares by strict raw equality. Expression nodes compare
     structurally and are never evaluated.
     """
@@ -146,10 +139,7 @@ def diff_entries(
             continue
         old_value = older.get(key)
         new_value = newer.get(key)
-        if key == "config" and config_schema is not None:
-            if equal_except_volatile(old_value, new_value, config_schema):
-                continue
-        elif deep_equal(old_value, new_value, strict=True):
+        if deep_equal(old_value, new_value, strict=True):
             continue
         changes[key] = new_value
     return changes
@@ -902,6 +892,10 @@ class Include(Service, EntryTree):
 
         ctx.on("internal/update", self._on_internal_update, mode=EventMode.WATERFALL)
 
+        self._locations: dict[str, dict[tuple[Any, ...], tuple[int, int]]] = {}
+        # Ids assigned to rows that the file leaves anonymous, so an edit to a
+        # neighbor does not restart them (upstream include/index.ts:628-675).
+        self._anonymous: dict[str, tuple[str | None, dict[str, Any]]] = {}
         self._cache: dict[str, Any] | None = None
         self._journal: Journal = {}
         self._index: PatchIndex | None = None
@@ -1103,12 +1097,74 @@ class Include(Service, EntryTree):
         finally:
             self._draining = None
 
+    def _assign_ids(self, data: list[dict[str, Any]]) -> None:
+        """Give anonymous rows stable ids across reads of the config file."""
+        used: set[str] = set()
+
+        def collect(rows: list[dict[str, Any]]) -> None:
+            for row in rows:
+                if row.get("id"):
+                    used.add(row["id"])
+                if row.get("group") and isinstance(row.get("config"), list):
+                    collect(row["config"])
+
+        collect(data)
+        for patch in self.config.get("patches") or []:
+            if isinstance(patch.get("insert"), list):
+                collect(patch["insert"])
+
+        previous = self._anonymous
+        assigned: dict[str, tuple[str | None, dict[str, Any]]] = {}
+
+        def assign(rows: list[dict[str, Any]], parent: str | None) -> None:
+            for row in rows:
+                if not row.get("id"):
+                    candidate: str | None = None
+                    for ident, (old_parent, options) in previous.items():
+                        if (
+                            old_parent == parent
+                            and ident not in used
+                            and deep_equal(options, row)
+                        ):
+                            candidate = ident
+                            del previous[ident]
+                            break
+                    if candidate is None:
+                        while True:
+                            candidate = secrets.token_hex(4)
+                            if candidate not in used and candidate not in self.store:
+                                break
+                    used.add(candidate)
+                    assigned[candidate] = (parent, copy.deepcopy(row))
+                    row["id"] = candidate
+                if row.get("group") and isinstance(row.get("config"), list):
+                    assign(row["config"], row.get("id"))
+
+        assign(data, None)
+        self._anonymous = assigned
+
+    def get_location(
+        self, entry_id: str, path: tuple[Any, ...]
+    ) -> tuple[int, int] | None:
+        """Return the YAML line/column of an entry config value."""
+        return self._locations.get(entry_id, {}).get(path)
+
     def _parse(self, content: str) -> list[dict[str, Any]]:
         """Parse file content; reject every non-array shape as one signal."""
+        self._locations = {}
         if self._type == "application/json":
             data = json.loads(content)
         else:
-            data = load_yaml(content)
+            data, marks = load_yaml_with_locations(content)
+            for index, row in enumerate(data):
+                row_id = row.get("id") if isinstance(row, dict) else None
+                if not isinstance(row_id, str):
+                    continue
+                self._locations[row_id] = {
+                    path[2:]: location
+                    for path, location in marks.items()
+                    if len(path) > 2 and path[0] == index and path[1] == "config"
+                }
         # An empty or truncated file parses to None, not an error; reject
         # every non-array shape here so callers see one "invalid file"
         # signal.
@@ -1119,6 +1175,7 @@ class Include(Service, EntryTree):
         for row in data:
             if not isinstance(row, dict):
                 raise TypeError("entry must be an object")
+        self._assign_ids(data)
         return data
 
     def _dump(self, data: list[dict[str, Any]]) -> str:

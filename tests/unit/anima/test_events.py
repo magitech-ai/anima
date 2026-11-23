@@ -33,7 +33,7 @@ async def test_event_bus_prepend_and_dispose():
 
 
 @pytest.mark.asyncio
-async def test_emit_async_listeners_and_error_handling():
+async def test_emit_async_listeners_and_error_handling(caplog: Any):
     bus = EventBus()
     async_calls = []
 
@@ -47,10 +47,26 @@ async def test_emit_async_listeners_and_error_handling():
     bus.on("async_event", failing_listener)
     bus.on("async_event", async_listener)
 
-    # Emitter should catch exception from failing_listener and schedule async_listener
-    bus.emit("async_event", "hello")
+    # rc.13: a throwing listener aborts the broadcast and reaches the caller.
+    with pytest.raises(RuntimeError, match="boom"):
+        bus.emit("async_event", "hello")
+    assert async_calls == []
+
+    # Async listeners are still scheduled when no earlier listener throws.
+    bus2 = EventBus()
+    bus2.on("async_event", async_listener)
+    bus2.emit("async_event", "hello")
     await asyncio.sleep(0.05)
     assert async_calls == ["hello"]
+
+    async def bad_async(_val: Any) -> None:
+        raise ValueError("async boom")
+
+    bus3 = EventBus()
+    bus3.on("async_event", bad_async)
+    bus3.emit("async_event", "hello")
+    await asyncio.sleep(0.05)
+    assert "Error in async emit listener" in caplog.text
 
 
 def test_emit_sync_fallback():
@@ -71,7 +87,7 @@ async def test_parallel_dispatch_empty_and_mixed():
     bus = EventBus()
 
     # Empty listeners
-    assert await bus.parallel("empty") == []
+    assert await bus.parallel("empty") is None
 
     async def a1():
         await asyncio.sleep(0.01)
@@ -83,8 +99,7 @@ async def test_parallel_dispatch_empty_and_mixed():
     bus.on("mixed", a1)
     bus.on("mixed", s1)
 
-    results = await bus.parallel("mixed")
-    assert results == ["async_val", "sync_val"]
+    assert await bus.parallel("mixed") is None
 
 
 @pytest.mark.asyncio
@@ -126,7 +141,7 @@ async def test_parallel_aggregates_multiple_failures():
 
 
 @pytest.mark.asyncio
-async def test_parallel_single_failure_keeps_concrete_exception_type():
+async def test_parallel_single_failure_is_aggregated_rc13():
     bus = EventBus()
     error = RuntimeError("only-one")
     completed = []
@@ -141,12 +156,13 @@ async def test_parallel_single_failure_keeps_concrete_exception_type():
     bus.on("one", raises_sync)
     bus.on("one", ok)
 
-    # Backwards compatible: one failure re-raises the original exception object,
-    # even though the sibling is still awaited to completion.
-    with pytest.raises(RuntimeError) as excinfo:
+    # rc.13: `parallel` throws AggregateError on any failure, including one.
+    # Python's equivalent is ExceptionGroup with a single member. The sibling
+    # is still awaited to completion.
+    with pytest.raises(ExceptionGroup) as excinfo:
         await bus.parallel("one", 1)
 
-    assert excinfo.value is error
+    assert excinfo.value.exceptions == (error,)
     assert completed == ["ok"]
     assert any("parallel listener" in n for n in error.__notes__)
 
@@ -219,7 +235,7 @@ async def test_parallel_all_succeed_returns_gather_order():
     bus.on("order", slow)
     bus.on("order", fast)
 
-    assert await bus.parallel("order") == ["slow", "fast"]
+    assert await bus.parallel("order") is None
 
 
 @pytest.mark.asyncio

@@ -84,9 +84,10 @@ async def test_include_service_mounts_via_component(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_include_service_mount_without_path_fails_loud():
     ctx = Context()
-    with pytest.raises(IncludeError, match="requires a 'path' string"):
-        await ctx.use(Include)
+    fiber = ctx.use(Include)
     await ctx.flush()
+    with pytest.raises(IncludeError, match="requires a 'path' string"):
+        await fiber.await_settle()
 
 
 @pytest.mark.asyncio
