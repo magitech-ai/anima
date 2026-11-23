@@ -275,6 +275,12 @@ class EntryTree(ABC):
 
     sep: ClassVar[str] = ":"
 
+    def get_location(
+        self, entry_id: str, path: tuple[Any, ...]
+    ) -> tuple[int, int] | None:
+        """Return the config value's source location, when the tree tracks it."""
+        return None
+
     def __init__(self, ctx: Context, loader: LoaderService | None = None) -> None:
         self.ctx = ctx.extend()
         object.__setattr__(self.ctx, "baseUrl", ctx.baseUrl)
@@ -868,6 +874,10 @@ class Entry:
         fiber.entry = self
         self.fiber = fiber
         return fiber
+
+    def get_location(self, path: tuple[Any, ...]) -> tuple[int, int] | None:
+        """Return the 1-based line/column of this entry's config value."""
+        return self.parent.tree.get_location(self.id, path)
 
     def get_outer_stack(self) -> list[str]:
         """Return the import-failure stack through owning entries."""

@@ -722,8 +722,7 @@ async def test_context_parallel_and_bail_delegation():
     # Parallel (line 352)
     ctx.on("compute", lambda x: x * 2)
     ctx.on("compute", lambda x: x * 3)
-    p_results = await ctx.parallel("compute", 5)
-    assert p_results == [10, 15]
+    assert await ctx.parallel("compute", 5) is None
 
     # Serial (line 356)
     ctx.on("first_match", lambda x: "matched" if x == 1 else None)

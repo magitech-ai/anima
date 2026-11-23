@@ -883,7 +883,7 @@ async def test_rc13_expression_error_reports_config_path() -> None:
 
 @pytest.mark.asyncio
 async def test_rc13_loader_expression_error_reports_entry(
-    monkeypatch: Any,
+    monkeypatch: Any, tmp_path: Any
 ) -> None:
     """The loader adds the entry id to a failed expression's location."""
     module = types.ModuleType("rc13_expr_error_mod")
@@ -896,6 +896,8 @@ async def test_rc13_loader_expression_error_reports_entry(
 
     ctx = Context()
     loader = LoaderService(ctx)
+    loader.filename = tmp_path / "cfg.yaml"
+    monkeypatch.setattr(loader, "get_location", lambda _id, _path: (4, 12))
     loader.load(
         [
             {
@@ -910,6 +912,74 @@ async def test_rc13_loader_expression_error_reports_entry(
     with pytest.raises(Exception) as info:
         await fiber.await_settle()
     assert any("bad_expr" in note for note in info.value.__notes__)
+    assert any("cfg.yaml:4:12" in note for note in info.value.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_rc13_yaml_marks_and_empty_document() -> None:
+    """YAML locations are retained per path; an empty document has none."""
+    from anima.jsexpr import load_yaml_with_locations
+
+    empty, marks = load_yaml_with_locations("")
+    assert empty is None and marks == {}
+    null_map, null_marks = load_yaml_with_locations("a:\n")
+    assert null_map == {"a": None} and null_marks == {("a",): (1, 3)}
+
+    data, marks = load_yaml_with_locations("items:\n  - value: 1\n  - value: 2\n")
+    assert len(data["items"]) == 2
+    assert ("items", 0, "value") in marks
+    assert ("items", 1, "value") in marks
+
+
+@pytest.mark.asyncio
+async def test_rc13_entry_location_stub(monkeypatch: Any) -> None:
+    """The root tree reports no source location."""
+    module = types.ModuleType("rc13_location_mod")
+
+    def comp(_c: Any, config: Any = None) -> None:
+        return None
+
+    module.comp = comp
+    monkeypatch.setitem(sys.modules, "rc13_location_mod", module)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load([{"id": "e", "name": "rc13_location_mod:comp"}])
+    await ctx.flush()
+    entry = loader.resolve("e")
+    assert entry.get_location(("x",)) is None
+    assert loader.get_location("e", ("x",)) is None
+
+
+@pytest.mark.asyncio
+async def test_rc13_loader_expression_error_without_location(
+    monkeypatch: Any,
+) -> None:
+    """A tree without source locations still reports the entry and path."""
+    module = types.ModuleType("rc13_expr_error_mod2")
+
+    def comp(_c: Any, config: Any = None) -> None:
+        return None
+
+    module.comp = comp
+    monkeypatch.setitem(sys.modules, "rc13_expr_error_mod2", module)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    monkeypatch.setattr(loader, "get_location", lambda _id, _path: None)
+    loader.load(
+        [
+            {
+                "id": "bad_expr2",
+                "name": "rc13_expr_error_mod2:comp",
+                "config": {"bad": {"__jsExpr": "no_such_fn()"}},
+            }
+        ]
+    )
+    await ctx.flush()
+    fiber = loader.resolve("bad_expr2").fiber
+    with pytest.raises(Exception) as info:
+        await fiber.await_settle()
+    assert any("bad_expr2" in note for note in info.value.__notes__)
+    assert not any("cfg.yaml" in note for note in info.value.__notes__)
 
 
 @pytest.mark.asyncio

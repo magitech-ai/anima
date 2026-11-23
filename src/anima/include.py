@@ -34,7 +34,7 @@ from typing import Any, cast
 
 from anima.core import Context, Service, is_js_expr
 from anima.events import EventMode
-from anima.jsexpr import dump_yaml, load_yaml
+from anima.jsexpr import dump_yaml, load_yaml_with_locations
 from anima.schema import deep_equal
 from anima.tree import (
     EntryChange,
@@ -902,6 +902,7 @@ class Include(Service, EntryTree):
 
         ctx.on("internal/update", self._on_internal_update, mode=EventMode.WATERFALL)
 
+        self._locations: dict[str, dict[tuple[Any, ...], tuple[int, int]]] = {}
         self._cache: dict[str, Any] | None = None
         self._journal: Journal = {}
         self._index: PatchIndex | None = None
@@ -1103,12 +1104,28 @@ class Include(Service, EntryTree):
         finally:
             self._draining = None
 
+    def get_location(
+        self, entry_id: str, path: tuple[Any, ...]
+    ) -> tuple[int, int] | None:
+        """Return the YAML line/column of an entry config value."""
+        return self._locations.get(entry_id, {}).get(path)
+
     def _parse(self, content: str) -> list[dict[str, Any]]:
         """Parse file content; reject every non-array shape as one signal."""
+        self._locations = {}
         if self._type == "application/json":
             data = json.loads(content)
         else:
-            data = load_yaml(content)
+            data, marks = load_yaml_with_locations(content)
+            for index, row in enumerate(data):
+                row_id = row.get("id") if isinstance(row, dict) else None
+                if not isinstance(row_id, str):
+                    continue
+                self._locations[row_id] = {
+                    path[2:]: location
+                    for path, location in marks.items()
+                    if len(path) > 2 and path[0] == index and path[1] == "config"
+                }
         # An empty or truncated file parses to None, not an error; reject
         # every non-array shape here so callers see one "invalid file"
         # signal.

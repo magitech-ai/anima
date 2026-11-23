@@ -1947,9 +1947,9 @@ class Context:
         """Synchronously broadcast an event."""
         self._event_bus.emit(event, *args, this_arg=self, **kwargs)
 
-    async def parallel(self, event: str, *args: Any, **kwargs: Any) -> list[Any]:
+    async def parallel(self, event: str, *args: Any, **kwargs: Any) -> None:
         """Concurrently broadcast an event and await all listeners."""
-        return await self._event_bus.parallel(event, *args, this_arg=self, **kwargs)
+        await self._event_bus.parallel(event, *args, this_arg=self, **kwargs)
 
     async def serial(self, event: str, *args: Any, **kwargs: Any) -> Any:
         """Sequential async execution; stops on first non-None."""

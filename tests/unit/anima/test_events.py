@@ -71,7 +71,7 @@ async def test_parallel_dispatch_empty_and_mixed():
     bus = EventBus()
 
     # Empty listeners
-    assert await bus.parallel("empty") == []
+    assert await bus.parallel("empty") is None
 
     async def a1():
         await asyncio.sleep(0.01)
@@ -83,8 +83,7 @@ async def test_parallel_dispatch_empty_and_mixed():
     bus.on("mixed", a1)
     bus.on("mixed", s1)
 
-    results = await bus.parallel("mixed")
-    assert results == ["async_val", "sync_val"]
+    assert await bus.parallel("mixed") is None
 
 
 @pytest.mark.asyncio
@@ -220,7 +219,7 @@ async def test_parallel_all_succeed_returns_gather_order():
     bus.on("order", slow)
     bus.on("order", fast)
 
-    assert await bus.parallel("order") == ["slow", "fast"]
+    assert await bus.parallel("order") is None
 
 
 @pytest.mark.asyncio

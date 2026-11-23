@@ -417,7 +417,7 @@ async def test_acceptance_dispatch_modes() -> None:
 
     # Parallel: results in registration order even though the fast
     # listener finishes first; both ran.
-    assert await ctx.parallel("acceptance/work", "w") == ["slow", "fast"]
+    assert await ctx.parallel("acceptance/work", "w") is None
     assert ("par-slow", None) in seen
     assert ("par-fast", None) in seen
 

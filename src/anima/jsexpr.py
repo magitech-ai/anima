@@ -758,6 +758,42 @@ def load_yaml(stream: Any) -> Any:
     return yaml.load(stream, Loader=_JsExprLoader)
 
 
+def load_yaml_with_locations(
+    stream: Any,
+) -> tuple[Any, dict[tuple[Any, ...], tuple[int, int]]]:
+    """Load YAML and map value paths to their 1-based line and column.
+
+    PyYAML keeps ``start_mark`` on every composed node; this exposes those
+    marks so the loader can report where an expression sits in the config
+    file (upstream loader/config/tree.ts:254-260 and Include's override).
+    """
+    loader = _JsExprLoader(stream)
+    try:
+        node = loader.get_single_node()
+        data = loader.construct_document(node) if node is not None else None
+    finally:
+        loader.dispose()
+    locations: dict[tuple[Any, ...], tuple[int, int]] = {}
+
+    def walk(current: Any, path: tuple[Any, ...]) -> None:
+        if isinstance(current, yaml.MappingNode):
+            for key_node, value_node in current.value:
+                key = loader.construct_object(key_node)
+                walk(value_node, path + (key,))
+        elif isinstance(current, yaml.SequenceNode):
+            for index, child in enumerate(current.value):
+                walk(child, path + (index,))
+        else:
+            locations[path] = (
+                current.start_mark.line + 1,
+                current.start_mark.column + 1,
+            )
+
+    if node is not None:
+        walk(node, ())
+    return data, locations
+
+
 def dump_yaml(data: Any, stream: Any) -> None:
     """Dump YAML in the entry-list dialect (expression nodes become ``!!js`` scalars)."""
     yaml.dump(data, stream, Dumper=_JsExprDumper, sort_keys=False)

@@ -351,7 +351,13 @@ class LoaderService(Service, EntryTree):
         try:
             return interpolate(fiber.ctx, resolved)
         except JsExprError as error:
-            error.add_note(f"in entry {fiber.entry.id!r}")
+            entry = fiber.entry
+            error.add_note(f"in entry {entry.id!r}")
+            location = entry.get_location(error.path)
+            if location is not None:
+                filename = getattr(entry.parent.tree, "filename", None)
+                where = f"{filename}:" if filename else ""
+                error.add_note(f"at {where}{location[0]}:{location[1]}")
             raise
 
     def _on_commit(self, fiber: Fiber, config: Any) -> None:

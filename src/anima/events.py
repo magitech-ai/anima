@@ -301,7 +301,7 @@ class EventBus:
 
     async def parallel(
         self, event: str, *args: Any, this_arg: Any = None, **kwargs: Any
-    ) -> list[Any]:
+    ) -> None:
         """All listeners run concurrently and are awaited together.
 
         Every listener is awaited to completion whether or not a sibling fails,
@@ -324,7 +324,7 @@ class EventBus:
             if not listener.removed
         ]
         if not listeners:
-            return []
+            return
         results = await asyncio.gather(
             *(_dispatch_one(listener, args, kwargs) for listener in listeners),
             return_exceptions=True,
@@ -347,7 +347,7 @@ class EventBus:
         if fatal is not None:
             raise fatal
         if not failures:
-            return list(results)
+            return
         labels = ", ".join(label for label, _ in failures)
         raise ExceptionGroup(
             f"{len(failures)} of {len(listeners)} listeners failed "

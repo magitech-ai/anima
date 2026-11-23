@@ -75,7 +75,6 @@ marked DONE:
 
 | Divergence | Evidence |
 |---|---|
-| `parallel()` returns the result list on success; rc.13 resolves `void` | `src/anima/events.py` vs `core/src/events.ts:110-119` |
 | `emit()` catches and logs listener exceptions; rc.13 propagates them | `src/anima/events.py` vs `core/src/events.ts:121-126` |
 | Access errors are not deferred/enriched with a lazy stack | `src/anima/reflect.py` vs `core/src/reflect.ts:20-36` |
 | `await_settle()` drives a never-attempted PENDING fiber; rc.13 `await` only observes | `src/anima/core.py` vs `core/src/fiber.ts:520-526` |
@@ -84,12 +83,8 @@ marked DONE:
 
 The outer/inner-fiber scopes and config-path reporting are now ported. Two
 earlier outer-fiber attempts were reverted (broken registry identity, then
-tsort deadlock) before the working design was found. A narrower remaining
-limitation is YAML **line/column** source mapping for expression errors:
-rc.13's Include tree overrides `getLocation()` with YAML AST marks, while
-Anima's Include does not retain marks, so errors carry the config path and
-entry id but not the source line. This is recorded as OPEN below.
+a LOADING-state race) before the working design was found.
 
 | Item | Status | Upstream evidence |
 |---|---|---|
-| YAML line/column source mapping for expression errors | OPEN | `loader/config/tree.ts:254-260` and Include's override; Anima `Include` has no `get_location`/mark retention |
+| YAML line/column source mapping for expression errors | DONE | `load_yaml_with_locations()` retains PyYAML `start_mark`; `Include.get_location()` and `Entry.get_location()`; loader adds `file:line:column` notes (upstream `loader/config/tree.ts:254-260` and Include's override) |

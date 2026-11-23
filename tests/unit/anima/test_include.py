@@ -1723,6 +1723,16 @@ async def test_include_on_internal_update_sync_next_fn(
 
 
 @pytest.mark.asyncio
+async def test_include_retains_yaml_config_locations(tmp_path: Path, mod: Any) -> None:
+    content = "- id: a\n  name: tree_test_mod:comp\n  config:\n    level: 1\n"
+    _ctx, _loader, _inc_id, _entry, inc = await _boot(tmp_path, content)
+    location = inc.get_location("a", ("level",))
+    assert location is not None
+    assert location[0] == 4
+    assert inc.get_location("a", ("absent",)) is None
+
+
+@pytest.mark.asyncio
 async def test_include_on_internal_update_async_next_fn_is_awaited(
     tmp_path: Path, mod: Any
 ) -> None:
