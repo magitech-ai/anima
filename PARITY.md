@@ -5,6 +5,12 @@ The authoritative 1.0 parity map lives in the harness repo:
 re-audit deliverable that proves acceptance criterion 1 (every in-scope item
 DONE or PARTIAL-with-accepted-gap, nothing MISSING in-scope).
 
+Anima is a Python implementation of the Cordis kernel paradigm
+([arXiv:2608.25512](https://arxiv.org/abs/2608.25512)), conformance-checked
+against DeepSeek Harness. The frozen pin below is a deliberate compatibility
+target, not a concealed provenance; see the README "Lineage" section,
+[NOTICE](NOTICE) for MIT attributions, and ADR 0012.
+
 Anima-specific pins at the 1.0 gate:
 
 - Version `0.3.0`, audited at commit `02f728e` on `main`.
