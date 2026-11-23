@@ -21,7 +21,7 @@ reused here.
   `uv run python -m mypy src`: green.
 - `filterwarnings = ["error", "ignore::ResourceWarning"]` is configured, so
   unawaited coroutines and other unexpected warnings fail the suite.
-- 34 executable rc.13 core conformance probes live in
+- 66 executable rc.13 core conformance probes live in
   `tests/unit/anima/test_rc13_core_conformance.py`. Each cites the upstream
   `file:line` it validates.
 
@@ -42,7 +42,7 @@ Items proven against rc.13 so far:
 | `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
 | Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
-Verified counts at this checkpoint: 1331 passed, 100% statement and branch coverage.
+Verified counts at this checkpoint: 1338 passed, 100% statement and branch coverage.
 
 ## rc.13 work items and current verdicts
 
@@ -70,6 +70,8 @@ not substitutes for that evidence.
 | `emit()` propagates listener exceptions | DONE | `EventBus.emit` no longer swallows sync errors; probes (upstream `core/src/events.ts:121-126`) |
 | DSH-fork extension set removed (volatile, legacy watcher, pkg, loader.builtins/exit) | DONE | User decision ADR 0016; modules/tests deleted, `fs` watch is the only watch surface |
 | Include journal / patch reconciliation | DONE | Canonical rc.13 ships `packages/include/src/journal.ts` and `patch.ts`; Anima ports them in `src/anima/include.py` |
+| Timer async-iterator interval, aliases and context mixin | DONE | `TimerService.interval(delay)` async iterator, `setTimeout`/`setInterval`, `ctx.mixin("timer", ...)`; probes (upstream `packages/timer/src/index.ts:4-25,54-104`) |
+| Registry replace: runtime move + `internal/replace` | DONE | `Fiber.replace` moves the fiber into the new runtime, emits `internal/replace` and re-checks deps (upstream `core/src/fiber.ts:401-416`, `events.ts:214`) |
 
 The DSH-fork extension set was deleted by user decision (ADR 0016). Magitech
 originals marked `†` in the README remain but were never claimed as Cordis

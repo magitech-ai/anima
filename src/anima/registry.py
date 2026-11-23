@@ -183,8 +183,16 @@ class RegistryService:
         if target is None:
             target = self._create(key, new_component)
 
+        new_inject = resolve_inject(getattr(new_component, "inject", None), {})
         for fiber in fibers:
-            self.ctx._schedule_task(fiber.replace(target.callback))
+            self.ctx._schedule_task(
+                fiber.replace(  # type: ignore[arg-type]
+                    target.callback,
+                    target,
+                    new_inject,
+                    old_runtime=runtime,
+                )
+            )
         return fibers
 
     def keys(self) -> Iterable[Callable[..., Any]]:

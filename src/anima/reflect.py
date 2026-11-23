@@ -328,10 +328,10 @@ class ReflectService:
         for key, value in entries:
             key_name = key
 
-            def make_getter() -> Callable[[Any, Any], Any]:
-                def getter(receiver: Any, error: Any, _key: str = key_name) -> Any:  # noqa: B023
+            def make_getter(key: str = key_name) -> Callable[[Any, Any, Any], Any]:
+                def getter(receiver: Any, _ctx: Any = None, error: Any = None) -> Any:
                     target = get_target(receiver, error)
-                    return getattr(target, _key)
+                    return getattr(target, key)
 
                 return getter
 
