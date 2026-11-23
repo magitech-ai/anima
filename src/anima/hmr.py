@@ -19,7 +19,10 @@ import inspect
 import logging
 import os
 import sys
-from dataclasses import dataclass
+from collections.abc import Callable
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -44,6 +47,44 @@ class Reload:
 
     filename: str
     runtime: ComponentRuntime | None = None
+
+
+class SkipReason(str, Enum):
+    """Why a change cannot be applied in place (upstream Hmr.SkipReason)."""
+
+    HOST_MODULE = "host-module"
+    NATIVE_ADDON = "native-addon"
+    AMBIGUOUS_IMPORT = "ambiguous-import"
+    AMBIGUOUS_EXPORT = "ambiguous-export"
+
+
+@dataclass
+class Abort:
+    """A unit whose new module failed to import; its cache is restored."""
+
+    urls: list[str]
+    error: BaseException
+
+
+@dataclass
+class Skip:
+    """A change that cannot be applied in place; the other changes apply."""
+
+    urls: list[str]
+    reason: SkipReason
+
+
+@dataclass
+class ReconcileResult:
+    """The running state after a reconciliation (upstream Hmr.Result)."""
+
+    settled: list[Fiber] = field(default_factory=list)
+    aborted: list[Abort] = field(default_factory=list)
+    skipped: list[Skip] = field(default_factory=list)
+
+
+_reconciling: ContextVar[bool] = ContextVar("anima_hmr_reconciling", default=False)
+_NATIVE_SUFFIXES = (".so", ".pyd", ".dylib")
 
 
 def _code_frame(lines: list[str], lineno: int, offset: int | None, message: str) -> str:
@@ -149,6 +190,7 @@ class HmrService(Service):
         self._debounce_task: asyncio.Task[None] | None = None
         # Parse cache: source path -> (stat, imported in-root modules).
         self._graph_cache: dict[Path, tuple[_Stat, frozenset[str]]] = {}
+        self._reconcile_lock = asyncio.Lock()
         self.ctx.effect(lambda: self.stop)
 
     def init(self) -> None:
@@ -534,6 +576,180 @@ class HmrService(Service):
         task = asyncio.ensure_future(_drain())
         self._reload_task = task
         return await asyncio.shield(task)
+
+    async def reconcile(
+        self,
+        callback: Callable[[], Any] | None = None,
+    ) -> ReconcileResult:
+        """Apply the changes returned by ``callback`` in one transaction.
+
+        This is the Python port of rc.13's programmatic HMR core
+        (``hmr/src/index.ts:286-301,525-753``). ``callback`` yields absolute
+        paths of files or directories that changed. Roots match loaded
+        modules by file path; each stale module is a unit that commits or
+        aborts on its own, so one bad import cannot block unrelated updates.
+        Transactions are single-flight and cannot be nested.
+        """
+        if _reconciling.get():
+            raise RuntimeError("cannot start a transaction inside another transaction")
+        token = _reconciling.set(True)
+        try:
+            async with self._reconcile_lock:
+                return await self._reconcile_transaction(callback)
+        finally:
+            _reconciling.reset(token)
+
+    def _match_roots(self, roots: set[Path]) -> set[str]:
+        """Loaded modules whose file is one of the roots or lies below one."""
+        matched: set[str] = set()
+        for name, module in list(sys.modules.items()):
+            filename = getattr(module, "__file__", None)
+            if not isinstance(filename, str) or not filename:
+                continue
+            try:
+                path = Path(filename).resolve()
+            except (OSError, ValueError):
+                continue
+            if any(path == root or root in path.parents for root in roots):
+                matched.add(name)
+        return matched
+
+    async def _reconcile_transaction(
+        self, callback: Callable[[], Any] | None
+    ) -> ReconcileResult:
+        result = ReconcileResult()
+        supplied: Any = callback() if callback is not None else ()
+        if inspect.isawaitable(supplied):
+            supplied = await supplied
+        roots: set[Path] = set()
+        for candidate in supplied:
+            if not isinstance(candidate, (str, os.PathLike)):
+                raise TypeError(f"invalid root {candidate!r}, expected a path")
+            path = Path(candidate)
+            if not path.is_absolute():
+                raise ValueError(f"root must be absolute: {candidate!r}")
+            roots.add(path.resolve())
+        if not roots:
+            return result
+
+        matched = self._match_roots(roots)
+        changed: set[str] = set()
+        for name in sorted(matched):
+            module = sys.modules.get(name)
+            filename = str(getattr(module, "__file__", "") or "")
+            if filename.lower().endswith(_NATIVE_SUFFIXES):
+                result.skipped.append(Skip([name], SkipReason.NATIVE_ADDON))
+            elif self._is_host_module(module):
+                result.skipped.append(Skip([name], SkipReason.HOST_MODULE))
+            else:
+                changed.add(name)
+        if not changed:
+            return result
+
+        graph = self._build_graph()
+        accepted, _declined = self._analyze_changes(changed, graph)
+
+        stale: dict[str, list[tuple[Fiber, Any]]] = {}
+        for fiber in self.ctx.root.all_fibers():
+            if fiber.state == FiberState.DISPOSED:
+                continue
+            target = fiber.target
+            mod_name = _target_module_name(target)
+            if mod_name not in accepted:
+                continue
+            stale.setdefault(mod_name, []).append((fiber, target))
+
+        # Stage 1: import every stale module before any cache is restored.
+        backups: dict[str, tuple[ModuleType | None, dict[str, Any]]] = {}
+        replacements: dict[str, Any] = {}
+        aborted: dict[str, BaseException] = {}
+        for name in sorted(stale):
+            old = sys.modules.get(name)
+            backups[name] = (old, dict(old.__dict__) if old is not None else {})
+            try:
+                imports = self._reimport(name, old)
+                attr = getattr(stale[name][0][1], "__name__", None)
+                new_target = getattr(imports, attr) if attr else None
+                if new_target is None or self.ctx.registry.resolve(new_target) is None:
+                    raise ValueError(f"invalid component in module {name!r}")
+                replacements[name] = new_target
+            except BaseException as exc:  # noqa: BLE001 - one unit fails alone
+                aborted[name] = exc
+                result.aborted.append(Abort([name], exc))
+
+        for name, error in aborted.items():
+            self._restore_module(name, backups[name])
+            logger.warning("HMR aborted unit %s: %s", name, error)
+
+        # Stage 2: replace components in place for committed units.
+        fibers: list[Fiber] = []
+        for name, pairs in stale.items():
+            replacement = replacements.get(name)
+            if replacement is None:
+                continue
+            for fiber, component in pairs:
+                fibers.extend(self.ctx.registry.replace(component, replacement))
+
+        # registry.replace() schedules each fiber's in-place replacement on
+        # the context's task set; let those tasks run before awaiting settle.
+        await self.ctx.flush()
+
+        # Stage 3: wait for the replaced fibers to settle. A failure is left
+        # FAILED, exactly as on a cold start, and is reported by its fiber.
+        for fiber in fibers:
+            try:
+                await fiber.await_settle()
+            except Exception as exc:  # noqa: BLE001 - fiber logs its own failure
+                logger.debug("HMR fiber did not settle: %s", exc)
+            if fiber.uid is not None:
+                result.settled.append(fiber)
+        return result
+
+    def _is_host_module(self, module: ModuleType | None) -> bool:
+        """Framework modules cannot be hot-replaced (upstream hostModules)."""
+        if module is None:
+            return False
+        filename = getattr(module, "__file__", None)
+        if not isinstance(filename, str):
+            return False
+        try:
+            path = Path(filename).resolve()
+        except (OSError, ValueError):
+            return False
+        framework = Path(__file__).resolve().parent
+        return path == framework or framework in path.parents
+
+    def _reimport(self, name: str, old: ModuleType | None) -> ModuleType:
+        """Evict a module from the caches and import its current source."""
+        filename = getattr(old, "__file__", None)
+        parent = str(Path(filename).parent) if isinstance(filename, str) else ""
+        added_parent = bool(parent and parent not in sys.path)
+        if added_parent:
+            sys.path.insert(0, parent)
+        try:
+            sys.modules.pop(name, None)
+            importlib.invalidate_caches()
+            if isinstance(filename, str):
+                with contextlib.suppress(ValueError, OSError):
+                    Path(importlib.util.cache_from_source(filename)).unlink(
+                        missing_ok=True
+                    )
+            return importlib.import_module(name)
+        finally:
+            if added_parent and parent in sys.path:
+                sys.path.remove(parent)
+
+    def _restore_module(
+        self, name: str, backup: tuple[ModuleType | None, dict[str, Any]]
+    ) -> None:
+        """Put a module's previous namespace and sys.modules entry back."""
+        old, snapshot = backup
+        if old is not None:
+            old.__dict__.clear()
+            old.__dict__.update(snapshot)
+            sys.modules[name] = old
+        else:
+            sys.modules.pop(name, None)
 
     async def reload_module(
         self,

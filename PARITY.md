@@ -42,7 +42,7 @@ Items proven against rc.13 so far:
 | `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
 | Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
-Verified counts at this checkpoint: 1338 passed, 100% statement and branch coverage.
+Verified counts at this checkpoint: 1347 passed, 100% statement and branch coverage.
 
 ## Open gaps against rc.13
 
@@ -51,12 +51,12 @@ tracked work, not hidden divergences:
 
 | Item | Status | Upstream evidence |
 |---|---|---|
-| Programmatic `ctx.hmr.reconcile()` returning `{settled, aborted, skipped}` | OPEN | `hmr/src/index.ts:286-301,525-753` |
-| Per-unit commit/abort isolation in HMR | OPEN | `hmr/src/index.ts:674-721` |
+| Programmatic `ctx.hmr.reconcile()` returning `{settled, aborted, skipped}` | DONE | `src/anima/hmr.py`; 9 probes in `test_rc13_hmr_reconcile.py` (upstream `hmr/src/index.ts:286-301,525-753,785-836`) |
+| Per-unit commit/abort isolation in HMR | DONE | stale modules are independent units; aborted units restore their module cache and do not block commits (upstream `index.ts:674-721`) |
+| Host-module / native-addon skip reasons | DONE | `SkipReason` enum and `_is_host_module`; probes in `test_rc13_hmr_reconcile.py` (upstream `index.ts:546-553,819-836`) |
 | `fs` service with mountable providers and `ctx.fs.watch()` | OPEN | `packages/fs`, `packages/fs-node` |
 | Loader explicit injection scopes (outer/inner fiber) and config-file error locations | OPEN | `loader/src/index.ts` |
 | `entry.fiber` → `entry.innerFiber` rename | OPEN | rc.13 release notes, "Breaking Changes" |
-| Host-module / native-addon skip reasons | OPEN | `hmr/src/index.ts:546-553,819-836` |
 | Volatile updates, `rawConfig`/`effectiveConfig`, include journal | VERIFYING | `vendor/cordis/README.md`; `src/anima/volatile.py`, `include.py` |
 
 A gap is closed only when an executable probe citing the upstream source is

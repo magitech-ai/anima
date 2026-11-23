@@ -10,7 +10,15 @@ from typing import Any
 from anima.cli_env import CliEnv
 from anima.core import Context, Fiber, FiberState, Service, inject
 from anima.events import DisposableList, Disposer, EventBus, EventMode, is_bailed
-from anima.hmr import HmrService, Reload, handle_error
+from anima.hmr import (
+    Abort,
+    HmrService,
+    ReconcileResult,
+    Reload,
+    Skip,
+    SkipReason,
+    handle_error,
+)
 from anima.http import HttpConfig, HttpError, HttpRequest, HttpResponse, HttpService
 from anima.include import (
     Conflict,
@@ -104,6 +112,7 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
+    "Abort",
     "Binary",
     "CliCommand",
     "CliEnv",
@@ -149,6 +158,7 @@ __all__ = [
     "PkgResult",
     "PkgService",
     "Promisify",
+    "ReconcileResult",
     "ReflectService",
     "RegistryService",
     "Reload",
@@ -160,6 +170,8 @@ __all__ = [
     "ServerResponse",
     "ServerService",
     "Service",
+    "Skip",
+    "SkipReason",
     "StaleWriteError",
     "Time",
     "TimerService",
