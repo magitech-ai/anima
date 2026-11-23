@@ -12,6 +12,8 @@ import asyncio
 import fnmatch
 import logging
 import re
+import urllib.parse
+import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +24,13 @@ from anima.core import Context, Service
 logger = logging.getLogger("anima.fs")
 
 _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z\d+.-]*:$")
+_DRIVE = re.compile(r"^[a-zA-Z]:")
 _WATCH_EVENTS = ("change", "ready", "error")
+
+
+def _is_uri(text: str) -> bool:
+    """A URI scheme, but not a Windows drive letter such as ``C:\\tmp``."""
+    return bool(re.match(r"^[a-zA-Z][a-zA-Z\d+.-]*:", text) and not _DRIVE.match(text))
 
 
 class FsError(Exception):
@@ -63,7 +71,7 @@ class Connection:
 def _normalize_prefix(prefix: str | Path) -> str:
     """Normalize a scheme or a directory prefix for routing."""
     text = str(prefix)
-    if _SCHEME.match(text):
+    if _SCHEME.match(text) and not _DRIVE.match(text):
         return text.lower()
     return Path(text).resolve().as_uri().rstrip("/") + "/"
 
@@ -71,7 +79,7 @@ def _normalize_prefix(prefix: str | Path) -> str:
 def _location_text(path: str | Path) -> str:
     """Turn a location into the string used for prefix matching."""
     text = str(path)
-    if re.match(r"^[a-zA-Z][a-zA-Z\d+.-]*:", text):
+    if _is_uri(text):
         return text
     return Path(text).resolve().as_uri()
 
@@ -183,7 +191,7 @@ class FsService(Service):
     def resolve(self, path: str | Path) -> str:
         """Resolve a location against ``ctx.baseUrl`` for relative references."""
         text = str(path)
-        if re.match(r"^[a-zA-Z][a-zA-Z\d+.-]*:", text):
+        if _is_uri(text):
             return text
         candidate = Path(text)
         if not candidate.is_absolute():
@@ -297,7 +305,8 @@ class LocalFs(BaseFs):
     mount = "file:"
 
     def watch(self, watcher: Watcher) -> Callable[[], None]:
-        root = Path(watcher.url.removeprefix("file:")).resolve()
+        parsed = urllib.parse.urlsplit(watcher.url)
+        root = Path(urllib.request.url2pathname(parsed.path)).resolve()
         keep = watcher.options.filter
         interval = 0.05
         states: dict[Path, tuple[float, int]] = {}

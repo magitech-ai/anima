@@ -243,7 +243,10 @@ class HmrService(Service):
         task: asyncio.Task[None] | None = None
 
         def on_change(url: str) -> None:
-            stashed.add(Path(url.removeprefix("file:")))
+            from urllib.parse import urlsplit
+            from urllib.request import url2pathname
+
+            stashed.add(Path(url2pathname(urlsplit(url).path)))
             nonlocal task
             if task is not None and not task.done():
                 task.cancel()

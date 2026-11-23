@@ -40,6 +40,16 @@ async def _ctx() -> Context:
     return ctx
 
 
+def test_windows_drive_letter_is_not_a_uri_scheme() -> None:
+    """A ``C:\\`` drive prefix must be treated as a path, not a scheme."""
+    from anima.fs import _is_uri, _location_text, _normalize_prefix
+
+    assert _is_uri("file:///tmp/x") is True
+    assert _is_uri("C:\\tmp\\x") is False
+    assert _normalize_prefix("C:").startswith("file:")
+    assert _location_text("C:\\tmp\\x").startswith("file:")
+
+
 def test_fs_error_and_watch_options() -> None:
     error = FsError("NoProvider", "file:///x", "no provider")
     assert (error.code, error.location, str(error)) == (
