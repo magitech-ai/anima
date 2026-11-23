@@ -10,6 +10,16 @@ from typing import Any
 from anima.cli_env import CliEnv
 from anima.core import Context, Fiber, FiberState, Service, inject
 from anima.events import DisposableList, Disposer, EventBus, EventMode, is_bailed
+from anima.fs import (
+    BaseFs,
+    FsError,
+    FsProvider,
+    FsService,
+    LocalFs,
+    Mount,
+    Watcher,
+    WatchOptions,
+)
 from anima.hmr import (
     Abort,
     HmrService,
@@ -113,6 +123,7 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "Abort",
+    "BaseFs",
     "Binary",
     "CliCommand",
     "CliEnv",
@@ -136,6 +147,9 @@ __all__ = [
     "Fiber",
     "FiberState",
     "FlatEntry",
+    "FsError",
+    "FsProvider",
+    "FsService",
     "Group",
     "HmrService",
     "HttpConfig",
@@ -150,10 +164,12 @@ __all__ = [
     "JournalRecord",
     "JsExprError",
     "LoaderService",
+    "LocalFs",
     "Logger",
     "LoggerLevel",
     "LoggerService",
     "Message",
+    "Mount",
     "PatchIndex",
     "PkgResult",
     "PkgService",
@@ -178,6 +194,8 @@ __all__ = [
     "ValidationError",
     "Volatile",
     "WatchEntry",
+    "WatchOptions",
+    "Watcher",
     "WatcherService",
     "WebSocket",
     "apply_changes",

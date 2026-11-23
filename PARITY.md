@@ -42,7 +42,7 @@ Items proven against rc.13 so far:
 | `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
 | Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
-Verified counts at this checkpoint: 1348 passed, 100% statement and branch coverage.
+Verified counts at this checkpoint: 1364 passed, 100% statement and branch coverage.
 
 ## rc.13 work items and current verdicts
 
@@ -55,7 +55,7 @@ not substitutes for that evidence.
 | Programmatic `ctx.hmr.reconcile()` returning `{settled, aborted, skipped}` | DONE | `src/anima/hmr.py`; 9 probes in `test_rc13_hmr_reconcile.py` (upstream `hmr/src/index.ts:286-301,525-753,785-836`) |
 | Per-unit commit/abort isolation in HMR | DONE | stale modules are independent units; aborted units restore their module cache and do not block commits (upstream `index.ts:674-721`) |
 | Host-module / native-addon skip reasons | DONE | `SkipReason` enum and `_is_host_module`; probes in `test_rc13_hmr_reconcile.py` (upstream `index.ts:546-553,819-836`) |
-| `fs` service with mountable providers and `ctx.fs.watch()` | OPEN | `packages/fs`, `packages/fs-node` |
+| `fs` service with mountable providers and `ctx.fs.watch()` | DONE | `src/anima/fs.py`; 14 probes in `test_fs.py` (upstream `packages/fs/src/index.ts:39-148`, `watcher.ts:35-111`, `packages/fs-node/src/index.ts:23-29`) |
 | Loader explicit injection scopes (outer/inner fiber) and config-file error locations | OPEN | `loader/src/index.ts` |
 | `entry.fiber` → `entry.innerFiber` rename | DONE (alias) | `Entry.innerFiber` read/write alias; rc.13 probe (release notes, "Breaking Changes"). The legacy `fiber` name remains as internal storage until callers migrate |
 | Volatile updates, `rawConfig`/`effectiveConfig`, include journal | VERIFYING | `vendor/cordis/README.md`; `src/anima/volatile.py`, `include.py` |
