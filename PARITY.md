@@ -58,7 +58,8 @@ not substitutes for that evidence.
 | Fiber-scoped `internal/update` listeners | DONE | `EventBus` owner filtering with explicit target fiber; rc.13 probe (upstream `events.ts:54-79`) |
 | `fs` service with mountable providers and `ctx.fs.watch()` | DONE | `src/anima/fs.py`; 14 probes in `test_fs.py` (upstream `packages/fs/src/index.ts:39-148`, `watcher.ts:35-111`, `packages/fs-node/src/index.ts:23-29`) |
 | Global isolate realms: a string label shares bindings across entries | DONE | `Context._shared_isolated` root table and cross-context wake-up; rc.13 probe (paper §5.2.1 / Algorithm 7) |
-| Loader explicit injection scopes (outer/inner fiber) and config-file error locations | OPEN | `loader/src/index.ts` |
+| Loader explicit injection scopes: entry inject runs in an outer fiber, component in an inner fiber | DONE | `Entry._init` outer fiber with entry inject; inner component fiber on the entry registry; probes in `test_rc13_core_conformance.py` (upstream `loader/src/config/entry.ts:35-46,353-372`) |
+| Config-path error locations for failed expressions | DONE | `JsExprError.path`, `interpolate()` path annotation, loader entry-id note; probes in `test_rc13_core_conformance.py` (upstream `loader/config/utils.ts:64-96`) |
 | `entry.fiber` → `entry.innerFiber` rename | DONE (alias) | `Entry.innerFiber` read/write alias; rc.13 probe (release notes, "Breaking Changes"). The legacy `fiber` name remains as internal storage until callers migrate |
 | HMR file watching opt-in (`watch.enabled`, `ctx.fs.watch()`) | DONE (rc.13 path) | `HmrService._start_fs_watch` uses `ctx.fs.watch()` and calls `reconcile()`; enabled/disabled/config validation probes (upstream `hmr/src/index.ts:192-243,756-779`). Legacy watcher remains when no `watch` block is supplied |
 | Unload drains notified dependents before inverses | DONE | `Impl.dependents` / `release` protocol in `core.py`/`reflect.py`; probe asserts dependents' disposers run before the provider's (paper Algorithm 5, upstream `fiber.ts:481-487`) |
@@ -81,7 +82,14 @@ marked DONE:
 | Legacy HMR events `hmr/change` / `hmr/reload` are still emitted; rc.13 removed them | `src/anima/hmr.py` vs `hmr/src/index.ts` (release notes, "Breaking Changes") |
 | `HmrService` still injects `watcher`; rc.13 injects `fs` | `src/anima/hmr.py` vs `hmr/src/index.ts:163-185` |
 
-The remaining substantive gap is the loader's explicit outer/inner-fiber
-injection scopes and config-file error locations. The dependent-drain guard
-was implemented with the rc.13 `Impl.dependents`/`release` protocol after two
-naive wait-on-transition attempts deadlocked and were reverted.
+The outer/inner-fiber scopes and config-path reporting are now ported. Two
+earlier outer-fiber attempts were reverted (broken registry identity, then
+tsort deadlock) before the working design was found. A narrower remaining
+limitation is YAML **line/column** source mapping for expression errors:
+rc.13's Include tree overrides `getLocation()` with YAML AST marks, while
+Anima's Include does not retain marks, so errors carry the config path and
+entry id but not the source line. This is recorded as OPEN below.
+
+| Item | Status | Upstream evidence |
+|---|---|---|
+| YAML line/column source mapping for expression errors | OPEN | `loader/config/tree.ts:254-260` and Include's override; Anima `Include` has no `get_location`/mark retention |

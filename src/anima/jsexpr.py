@@ -49,6 +49,11 @@ _Node = tuple[Any, ...]
 class JsExprError(ValueError):
     """An expression is outside the restricted evaluator scope, or failed to evaluate."""
 
+    def __init__(self, *args: Any) -> None:
+        super().__init__(*args)
+        # Set by interpolate() to the config path of the failing expression.
+        self.path: tuple[Any, ...] = ()
+
 
 class _ProcessNamespace:
     """Pure-accessor view of the host process exposed as ``process``."""
@@ -689,18 +694,31 @@ def evaluate(ctx: Context, expr: str) -> Any:
     return None if result is _SHORT_CIRCUIT else result
 
 
-def interpolate(ctx: Context, value: Any) -> Any:
+def interpolate(ctx: Context, value: Any, path: tuple[Any, ...] = ()) -> Any:
     """Recursively replace expression nodes with evaluated values.
 
     Returns new dicts/lists; the input is never mutated, so the raw
     ``{"__jsExpr": ...}`` nodes stay in the stored options for write-back.
+    On failure the error carries the config ``path`` so callers can report
+    where in the entry's configuration the expression occurred (upstream
+    ``loader/config/utils.ts:64-96``).
     """
     if is_js_expr(value):
-        return evaluate(ctx, value["__jsExpr"])
+        try:
+            return evaluate(ctx, value["__jsExpr"])
+        except JsExprError as error:
+            error.path = path
+            where = ".".join(str(part) for part in path) or "<root>"
+            error.add_note(f"at config path {where}")
+            raise
     if isinstance(value, dict):
-        return {key: interpolate(ctx, item) for key, item in value.items()}
+        return {
+            key: interpolate(ctx, item, path + (key,)) for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [interpolate(ctx, item) for item in value]
+        return [
+            interpolate(ctx, item, path + (index,)) for index, item in enumerate(value)
+        ]
     return value
 
 

@@ -16,7 +16,7 @@ from typing import Any
 
 from anima.core import Context, Fiber, FiberState, Service, _current_fiber
 from anima.events import Disposer, EventMode
-from anima.jsexpr import dump_yaml, interpolate, load_yaml
+from anima.jsexpr import JsExprError, dump_yaml, interpolate, load_yaml
 from anima.tree import (
     _UNSET,
     BUILTIN_ALIASES,
@@ -348,7 +348,11 @@ class LoaderService(Service, EntryTree):
             return resolved
         if EntryGroup.is_tree_carrier(fiber.target):
             return resolved
-        return interpolate(fiber.ctx, resolved)
+        try:
+            return interpolate(fiber.ctx, resolved)
+        except JsExprError as error:
+            error.add_note(f"in entry {fiber.entry.id!r}")
+            raise
 
     def _on_commit(self, fiber: Fiber, config: Any) -> None:
         """Write a runtime config change back into the owning entry's options.

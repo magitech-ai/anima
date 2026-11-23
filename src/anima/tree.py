@@ -534,6 +534,7 @@ class Entry:
         self.loader = loader
         self.ctx = loader.ctx.extend()
         self.fiber: Fiber | None = None
+        self.outer_fiber: Fiber | None = None
         # rc.13 renamed `entry.fiber` to `entry.innerFiber`. Keep the old name
         # as the storage attribute (existing internal callers) and expose the
         # new name as the canonical read/write alias.
@@ -666,7 +667,11 @@ class Entry:
             # declared `inject` are rebuild triggers. Patching the context in
             # place keeps the old component running, which is wrong when the
             # component itself or its dependency set changed.
-            if "name" in changes or "inject" in changes:
+            rebuild_keys = {"name", "inject"}
+            if self.outer_fiber is not None:
+                # Realm changes re-evaluate the outer fiber's dependencies.
+                rebuild_keys.add("isolate")
+            if rebuild_keys.intersection(changes):
                 # The outer guard above already guarantees a live fiber.
                 old = self.fiber
                 assert old is not None
@@ -829,23 +834,40 @@ class Entry:
         config = self.options.get("config")
         if config is None:
             config = {}
-        fiber = self.ctx.registry.use(plugin, config)
-        fiber.entry = self
         # A fresh mount clears any loader-disposing mark.
         self._loader_disposing = False
-        # Entry-level inject merge: the merge runs synchronously after
-        # registry.use returns and before any await, so the scheduled
-        # load sees the merged set.
         inject_opt = self.options.get("inject")
         if inject_opt:
-            merged = resolve_inject(inject_opt, {})
-            names = list(merged)
-            fiber.inject = names + [n for n in fiber.inject if n not in names]
-            entry_cfg = {k: v for k, v in merged.items() if isinstance(v, dict)}
-            base = fiber.inject_config or {}
-            fiber.inject_config = {**base, **entry_cfg}
+            # rc.13 evaluates the entry's `inject` in its own outer fiber;
+            # the component is mounted in an inner fiber once those
+            # dependencies are satisfied (upstream loader entry.ts:35-46,
+            # 353-372). Both fibers use the entry context's registry so
+            # service mirroring and entry identity are preserved.
+            entry = self
+
+            class Outer:
+                name = "loader:outer"
+                inject = resolve_inject(inject_opt, {})
+
+                @staticmethod
+                async def apply(_ctx: Context) -> None:
+                    fiber = entry._start_inner(plugin, config)
+                    await fiber.await_settle()
+
+            fiber = self.ctx.registry.use(Outer())
+            self.outer_fiber = fiber
+        else:
+            fiber = self._start_inner(plugin, config)
+        fiber.entry = self
         self.fiber = fiber
         self.module_namespace = namespace
+
+    def _start_inner(self, plugin: Any, config: Any) -> Fiber:
+        """Mount the component itself on the entry's context registry."""
+        fiber = self.ctx.registry.use(plugin, config)
+        fiber.entry = self
+        self.fiber = fiber
+        return fiber
 
     def get_outer_stack(self) -> list[str]:
         """Return the import-failure stack through owning entries."""

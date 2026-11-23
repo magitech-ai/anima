@@ -37,7 +37,7 @@ are listed in [PARITY.md](../../PARITY.md).
 
 ## Verification
 
-At the last checkpoint: 1347 tests passed with 100% statement and branch
+At the last checkpoint: 1377 tests passed with 100% statement and branch
 coverage; `ruff check`, `ruff format --check` and `mypy src` all green.
 `tests/unit/anima/test_rc13_core_conformance.py` (34 probes) and
 `tests/unit/anima/test_rc13_hmr_reconcile.py` (9 probes) carry upstream

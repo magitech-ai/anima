@@ -816,6 +816,103 @@ async def test_rc13_drain_provisions_waits_on_release() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rc13_entry_inject_uses_outer_fiber(monkeypatch: Any) -> None:
+    """Entry inject belongs to an outer fiber, not the component fiber.
+
+    Upstream loader/src/config/entry.ts:35-46,353-372.
+    """
+    module = types.ModuleType("rc13_outer_mod")
+
+    def dep(_c: Any, config: Any = None) -> None:
+        return None
+
+    module.dep = dep
+    monkeypatch.setitem(sys.modules, "rc13_outer_mod", module)
+
+    ctx = Context()
+    ctx.provide("outer_svc", object())
+    loader = LoaderService(ctx)
+    loader.load([{"id": "e", "name": "rc13_outer_mod:dep", "inject": ["outer_svc"]}])
+    await ctx.flush()
+
+    entry = loader.resolve("e")
+    assert entry.outer_fiber is not None
+    assert "outer_svc" in entry.outer_fiber.inject
+    assert entry.fiber is not entry.outer_fiber
+    assert "outer_svc" not in entry.fiber.inject
+    await entry.fiber.await_settle()
+    assert entry.fiber.state is FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_rc13_entry_missing_inject_keeps_outer_pending(monkeypatch: Any) -> None:
+    """A missing dependency leaves the outer fiber pending."""
+    module = types.ModuleType("rc13_outer_missing_mod")
+
+    def dep(_c: Any, config: Any = None) -> None:
+        return None
+
+    module.dep = dep
+    monkeypatch.setitem(sys.modules, "rc13_outer_missing_mod", module)
+
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [{"id": "e", "name": "rc13_outer_missing_mod:dep", "inject": ["absent_svc"]}]
+    )
+    await ctx.flush()
+
+    entry = loader.resolve("e")
+    assert entry.outer_fiber is not None
+    assert entry.outer_fiber.state is FiberState.PENDING
+    assert entry.fiber is entry.outer_fiber
+
+
+@pytest.mark.asyncio
+async def test_rc13_expression_error_reports_config_path() -> None:
+    """A failed expression reports where it sits in the config."""
+    from anima.jsexpr import JsExprError, interpolate
+
+    ctx = Context()
+    with pytest.raises(JsExprError) as info:
+        interpolate(ctx, {"outer": [{"bad": {"__jsExpr": "no_such_fn()"}}]})
+    error = info.value
+    assert error.path == ("outer", 0, "bad")
+    assert any("outer.0.bad" in note for note in error.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_rc13_loader_expression_error_reports_entry(
+    monkeypatch: Any,
+) -> None:
+    """The loader adds the entry id to a failed expression's location."""
+    module = types.ModuleType("rc13_expr_error_mod")
+
+    def comp(_c: Any, config: Any = None) -> None:
+        return None
+
+    module.comp = comp
+    monkeypatch.setitem(sys.modules, "rc13_expr_error_mod", module)
+
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load(
+        [
+            {
+                "id": "bad_expr",
+                "name": "rc13_expr_error_mod:comp",
+                "config": {"bad": {"__jsExpr": "no_such_fn()"}},
+            }
+        ]
+    )
+    await ctx.flush()
+    fiber = loader.resolve("bad_expr").fiber
+    with pytest.raises(Exception) as info:
+        await fiber.await_settle()
+    assert any("bad_expr" in note for note in info.value.__notes__)
+
+
+@pytest.mark.asyncio
 async def test_rc13_fiber_state_unloading_exists() -> None:
     """rc.13 keeps the six fiber states, including UNLOADING (fiber.ts:90-97)."""
     assert {state.name for state in FiberState} == {
