@@ -1296,6 +1296,11 @@ class Context:
         self._event_bus: EventBus = parent._event_bus if parent else EventBus()
         # isolation map service name -> scope label (Dict<symbol>)
         self._isolated_services: dict[str, Any] = isolated_services or {}
+        # A string isolate label names a global realm: every context using the
+        # same label resolves the same binding (paper §5.2.1, Algorithm 7).
+        self._shared_isolated: dict[tuple[Any, str], Any] = (
+            {} if parent is None else self.root._shared_isolated
+        )
         self._scope_label = scope_label
         # intercept map service name -> config (Dict)
         self._intercept_configs: dict[str, dict[str, Any]] = (
@@ -1479,6 +1484,13 @@ class Context:
             asyncio.run(_run())
             return None
 
+    def _shared_key(self, name: str) -> tuple[Any, str] | None:
+        """Return the global-realm key for a named service, if it has one."""
+        label = self._isolated_services.get(name)
+        if isinstance(label, str) and not label.startswith("__entry__:"):
+            return (label, name)
+        return None
+
     def has(self, name: str) -> bool:
         """Check if a service is registered in this context scope."""
         if name in self._services:
@@ -1486,7 +1498,8 @@ class Context:
         if self.reflect._get_impl(name, strict=False) is not None:
             return True
         if name in self._isolated_services:
-            return False
+            key = self._shared_key(name)
+            return key in self._shared_isolated if key is not None else False
         return self._parent.has(name) if self._parent else False
 
     def get(self, name: str, default: Any = None, strict: bool = True) -> Any:
@@ -1497,6 +1510,9 @@ class Context:
         if name in self._services:
             return self._services[name]  # pragma: no cover
         if name in self._isolated_services:
+            key = self._shared_key(name)
+            if key is not None and key in self._shared_isolated:
+                return self._shared_isolated[key]
             return default
         # pragma: no cover - parent context fallback is defensive code
         if self._parent:
@@ -1605,11 +1621,19 @@ class Context:
         """Register a service and re-evaluate any PENDING fibers waiting on it."""
         self._services[name] = service
         self.emit("internal/service", name, service)
+        key = self._shared_key(name)
+        if key is not None:
+            self._shared_isolated[key] = service
 
-        # Check pending fibers across this context and children
-        for fiber in list(self._fibers):
+        # Check pending fibers across this context and children; a global
+        # realm can have dependents in sibling contexts (paper Algorithm 7).
+        candidates = (
+            self.root.all_fibers() if key is not None else list(self._fibers)
+        )
+        scheduler = self.root if key is not None else self
+        for fiber in candidates:
             if fiber.state == FiberState.PENDING and fiber.check_dependencies():
-                self._schedule_task(fiber.load())
+                scheduler._schedule_task(fiber.load())
 
     def _unregister_service(self, name: str) -> Awaitable[None] | None:
         """Unregister a service and return the disposal of its dependents.
@@ -1622,7 +1646,10 @@ class Context:
         """
         if name not in self._services:
             return None
-        del self._services[name]
+        service = self._services.pop(name)
+        key = self._shared_key(name)
+        if key is not None and self._shared_isolated.get(key) is service:
+            del self._shared_isolated[key]
         self.emit("internal/service-removed", name)
         dependents = [
             fiber

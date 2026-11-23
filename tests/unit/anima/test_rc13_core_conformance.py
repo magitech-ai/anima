@@ -700,6 +700,35 @@ async def test_rc13_internal_update_listeners_are_fiber_scoped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rc13_global_isolate_realm_shares_bindings() -> None:
+    """Two contexts naming the same isolate label share the binding.
+
+    Paper §5.2.1: a string isolate selects a global realm shared by every
+    entry naming that string (Algorithm 7).
+    """
+    root = Context()
+    provider_ctx = root.isolate("db", "shared")
+    consumer_ctx = root.isolate("db", "shared")
+
+    def consumer(_c: Any) -> None:
+        return None
+
+    consumer.inject = ["db"]
+    fiber = consumer_ctx.use(consumer)
+    await root.flush()
+    assert fiber.state == FiberState.PENDING
+
+    disposer = provider_ctx.provide("db", {"v": 1})
+    await root.flush()
+    assert fiber.state == FiberState.ACTIVE
+    assert consumer_ctx.get("db") == {"v": 1}
+
+    disposer()
+    await root.flush()
+    assert consumer_ctx.get("db") is None
+
+
+@pytest.mark.asyncio
 async def test_rc13_fiber_state_unloading_exists() -> None:
     """rc.13 keeps the six fiber states, including UNLOADING (fiber.ts:90-97)."""
     assert {state.name for state in FiberState} == {
