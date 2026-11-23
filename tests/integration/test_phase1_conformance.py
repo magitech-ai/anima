@@ -215,7 +215,7 @@ def test_conformance_f1_fiber_state_names_and_wire_values() -> None:
     numeric_compare = re.compile(r"FiberState\.[A-Z_]+\s*(?:<=|>=|<|>)")
     int_coerce = re.compile(r"int\(\s*FiberState")
     hits = [
-        f"{path.relative_to(_repo_root())}:{n}"
+        f"{path.relative_to(_repo_root()).as_posix()}:{n}"
         for path in _anima_sources()
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
         if numeric_compare.search(line) or int_coerce.search(line)
@@ -706,7 +706,7 @@ async def test_conformance_f12_service_callable_symbol_invoke() -> None:
 
     # No wrapper construction exists anywhere in the ported kernel.
     hits = [
-        str(path.relative_to(_repo_root()))
+        path.relative_to(_repo_root()).as_posix()
         for path in _anima_sources()
         if "createCallable" in path.read_text(encoding="utf-8")
         or "joinPrototype" in path.read_text(encoding="utf-8")
@@ -972,7 +972,7 @@ async def test_conformance_f16_plugin_invocation_shape() -> None:
     assert callable(RegistryService.use)
     plugin_call = re.compile(r"\.plugin\s*\(")
     hits = [
-        f"{path.relative_to(_repo_root())}:{n}"
+        f"{path.relative_to(_repo_root()).as_posix()}:{n}"
         for path in _anima_sources()
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
         if plugin_call.search(line)
@@ -4322,7 +4322,7 @@ def test_conformance_l17_loader_utils_deleted() -> None:
     hits: list[str] = []
     for path in sorted(root.joinpath("src").rglob("*.py")):
         if "loader_utils" in path.read_text(encoding="utf-8"):
-            hits.append(str(path.relative_to(root)))
+            hits.append(path.relative_to(root).as_posix())
     readme = root / "README.md"
     if readme.exists() and "loader_utils" in readme.read_text(encoding="utf-8"):
         hits.append("README.md")
@@ -4841,7 +4841,7 @@ def test_conformance_u_loader_utils_deleted() -> None:
     hits: list[str] = []
     for path in sorted(root.joinpath("src").rglob("*.py")):
         if "loader_utils" in path.read_text(encoding="utf-8"):
-            hits.append(str(path.relative_to(root)))
+            hits.append(path.relative_to(root).as_posix())
     readme = root / "README.md"
     if readme.exists() and "loader_utils" in readme.read_text(encoding="utf-8"):
         hits.append("README.md")
