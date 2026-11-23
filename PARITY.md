@@ -42,7 +42,7 @@ Items proven against rc.13 so far:
 | `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
 | Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
-Verified counts at this checkpoint: 1347 passed, 100% statement and branch coverage.
+Verified counts at this checkpoint: 1348 passed, 100% statement and branch coverage.
 
 ## Open gaps against rc.13
 
@@ -56,7 +56,7 @@ tracked work, not hidden divergences:
 | Host-module / native-addon skip reasons | DONE | `SkipReason` enum and `_is_host_module`; probes in `test_rc13_hmr_reconcile.py` (upstream `index.ts:546-553,819-836`) |
 | `fs` service with mountable providers and `ctx.fs.watch()` | OPEN | `packages/fs`, `packages/fs-node` |
 | Loader explicit injection scopes (outer/inner fiber) and config-file error locations | OPEN | `loader/src/index.ts` |
-| `entry.fiber` → `entry.innerFiber` rename | OPEN | rc.13 release notes, "Breaking Changes" |
+| `entry.fiber` → `entry.innerFiber` rename | DONE (alias) | `Entry.innerFiber` read/write alias; rc.13 probe (release notes, "Breaking Changes"). The legacy `fiber` name remains as internal storage until callers migrate |
 | Volatile updates, `rawConfig`/`effectiveConfig`, include journal | VERIFYING | `vendor/cordis/README.md`; `src/anima/volatile.py`, `include.py` |
 
 A gap is closed only when an executable probe citing the upstream source is

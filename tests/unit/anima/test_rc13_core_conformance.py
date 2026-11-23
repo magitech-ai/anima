@@ -650,6 +650,27 @@ async def test_rc13_entry_rebuild_after_disposal(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rc13_entry_exposes_inner_fiber_alias(monkeypatch: Any) -> None:
+    """rc.13 names an entry's component fiber `innerFiber`."""
+    module = types.ModuleType("rc13_inner_fiber_mod")
+
+    def comp(_c: Any, config: Any = None) -> None:
+        return None
+
+    module.comp = comp
+    monkeypatch.setitem(sys.modules, "rc13_inner_fiber_mod", module)
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load([{"id": "e", "name": "rc13_inner_fiber_mod:comp"}])
+    await ctx.flush()
+
+    entry = loader.resolve("e")
+    assert entry.innerFiber is entry.fiber
+    entry.innerFiber = None
+    assert entry.fiber is None
+
+
+@pytest.mark.asyncio
 async def test_rc13_fiber_state_unloading_exists() -> None:
     """rc.13 keeps the six fiber states, including UNLOADING (fiber.ts:90-97)."""
     assert {state.name for state in FiberState} == {

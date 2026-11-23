@@ -534,6 +534,9 @@ class Entry:
         self.loader = loader
         self.ctx = loader.ctx.extend()
         self.fiber: Fiber | None = None
+        # rc.13 renamed `entry.fiber` to `entry.innerFiber`. Keep the old name
+        # as the storage attribute (existing internal callers) and expose the
+        # new name as the canonical read/write alias.
         self.module_namespace: Any = None
         self.options: dict[str, Any] = {}
         self.subgroup: EntryGroup | None = None
@@ -546,6 +549,15 @@ class Entry:
         # set flag can never suppress a genuine self-dispose.
         self._loader_disposing = False
         self.ctx.emit("loader/entry-init", self)
+
+    @property
+    def innerFiber(self) -> Fiber | None:
+        """The component fiber owned by this entry (rc.13 name)."""
+        return self.fiber
+
+    @innerFiber.setter
+    def innerFiber(self, fiber: Fiber | None) -> None:
+        self.fiber = fiber
 
     @property
     def context(self) -> Context:
