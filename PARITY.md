@@ -68,7 +68,8 @@ not substitutes for that evidence.
 | `EntryGroup.remove` adoption guard | DONE | `entry.parent is self` check; probe (upstream `loader/config/group.ts:64-68`) |
 | Entry-options validation | DONE | `validate_options()` / `EntryValidationError` on create paths; probes (upstream `loader/config/utils.ts:163-209`) |
 | `emit()` propagates listener exceptions | DONE | `EventBus.emit` no longer swallows sync errors; probes (upstream `core/src/events.ts:121-126`) |
-| Volatile updates, `rawConfig`/`effectiveConfig`, include journal | EXTENSION (not a port item) | Canonical rc.13 has no volatile mechanism; this is DSH-fork behavior kept as an Anima extension — ADR 0014 |
+| Volatile updates, `rawConfig`/`effectiveConfig` | EXTENSION (not a port item) | Canonical rc.13 has no volatile mechanism (no matches in `packages/`); this is DSH-fork behavior kept as an Anima extension — ADR 0014 |
+| Include journal / patch reconciliation | DONE | Canonical rc.13 ships `packages/include/src/journal.ts` and `patch.ts`; Anima ports them in `src/anima/include.py` |
 
 Anima-original and DSH-fork extensions (volatile, `WatcherService`, `PkgService`)
 are kept but are explicitly not counted as rc.13 parity; see ADR 0014. The port
