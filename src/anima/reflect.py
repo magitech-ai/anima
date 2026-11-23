@@ -130,7 +130,10 @@ class Impl:
         self.isolate = isolate
         # The fiber that provided this impl, if any.
         self.fiber = fiber
-        self.dependents: set[Impl] = set()
+        # Fibers whose committed view uses this implementation. The provider
+        # waits for this set to drain before releasing its own effects.
+        self.dependents: set[Any] = set()
+        self.release: Callable[[], None] | None = None
 
 
 class Property:

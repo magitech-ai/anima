@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from anima import Context, FiberState, LoaderService
+from anima import Context, FiberState, LoaderService, Service
 from anima.events import EventBus, EventMode
 
 
@@ -726,6 +726,93 @@ async def test_rc13_global_isolate_realm_shares_bindings() -> None:
     disposer()
     await root.flush()
     assert consumer_ctx.get("db") is None
+
+
+@pytest.mark.asyncio
+async def test_rc13_provider_waits_for_dependent_teardown() -> None:
+    """A provider's inverses run only after its dependents have unloaded."""
+    ctx = Context()
+    order: list[str] = []
+
+    class DrainService(Service):
+        def __init__(self, ctx: Context) -> None:
+            super().__init__(ctx, "drain_svc")
+
+    def provider(c: Any) -> Any:
+        DrainService(c)
+        return lambda: order.append("provider-down")
+
+    def consumer(_c: Any) -> Any:
+        return lambda: order.append("consumer-down")
+
+    consumer.inject = ["drain_svc"]
+    provider_fiber = ctx.use(provider)
+    consumer_fiber = ctx.use(consumer)
+    await ctx.flush()
+    assert provider_fiber.state is FiberState.ACTIVE
+    assert consumer_fiber.state is FiberState.ACTIVE
+
+    await provider_fiber.dispose()
+    await ctx.flush()
+    assert order == ["consumer-down", "provider-down"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_fiber_dependent_bookkeeping() -> None:
+    """Committed views adopt and drop provider dependencies."""
+    ctx = Context()
+    fiber = ctx.fiber
+    released: list[str] = []
+
+    class Impl:
+        def __init__(self, owner: Any = None) -> None:
+            self.fiber = owner
+            self.dependents: set[Any] = set()
+            self.release: Any = None
+
+    old = Impl()
+    old.dependents.add(fiber)
+    old.release = lambda: released.append("old")
+    own = Impl(fiber)
+    fiber.store = {"own": own}
+
+    fiber._adopt_impls({old, own})
+    assert fiber not in old.dependents  # dropped from the previous view
+    assert released == ["old"]
+    assert old.release is None
+    assert fiber not in own.dependents  # a fiber does not depend on itself
+
+    # A second drop and a still-owned impl are harmless.
+    fiber._drop_dependent(old)
+    fiber._drop_dependent(own)
+    assert released == ["old"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_drain_provisions_waits_on_release() -> None:
+    """_drain_provisions waits for an explicit release callback."""
+    ctx = Context()
+    fiber = ctx.fiber
+
+    class Impl:
+        def __init__(self) -> None:
+            self.fiber = fiber
+            self.dependents: set[Any] = {object()}
+            self.release: Any = None
+
+    impl = Impl()
+    ctx.reflect.store["drain_probe"] = impl
+    try:
+        task = asyncio.ensure_future(fiber._drain_provisions())
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert impl.release is not None
+        impl.release()
+        impl.release()  # idempotent: the future is already done
+        await task
+        assert impl.release is None
+    finally:
+        ctx.reflect.store.pop("drain_probe", None)
 
 
 @pytest.mark.asyncio

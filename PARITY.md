@@ -61,7 +61,7 @@ not substitutes for that evidence.
 | Loader explicit injection scopes (outer/inner fiber) and config-file error locations | OPEN | `loader/src/index.ts` |
 | `entry.fiber` → `entry.innerFiber` rename | DONE (alias) | `Entry.innerFiber` read/write alias; rc.13 probe (release notes, "Breaking Changes"). The legacy `fiber` name remains as internal storage until callers migrate |
 | HMR file watching opt-in (`watch.enabled`, `ctx.fs.watch()`) | DONE (rc.13 path) | `HmrService._start_fs_watch` uses `ctx.fs.watch()` and calls `reconcile()`; enabled/disabled/config validation probes (upstream `hmr/src/index.ts:192-243,756-779`). Legacy watcher remains when no `watch` block is supplied |
-| Unload drains notified dependents before inverses | OPEN | `core/src/fiber.ts:481-487`; context-level `provide` drains, reflect-provided services do not. A naive wait inside the provide disposer deadlocked nested unloads and was reverted |
+| Unload drains notified dependents before inverses | DONE | `Impl.dependents` / `release` protocol in `core.py`/`reflect.py`; probe asserts dependents' disposers run before the provider's (paper Algorithm 5, upstream `fiber.ts:481-487`) |
 | Volatile updates, `rawConfig`/`effectiveConfig`, include journal | EXTENSION (not a port item) | Canonical rc.13 has no volatile mechanism; this is DSH-fork behavior kept as an Anima extension — ADR 0014 |
 
 Anima-original extensions (volatile, `WatcherService`, `PkgService`) are kept
@@ -81,8 +81,7 @@ marked DONE:
 | Legacy HMR events `hmr/change` / `hmr/reload` are still emitted; rc.13 removed them | `src/anima/hmr.py` vs `hmr/src/index.ts` (release notes, "Breaking Changes") |
 | `HmrService` still injects `watcher`; rc.13 injects `fs` | `src/anima/hmr.py` vs `hmr/src/index.ts:163-185` |
 
-The two OPEN architectural items above (loader injection scopes / error
-locations, and the dependent-drain guard on unload) remain the substantive
-gaps. Two attempted dependently-drained teardowns deadlocked nested unloads
-and were reverted; a correct fix needs the rc.13 `Impl.dependents`/`release`
-protocol rather than waiting on an existing transition.
+The remaining substantive gap is the loader's explicit outer/inner-fiber
+injection scopes and config-file error locations. The dependent-drain guard
+was implemented with the rc.13 `Impl.dependents`/`release` protocol after two
+naive wait-on-transition attempts deadlocked and were reverted.

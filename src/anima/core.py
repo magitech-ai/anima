@@ -316,8 +316,49 @@ class Fiber:
             await self.inertia
         return self._instance if self.state == FiberState.ACTIVE else None
 
+    def _adopt_impls(self, old_impls: set[Any]) -> None:
+        """Track which providers this fiber's committed view depends on."""
+        new_impls = set((self.store or {}).values())
+        for impl in old_impls - new_impls:
+            self._drop_dependent(impl)
+        for impl in new_impls:
+            if impl.fiber is not self:
+                impl.dependents.add(self)
+
+    def _drop_dependent(self, impl: Any) -> None:
+        impl.dependents.discard(self)
+        if not impl.dependents and impl.release is not None:
+            impl.release()
+            impl.release = None
+
+    async def _drain_provisions(self) -> None:
+        """Wait until no fiber still reads a service this fiber provides."""
+        provisions = [
+            impl for impl in self.ctx.reflect.store.values() if impl.fiber is self
+        ]
+        futures: dict[Any, asyncio.Future[None]] = {}
+        for impl in provisions:
+            if not impl.dependents:
+                continue
+            future = asyncio.get_running_loop().create_future()
+            futures[impl] = future
+
+            def release(future: asyncio.Future[None] = future) -> None:
+                if not future.done():
+                    future.set_result(None)
+
+            impl.release = release
+        if futures:
+            await asyncio.gather(*futures.values())
+        for impl in futures:
+            impl.release = None
+
     async def _unload(self) -> None:
         """Unwind child fibers and effect disposers in reverse order (LIFO)."""
+        # Leave our providers' dependent sets before waiting on our own.
+        for impl in (self.store or {}).values():
+            self._drop_dependent(impl)
+        await self._drain_provisions()
         # Dispose child fibers first
         for child in reversed(list(self.child_fibers)):
             await child.dispose()
@@ -413,7 +454,9 @@ class Fiber:
         the component body. A component failure is logged and stored on the
         fiber, not raised; await_settle() rethrows it.
         """
+        old_impls = set((self.store or {}).values())
         self.store = dict(self._store)
+        self._adopt_impls(old_impls)
         old_epoch = epoch
         self._load_attempted = True
         try:
