@@ -48,10 +48,13 @@ class _AsyncInterval:
     async def _ticks(self) -> None:
         while True:
             await asyncio.sleep(self._delay)
-            if self._pending:
-                future = self._pending.pop(0)
-                if not future.done():
-                    future.set_result(None)
+            self._emit_tick()
+
+    def _emit_tick(self) -> None:
+        if self._pending:
+            future = self._pending.pop(0)
+            if not future.done():
+                future.set_result(None)
 
     def _stop(self, reason: BaseException | None = None) -> None:
         if self._done:
