@@ -636,6 +636,9 @@ class Fiber:
             return
 
         self.target = new_target
+        # Upstream _replace() clears the failure before recomputing the target:
+        # a replacement is an explicit recovery, unlike a notification.
+        self.error = None
         self.name = getattr(
             new_target, "name", getattr(new_target, "__name__", str(new_target))
         )
@@ -793,6 +796,10 @@ class Fiber:
         """
         old_epoch = self._getCurrentEpoch()
         if epoch == old_epoch:
+            return
+        # Upstream fiber.ts:435-436: a failed fiber only recovers through
+        # update(), which clears the error before restarting it.
+        if self.error is not None:
             return
         self._setCurrentEpoch(epoch)
         if self.inertia is not None:
@@ -1324,12 +1331,13 @@ class Context:
 
     # Context methods
     def set(self, name: str, value: Any) -> None:
-        """Context.set(name, value) - Set service value by name."""
-        # If not yet registered via provide, register it first
-        if name not in self.reflect.store:
-            self.reflect.provide(name, value)
-        else:
-            self.reflect.set(name, value)  # pragma: no cover
+        """Set an already-provided service by name.
+
+        Upstream ``reflect.ts:200-211`` rejects a write to an unprovided name;
+        auto-providing would hide a missing declaration and break the coeffect
+        contract. ``ReflectService.set`` performs that check.
+        """
+        self.reflect.set(name, value)
 
     def accessor(self, name: str, options: dict[str, Any]) -> Any:
         """Context.accessor(name, options) - Create property accessor."""

@@ -362,8 +362,22 @@ class EventBus:
                 continue
             res = listener.callback(*args, **kwargs)
             if inspect.isawaitable(res):
-                # Cannot block safely in synchronous bail if awaitable returned
-                res = asyncio.run(_await_res(res))
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    # No loop to block: the historical sync-only path remains.
+                    res = asyncio.run(_await_res(res))
+                else:
+                    # A synchronous bail cannot block on an awaitable inside a
+                    # running loop, and returning it would leak an unawaited
+                    # coroutine. Fail loudly instead.
+                    close = getattr(res, "close", None)
+                    if close is not None:
+                        close()
+                    raise TypeError(
+                        "bail() cannot dispatch an async listener inside a "
+                        "running event loop; use serial() instead"
+                    )
             if is_bailed(res):
                 return res
         return None

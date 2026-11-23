@@ -2403,8 +2403,9 @@ class TestContextGetSet:
         svc = CoreService(ctx)
         assert ctx.get("core_svc") is svc
 
-        # Create a new service and set it via Context.set
+        # rc.13: set() only updates an already-provided name.
         CoreService(ctx, {"name": "new_core_svc"})
+        ctx.reflect.provide("renamed_svc", None)
         ctx.set("renamed_svc", svc)
         assert ctx.get("renamed_svc") is svc
 

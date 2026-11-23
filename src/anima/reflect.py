@@ -247,7 +247,11 @@ class ReflectService:
         if filter_fn is None:
 
             def filter_fn(ctx: Context, name: str) -> bool:
-                return True
+                # Upstream reflect.ts:251-254: a binding change only reaches
+                # dependents resolving the name in the same realm.
+                return ctx._isolated_services.get(
+                    name
+                ) == self.ctx._isolated_services.get(name)
 
         updated_fibers: list[Any] = []
         for runtime in list(self.ctx.registry.values()):

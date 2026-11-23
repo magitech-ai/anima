@@ -440,6 +440,76 @@ async def test_rc13_cancelled_collection_task_is_observed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rc13_failed_fiber_does_not_reload_on_epoch_change() -> None:
+    """A FAILED fiber recovers only through update() (fiber.ts:435-436)."""
+    ctx = Context()
+    fiber = ctx.fiber
+    fiber.error = RuntimeError("failed")
+    before = fiber._getCurrentEpoch()
+    fiber._setEpoch("new-epoch")
+    assert fiber._getCurrentEpoch() == before
+
+
+@pytest.mark.asyncio
+async def test_rc13_notify_respects_isolation_realms() -> None:
+    """A binding change only refreshes fibers in the same realm (reflect.ts:251)."""
+    provider_ctx = Context()
+    consumer_ctx = Context()
+    consumer_ctx._isolated_services["svc"] = "other-realm"
+
+    def consumer(c: Any) -> None:
+        return None
+
+    consumer.inject = ["svc"]
+    fiber = consumer_ctx.use(consumer)
+    await consumer_ctx.flush()
+
+    provider_ctx.reflect.provide("svc", object())
+    provider_ctx.reflect.notify(["svc"])
+    await provider_ctx.flush()
+
+    assert fiber.state == FiberState.PENDING
+
+
+@pytest.mark.asyncio
+async def test_rc13_set_requires_existing_provision() -> None:
+    """`set` on an unprovided name fails loud (reflect.ts:200-203)."""
+    ctx = Context()
+    with pytest.raises(ValueError, match="without provide"):
+        ctx.set("never_provided", 1)
+
+
+@pytest.mark.asyncio
+async def test_rc13_bail_rejects_async_listener_in_running_loop() -> None:
+    """A sync bail cannot block on an awaitable in a running loop."""
+    bus = EventBus()
+
+    async def listener() -> str:
+        return "async"
+
+    bus.on("bail", listener, mode=EventMode.BAIL)
+    with pytest.raises(TypeError, match="use serial"):
+        bus.bail("bail")
+
+
+@pytest.mark.asyncio
+async def test_rc13_bail_rejects_awaitable_without_close() -> None:
+    """Awaitables without `close()` are rejected just the same."""
+
+    class Awaitable:
+        def __await__(self) -> Any:
+            async def value() -> str:
+                return "async"
+
+            return value().__await__()
+
+    bus = EventBus()
+    bus.on("bail", lambda: Awaitable(), mode=EventMode.BAIL)
+    with pytest.raises(TypeError, match="use serial"):
+        bus.bail("bail")
+
+
+@pytest.mark.asyncio
 async def test_rc13_fiber_state_unloading_exists() -> None:
     """rc.13 keeps the six fiber states, including UNLOADING (fiber.ts:90-97)."""
     assert {state.name for state in FiberState} == {
