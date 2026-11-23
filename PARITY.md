@@ -42,7 +42,7 @@ Items proven against rc.13 so far:
 | `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
 | Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
-Verified counts at this checkpoint: 1399 passed, 100% statement and branch coverage.
+Verified counts at this checkpoint: 1331 passed, 100% statement and branch coverage.
 
 ## rc.13 work items and current verdicts
 
@@ -68,12 +68,12 @@ not substitutes for that evidence.
 | `EntryGroup.remove` adoption guard | DONE | `entry.parent is self` check; probe (upstream `loader/config/group.ts:64-68`) |
 | Entry-options validation | DONE | `validate_options()` / `EntryValidationError` on create paths; probes (upstream `loader/config/utils.ts:163-209`) |
 | `emit()` propagates listener exceptions | DONE | `EventBus.emit` no longer swallows sync errors; probes (upstream `core/src/events.ts:121-126`) |
-| Volatile updates, `rawConfig`/`effectiveConfig` | EXTENSION (not a port item) | Canonical rc.13 has no volatile mechanism (no matches in `packages/`); this is DSH-fork behavior kept as an Anima extension — ADR 0014 |
+| DSH-fork extension set removed (volatile, legacy watcher, pkg, loader.builtins/exit) | DONE | User decision ADR 0016; modules/tests deleted, `fs` watch is the only watch surface |
 | Include journal / patch reconciliation | DONE | Canonical rc.13 ships `packages/include/src/journal.ts` and `patch.ts`; Anima ports them in `src/anima/include.py` |
 
-Anima-original and DSH-fork extensions (volatile, `WatcherService`, `PkgService`)
-are kept but are explicitly not counted as rc.13 parity; see ADR 0014. The port
-target and divergence policy were ratified by the user in ADR 0015.
+The DSH-fork extension set was deleted by user decision (ADR 0016). Magitech
+originals marked `†` in the README remain but were never claimed as Cordis
+parity. The port target and divergence policy were ratified in ADR 0015.
 
 ## Ratified decisions
 

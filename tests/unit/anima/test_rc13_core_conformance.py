@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from anima import Context, FiberState, LoaderService, Service
+from anima import Context, FiberState, FsService, LoaderService, Service
 from anima.events import EventBus, EventMode
 
 
@@ -1175,6 +1175,48 @@ async def test_rc13_access_error_stack_excludes_kernel_frames() -> None:
         "anima/reflect.py" in frame.filename or "anima/core.py" in frame.filename
         for frame in frames
     )
+
+
+def test_rc13_schema_deep_equal_and_clone_cycles() -> None:
+    """Cycle handling survives removal of the volatile schema hook."""
+    from anima.schema import clone, deep_equal
+
+    left: dict[str, Any] = {}
+    left["self"] = left
+    right: dict[str, Any] = {}
+    right["self"] = right
+    assert not deep_equal(left, right)
+    copied = clone(left)
+    assert copied["self"] is copied
+
+
+@pytest.mark.asyncio
+async def test_rc13_hmr_start_tolerates_sync_watch(tmp_path: Any) -> None:
+    """Legacy start accepts a sync callback and a non-awaitable disposer."""
+    ctx = Context()
+    ctx.use(FsService)
+    await ctx.flush()
+
+    class FakeWatch:
+        def on(self, name: str, listener: Any) -> None:
+            if name == "change":
+                listener("file:///tmp/x.py")
+
+        def dispose(self) -> None:
+            return None
+
+    from anima.hmr import HmrService
+
+    monkeypatched = ctx.fs.watch
+    ctx.fs.watch = lambda *_a, **_kw: FakeWatch()  # type: ignore[method-assign]
+    try:
+        hmr = HmrService(ctx, {"root": str(tmp_path)})
+        hmr._on_file_change = lambda _action, _path: None  # type: ignore[method-assign]
+        hmr.start()
+        await asyncio.sleep(0)
+        hmr.stop()
+    finally:
+        ctx.fs.watch = monkeypatched  # type: ignore[method-assign]
 
 
 @pytest.mark.asyncio

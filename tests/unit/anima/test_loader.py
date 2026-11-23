@@ -800,7 +800,6 @@ async def test_a15_locate_and_exit(monkeypatch):
     await ctx.flush()
     assert seen == ["here"]
     assert loader.locate(ctx.fiber) is None
-    assert loader.exit() is None
 
 
 # --- loader check (await intercept) ---

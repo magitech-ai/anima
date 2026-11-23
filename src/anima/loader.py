@@ -19,7 +19,6 @@ from anima.events import Disposer, EventMode
 from anima.jsexpr import JsExprError, dump_yaml, interpolate, load_yaml
 from anima.tree import (
     _UNSET,
-    BUILTIN_ALIASES,
     Entry,
     EntryChange,
     EntryGroup,
@@ -42,8 +41,6 @@ __all__ = [
 logger = logging.getLogger("anima.loader")
 
 ENV_PATTERN = re.compile(r"\$\{(?:env\.)?([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}")
-
-_BUILTIN_ALIASES: dict[str, str] = BUILTIN_ALIASES
 
 
 def interpolate_env(value: Any, env: Mapping[str, str] | None = None) -> Any:
@@ -162,7 +159,7 @@ class LoaderService(Service, EntryTree):
     def __init__(self, ctx: Context, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
         # 1. Tree first: sets self.ctx to the extended child ctx, plus
-        #    root/store/owner/owner_fiber/builtins.
+        #    root/store/owner/owner_fiber.
         EntryTree.__init__(self, ctx, loader=self)
         tree_ctx = self.ctx
         # 2. Service second, on the ORIGINAL ctx: registers "loader" where
@@ -178,7 +175,6 @@ class LoaderService(Service, EntryTree):
         self.config = cfg
         self.filename = Path(cfg["filename"]).resolve() if cfg.get("filename") else None
         self.enable_logs = bool(cfg.get("enableLogs", False))
-        self.builtins = dict(BUILTIN_ALIASES)
         if cfg.get("baseUrl"):
             self.ctx.baseUrl = cfg["baseUrl"]
         # 3. Hooks, registered on the ORIGINAL ctx.
@@ -225,10 +221,6 @@ class LoaderService(Service, EntryTree):
             if nxt is None or nxt is fiber:
                 return None
             fiber = nxt
-
-    def exit(self) -> None:
-        """Hook for hosts that can restart the process on full-reload requests."""
-        return
 
     def _loader_check(self) -> bool:
         """False while config.await is set and the loader still has tasks."""

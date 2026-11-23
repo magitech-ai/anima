@@ -18,15 +18,15 @@ import pytest
 
 from anima import Context, FsService, LocalFs
 from anima.hmr import HmrService, SkipReason
-from anima.watcher import WatcherService
 
 SOURCE_V1 = "VERSION = 'v1'\ndef comp(ctx, config=None):\n    return lambda: None\n"
 SOURCE_V2 = "VERSION = 'v2'\ndef comp(ctx, config=None):\n    return lambda: None\n"
 
 
 async def _service(ctx: Context, tmp_path: Path) -> HmrService:
-    ctx.use(WatcherService)
     ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)  # mounts itself at file:
     ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
     return ctx.hmr
@@ -267,7 +267,6 @@ async def test_watch_config_validation(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_watch_disabled_does_not_start_watching(tmp_path: Path) -> None:
     ctx = Context()
-    ctx.use(WatcherService)
     ctx.use(FsService)
     ctx.use(HmrService, {"root": str(tmp_path), "watch": {"enabled": False}})
     await ctx.flush()
@@ -279,7 +278,6 @@ async def test_watch_enabled_uses_fs_service_and_reconciles(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     ctx = Context()
-    ctx.use(WatcherService)
     ctx.use(FsService)
     await ctx.flush()
     LocalFs(ctx)  # BaseFs mounts itself at file:

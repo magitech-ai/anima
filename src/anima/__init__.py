@@ -48,7 +48,6 @@ from anima.include import (
     diff_options,
     ensure_ids,
     ensure_insert_ids,
-    equal_except_volatile,
     flatten,
     merge,
     merge_records,
@@ -73,7 +72,6 @@ from anima.logger import (
     LoggerService,
     Message,
 )
-from anima.pkg import PkgResult, PkgService
 from anima.reflect import ReflectService
 from anima.registry import Inject, RegistryService, resolve_inject
 from anima.schema import Schema, SchemaError, ValidationError, z
@@ -94,14 +92,6 @@ from anima.utils import (
     pick,
     value_map,
 )
-from anima.volatile import (
-    Volatile,
-    create_volatile,
-    is_volatile,
-    update_volatile,
-    volatile_entries,
-)
-from anima.watcher import WatchEntry, WatcherService
 
 # CLI symbols resolve lazily: importing anima.cli eagerly puts it in
 # sys.modules before `python -m anima.cli` executes it, which triggers a
@@ -171,8 +161,6 @@ __all__ = [
     "Message",
     "Mount",
     "PatchIndex",
-    "PkgResult",
-    "PkgService",
     "Promisify",
     "ReconcileResult",
     "ReflectService",
@@ -192,22 +180,17 @@ __all__ = [
     "Time",
     "TimerService",
     "ValidationError",
-    "Volatile",
-    "WatchEntry",
     "WatchOptions",
     "Watcher",
-    "WatcherService",
     "WebSocket",
     "apply_changes",
     "apply_entry_patches",
     "apply_journal",
-    "create_volatile",
     "detach",
     "diff_entries",
     "diff_options",
     "ensure_ids",
     "ensure_insert_ids",
-    "equal_except_volatile",
     "evaluate",
     "filter_keys",
     "flatten",
@@ -220,7 +203,6 @@ __all__ = [
     "is_non_nullable",
     "is_nullable",
     "is_plain_object",
-    "is_volatile",
     "load_profile",
     "map_values",
     "merge",
@@ -233,8 +215,6 @@ __all__ = [
     "resolve_inject",
     "route_journal",
     "save_profile",
-    "update_volatile",
     "value_map",
-    "volatile_entries",
     "z",
 ]

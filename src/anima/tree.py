@@ -18,15 +18,14 @@ import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 
 from anima.core import Context, Fiber, FiberState, is_js_expr
 from anima.events import EventMode
 from anima.jsexpr import evaluate as evaluate_js_expr
 from anima.jsexpr import interpolate as interpolate_js_expr
 from anima.registry import resolve_inject
-from anima.schema import _UNDEFINED, Schema, deep_equal
-from anima.volatile import update_volatile, volatile_entries
+from anima.schema import deep_equal
 
 if TYPE_CHECKING:
     from anima.loader import LoaderService
@@ -35,68 +34,6 @@ logger = logging.getLogger("anima.loader")
 
 # Distinct from None: "argument not supplied" for EntryTree.update's parent.
 _UNSET: Any = object()
-
-
-def _is_schema(value: Any) -> bool:
-    """Whether ``value`` carries the schema seam.
-
-    The local seam vendor is ``anima``; anything without it compares by
-    strict raw equality.
-    """
-    seam = getattr(value, "~standard", None)
-    return seam is not None and getattr(seam, "vendor", None) == "anima"
-
-
-def _is_record(value: Any) -> TypeGuard[dict[str, Any]]:
-    """Whether ``value`` is a plain record (not a JsExpr node)."""
-    return isinstance(value, dict) and not is_js_expr(value)
-
-
-def equal_except_volatile(previous: Any, next_config: Any, schema: Any) -> bool:
-    """Compare two raw configs, treating volatile fields as equal.
-
-    Volatile fields at fixed object paths compare equal regardless of
-    value; an absent object compares equal to its schema default; schema
-    backedges, JsExpr/opaque values, unknown fields, and non-object
-    schemas keep strict raw equality. Nothing is evaluated, validated,
-    or mutated.
-
-    Moved here from ``anima.include`` in P1-7: ``Include`` must subclass
-    ``EntryTree``, and this module is the only runtime consumer, so the
-    function lives with the loader tree (the oracle's diff lives in the
-    loader package). ``anima.include`` re-exports it unchanged.
-    """
-    if not _is_schema(schema):
-        return deep_equal(previous, next_config, strict=True)
-
-    ancestors: set[int] = set()
-
-    def equal(a: Any, b: Any, node: Schema | None) -> bool:
-        if node is not None and node._volatile:
-            return True
-        if (
-            node is None
-            or node.type_name != "object"
-            or node._properties is None
-            or id(node) in ancestors
-        ):
-            return deep_equal(a, b, strict=True)
-        default = node._default if node._default is not _UNDEFINED else None
-        left = a if a is not None else default
-        right = b if b is not None else default
-        if not _is_record(left) or not _is_record(right):
-            return deep_equal(left, right, strict=True)
-        props = node._properties
-        ancestors.add(id(node))
-        try:
-            return all(
-                equal(left.get(key), right.get(key), props.get(key))
-                for key in set(left) | set(right)
-            )
-        finally:
-            ancestors.discard(id(node))
-
-    return equal(previous, next_config, schema)
 
 
 def _members(entry: Entry, tree: EntryTree) -> list[Entry]:
@@ -144,9 +81,8 @@ BUILTIN_ALIASES: dict[str, str] = {
     "include": "anima.include:Include",
     "logger": "anima.logger:LoggerService",
     "timer": "anima.timer:TimerService",
-    "watcher": "anima.watcher:WatcherService",
+    "fs": "anima.fs:FsService",
     "hmr": "anima.hmr:HmrService",
-    "pkg": "anima.pkg:PkgService",
 }
 
 
@@ -330,22 +266,6 @@ def check_unique_ids(rows: list[dict[str, Any]]) -> None:
         seen.add(key)
 
 
-def _in_fiber_scope(owner: Context, scope: Context) -> bool:
-    """Whether ``owner`` is ``scope`` or descends from it.
-
-    The oracle's volatile-update filter tests ``owner.fiber is fiber``;
-    anima never binds a non-root fiber to its context, so scope ancestry
-    is the equivalent test: listeners registered on the fiber's context
-    or a descendant of it belong to that fiber's scope.
-    """
-    ctx: Context | None = owner
-    while ctx is not None:
-        if ctx is scope:
-            return True
-        ctx = ctx._parent
-    return False
-
-
 class EntryOptions(TypedDict, total=False):
     """Serialized plugin entry options stored in loader config files."""
 
@@ -374,7 +294,6 @@ class EntryTree(ABC):
         self.ctx = ctx.extend()
         object.__setattr__(self.ctx, "baseUrl", ctx.baseUrl)
         self.store: dict[str, Entry] = {}
-        self.builtins: dict[str, str] = {}
         self.enable_logs = False
         self.root = EntryGroup(self.ctx, self)
         self.loader: LoaderService | None = loader
@@ -601,8 +520,8 @@ class EntryTree(ABC):
 
     def import_(self, name: str, outer_stack: list[str] | None = None) -> Any:
         """Import a plugin from a specifier or builtin alias."""
-        if name in self.builtins:
-            name = self.builtins[name]
+        if name in BUILTIN_ALIASES:
+            name = BUILTIN_ALIASES[name]
         return resolve_component_target(name)
 
     @abstractmethod
@@ -779,89 +698,13 @@ class Entry:
                 await self.init()
                 return
 
-            # Volatile-only fast path: a change confined to volatile
-            # fields commits into the running fiber without a restart.
-            # The fiber must be ACTIVE and the entry ctx must still be
-            # parented to its group ctx (a short-circuited
-            # loader/patch-context waterfall leaves it on the loader
-            # ctx, which disables the fast path).
-            fiber = self.fiber
-            volatile_only = (
-                changes == ["config"]
-                and fiber.state is FiberState.ACTIVE
-                and self.ctx._parent is self.parent.ctx
-                and equal_except_volatile(
-                    legacy.get("config"),
-                    self.options.get("config"),
-                    fiber.config_schema,
-                )
-            )
-            if volatile_only:
-                raw = self.options.get("config")
-                fiber.raw_config = dict(raw) if isinstance(raw, dict) else raw
-            pending = [] if volatile_only and await self._commit_volatile() else changes
+            pending = changes
             if not pending and not force:
                 return
             self.ctx.emit("loader/partial-dispose", self, legacy, True)
             await self._patch_context(pending)
         else:
             await self.init()
-
-    async def _commit_volatile(self) -> bool:
-        """Commit a volatile-only raw config change into the live fiber.
-
-        Re-validates the candidate; refuses it (leaving the running
-        references unchanged) when validation fails, and reports False
-        when an ordinary effective value changed so the caller runs the
-        ordinary update lifecycle. Otherwise commits the changed
-        volatile snapshots and emits ``loader/volatile-update`` with the
-        changed paths, scoped to this fiber's listeners.
-        """
-        # The caller guarantees a live fiber (the volatile-only path is
-        # only reached with one); the cast mirrors the oracle's
-        # non-null assertion.
-        fiber = cast(Fiber, self.fiber)
-        refs = volatile_entries(fiber.config)
-        if not refs:
-            return True
-        raw = self.options.get("config")
-        try:
-            candidate = await fiber.resolve_config(raw)
-        except Exception as exc:  # noqa: BLE001 - any resolve failure refuses the commit
-            logger.warning(
-                "volatile config update failed for %s", self.options.get("id")
-            )
-            logger.warning("%s", exc)
-            return True
-        if not deep_equal(fiber.config, candidate, strict=True):
-            logger.debug(
-                "ordinary config values of %s changed with its volatile "
-                "values; applying the ordinary update",
-                self.options.get("id"),
-            )
-            return False
-        paths: list[list[str]] = []
-        for item in refs:
-            path = item["path"]
-            ref = item["ref"]
-            source: Any = candidate
-            for key in path:
-                source = source[key]
-            if deep_equal(ref.get(), source.get(), strict=True):
-                continue
-            update_volatile(ref, source)
-            paths.append(list(path))
-        if not paths:
-            return True
-        # Scope the event to this fiber's listeners. The filtered ctx is
-        # detached afterwards: filter() registers it on the parent, and
-        # a throwaway ctx per emit would leak one per volatile update.
-        scoped = fiber.ctx.filter(lambda owner: _in_fiber_scope(owner, fiber.ctx))
-        try:
-            scoped.emit("loader/volatile-update", paths)
-        finally:
-            fiber.ctx._children.remove(scoped)
-        return True
 
     async def _patch_context(self, diff: list[str]) -> None:
         """Re-parent the entry ctx and, when the diff touches config, update the fiber."""

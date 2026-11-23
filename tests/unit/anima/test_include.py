@@ -40,7 +40,6 @@ from anima.include import (
     diff_options,
     ensure_ids,
     ensure_insert_ids,
-    equal_except_volatile,
     flatten,
     merge,
     merge_records,
@@ -206,11 +205,11 @@ def test_diff_treats_js_expr_as_opaque() -> None:
 
 _VOLATILE_SCHEMA = Schema.object(
     {
-        "theme": Schema.string().volatile(),
+        "theme": Schema.string(),
         "level": Schema.number(),
         "nested": Schema.object(
             {
-                "label": Schema.string().volatile(),
+                "label": Schema.string(),
                 "count": Schema.number(),
             }
         ),
@@ -218,140 +217,9 @@ _VOLATILE_SCHEMA = Schema.object(
 )
 
 
-def test_equal_except_volatile_volatile_only_change() -> None:
-    older = {"theme": "dark", "level": 3}
-    newer = {"theme": "light", "level": 3}
-    assert equal_except_volatile(older, newer, _VOLATILE_SCHEMA) is True
-
-
-def test_equal_except_volatile_ordinary_change() -> None:
-    older = {"theme": "dark", "level": 3}
-    newer = {"theme": "dark", "level": 4}
-    assert equal_except_volatile(older, newer, _VOLATILE_SCHEMA) is False
-    # Volatile and ordinary together are still an ordinary change.
-    assert (
-        equal_except_volatile(older, {"theme": "light", "level": 4}, _VOLATILE_SCHEMA)
-        is False
-    )
-
-
-def test_equal_except_volatile_nested_volatile() -> None:
-    older = {"nested": {"label": "a", "count": 1}}
-    assert (
-        equal_except_volatile(
-            older, {"nested": {"label": "b", "count": 1}}, _VOLATILE_SCHEMA
-        )
-        is True
-    )
-    assert (
-        equal_except_volatile(
-            older, {"nested": {"label": "a", "count": 2}}, _VOLATILE_SCHEMA
-        )
-        is False
-    )
-
-
-def test_equal_except_volatile_absent_object_is_schema_default() -> None:
-    # An absent nested object compares equal to its schema default ({}).
-    assert (
-        equal_except_volatile(
-            {"level": 3}, {"level": 3, "nested": {}}, _VOLATILE_SCHEMA
-        )
-        is True
-    )
-    assert (
-        equal_except_volatile(
-            {"level": 3}, {"level": 3, "nested": {"count": 1}}, _VOLATILE_SCHEMA
-        )
-        is False
-    )
-    # Absent top-level config compares equal to the object default.
-    assert equal_except_volatile(None, {}, _VOLATILE_SCHEMA) is True
-    assert equal_except_volatile(None, {"level": 3}, _VOLATILE_SCHEMA) is False
-    # A scalar default is NOT substituted: only whole objects get the
-    # default treatment, per the oracle's `a ?? schema.meta.default`.
-    scalar_default = Schema.object({"mode": Schema.string().default("plain")})
-    assert equal_except_volatile({}, {"mode": "plain"}, scalar_default) is False
-
-
-def test_equal_except_volatile_js_expr_is_opaque() -> None:
-    schema = Schema.object({"mode": Schema.string()})
-    # Identical out-of-scope expressions are equal; nothing is evaluated.
-    older = {"mode": {"__jsExpr": "homePath('x')"}}
-    assert equal_except_volatile(older, dict(older), schema) is True
-    # A changed expression string is a raw change, still unevaluated.
-    assert (
-        equal_except_volatile(older, {"mode": {"__jsExpr": "process.env.Y"}}, schema)
-        is False
-    )
-    # An expression node replacing a literal (and vice versa) is a change.
-    assert equal_except_volatile(older, {"mode": "plain"}, schema) is False
-    assert equal_except_volatile({"mode": "plain"}, older, schema) is False
-
-
-def test_equal_except_volatile_unknown_fields_are_strict() -> None:
-    older = {"level": 3, "extra": 1}
-    assert equal_except_volatile(older, dict(older), _VOLATILE_SCHEMA) is True
-    assert (
-        equal_except_volatile(older, {"level": 3, "extra": 2}, _VOLATILE_SCHEMA)
-        is False
-    )
-
-
-def test_equal_except_volatile_non_schema_falls_back_to_strict_deep_equal() -> None:
-    # No schema, a callable schema, or a non-object schema: strict raw compare.
-    assert equal_except_volatile({"a": 1}, {"a": 1}, None) is True
-    assert equal_except_volatile({"a": 1}, {"a": 2}, None) is False
-    assert equal_except_volatile({"a": True}, {"a": 1}, None) is False
-    assert equal_except_volatile("a", "a", Schema.string()) is True
-    assert equal_except_volatile("a", "b", Schema.string()) is False
-    assert equal_except_volatile({"a": 1}, {"a": 1}, lambda v: v) is True
-    # A dict-typed schema is not an object schema: strict raw compare.
-    dict_schema = Schema.dict(Schema.string())
-    assert equal_except_volatile({"k": "v"}, {"k": "v"}, dict_schema) is True
-    assert equal_except_volatile({"k": "v"}, {"k": "w"}, dict_schema) is False
-
-
-def test_equal_except_volatile_whole_schema_volatile() -> None:
-    schema = Schema.object({"level": Schema.number()}).volatile()
-    assert equal_except_volatile({"level": 1}, {"level": 2}, schema) is True
-    assert equal_except_volatile({"level": 1}, {"other": 9}, schema) is True
-    assert (
-        equal_except_volatile({"level": 1}, {"level": 2}, Schema.string().volatile())
-        is True
-    )
-
-
-def test_equal_except_volatile_recursive_schema_backedge() -> None:
-    props: dict[str, Schema] = {}
-    recursive = Schema.object(props)
-    props["child"] = recursive
-    # The backedge falls back to strict deepEqual for the nested value.
-    older = {"child": {"child": {"v": 1}}}
-    assert (
-        equal_except_volatile(older, {"child": {"child": {"v": 1}}}, recursive) is True
-    )
-    assert (
-        equal_except_volatile(older, {"child": {"child": {"v": 2}}}, recursive) is False
-    )
-
-
 # ---------------------------------------------------------------------------
 # P1-6 — diff_entries is schema-aware; deletion round-trips through the journal
 # ---------------------------------------------------------------------------
-
-
-def test_diff_entries_schema_aware_volatile_only_is_no_diff() -> None:
-    older = {"id": "a", "config": {"theme": "dark", "level": 3}}
-    newer = {"id": "a", "config": {"theme": "light", "level": 3}}
-    assert diff_entries(older, newer, _VOLATILE_SCHEMA) == {}
-    # Without a schema the same change is a diff (strict raw compare).
-    assert diff_entries(older, newer) == {"config": {"theme": "light", "level": 3}}
-    # An ordinary change is a diff even with a schema.
-    changed = {"id": "a", "config": {"theme": "dark", "level": 4}}
-    assert diff_entries(older, changed, _VOLATILE_SCHEMA) == {
-        "config": {"theme": "dark", "level": 4}
-    }
 
 
 def test_diff_entries_strict_bool_vs_int() -> None:
@@ -388,19 +256,6 @@ def test_diff_entries_deletion_round_trips_through_journal() -> None:
         ),
     )
     assert apply_journal([], journal2) == [{"id": "b", "name": "y"}]
-
-
-def test_equal_except_volatile_non_record_object_value() -> None:
-    # A nested object-typed field holding a non-dict (or an expression
-    # node) falls back to strict deepEqual for that field.
-    older = {"nested": "flat"}
-    newer = {"nested": {"label": "a", "count": 1}}
-    assert equal_except_volatile(older, newer, _VOLATILE_SCHEMA) is False
-    assert equal_except_volatile(newer, older, _VOLATILE_SCHEMA) is False
-    assert equal_except_volatile(older, dict(older), _VOLATILE_SCHEMA) is True
-    expr = {"nested": {"__jsExpr": "homePath('x')"}}
-    assert equal_except_volatile(expr, dict(expr), _VOLATILE_SCHEMA) is True
-    assert equal_except_volatile(expr, newer, _VOLATILE_SCHEMA) is False
 
 
 # ---------------------------------------------------------------------------

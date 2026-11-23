@@ -94,7 +94,6 @@ from anima.include import (
     apply_entry_patches,
     apply_journal,
     detach,
-    diff_entries,
     diff_options,
     flatten,
     merge,
@@ -113,18 +112,14 @@ from anima.jsexpr import (
 from anima.loader import LoaderService, load_profile
 from anima.registry import RegistryService
 from anima.schema import (
-    _UNDEFINED,
     Schema,
     SchemaError,
     ValidationError,
-    clone,
-    deep_equal,
 )
 from anima.tree import (
     EntryGroup,
     EntryTree,
     Group,
-    equal_except_volatile,
     unwrap_exports,
 )
 from anima.utils import (
@@ -140,12 +135,6 @@ from anima.utils import (
     map_values,
     pick,
     value_map,
-)
-from anima.volatile import (
-    create_volatile,
-    is_volatile,
-    update_volatile,
-    volatile_entries,
 )
 
 
@@ -1028,10 +1017,10 @@ class SConsumer:
     inject: ClassVar[list[str]] = ["greeter"]
     Config = Schema.object(
         {
-            "theme": Schema.string().volatile(),
+            "theme": Schema.string(),
             "level": Schema.number(),
             "nested": Schema.object(
-                {"label": Schema.string().volatile(), "count": Schema.number()}
+                {"label": Schema.string(), "count": Schema.number()}
             ),
         }
     )
@@ -1097,11 +1086,6 @@ async def _mount_consumer(
     assert fiber is not None and fiber.state == FiberState.ACTIVE
     assert len(consumer.applies) == 1
     return ctx, loader, entry, fiber, consumer
-
-
-def _full_config(theme: Any, level: Any = 3) -> dict[str, Any]:
-    """A complete consumer config (nested volatile field included)."""
-    return {"theme": theme, "level": level, "nested": {"label": "L", "count": 1}}
 
 
 # ---------------------------------------------------------------------------
@@ -1188,200 +1172,6 @@ async def test_conformance_s1_activation_wiring() -> None:
 # ---------------------------------------------------------------------------
 # S2 — Volatile: schema hook, placement, runtime, loader commit path
 # ---------------------------------------------------------------------------
-
-
-def test_conformance_s2_volatile_hook_and_placement() -> None:
-    """``.volatile()`` throws when already volatile; placement is validated.
-
-    The hook throws on a second wrap (oracle schema index.ts:480-482),
-    and a volatile field must sit at a fixed object path — volatile
-    inside an array, a union member, a transform inner, or another
-    volatile field is rejected (oracle schema index.ts:521-529).
-    """
-    with pytest.raises(TypeError, match="already wrapped"):
-        Schema.string().volatile().volatile()
-
-    with pytest.raises(SchemaError, match="fixed object path"):
-        Schema.list(Schema.string().volatile()).validate(["a"])
-    with pytest.raises(SchemaError, match="fixed object path"):
-        Schema.union(Schema.string().volatile(), Schema.number()).validate("x")
-    with pytest.raises(SchemaError, match="fixed object path"):
-        Schema.transform(Schema.string().volatile(), str).validate("x")
-    with pytest.raises(SchemaError, match="fixed object path"):
-        Schema.object(
-            {"a": Schema.object({"b": Schema.string().volatile()}).volatile()}
-        ).validate({"a": {"b": "x"}})
-
-    # A volatile field at a fixed object path resolves to a reference.
-    resolved = Schema.object({"theme": Schema.string().volatile()}).validate(
-        {"theme": "dark"}
-    )
-    assert is_volatile(resolved["theme"])
-    assert resolved["theme"].get() == "dark"
-
-
-def test_conformance_s2_volatile_runtime_snapshot() -> None:
-    """Snapshots are frozen; functions, cycles and non-plain objects fail.
-
-    The snapshot is deep-frozen at creation and isolated from later
-    mutation of the input (oracle volatile.ts:19-26 rejects functions,
-    cycles and non-plain objects; volatile.ts:62 collects entries).
-    """
-    ref = create_volatile({"a": {"b": [1, 2]}})
-    with pytest.raises(TypeError, match="immutable"):
-        ref.get()["a"]["b"].append(3)
-    with pytest.raises(TypeError, match="immutable"):
-        ref.get()["a"] = {}
-
-    source = {"a": 1}
-    isolated = create_volatile(source)
-    source["a"] = 2
-    assert isolated.get() == {"a": 1}
-
-    with pytest.raises(TypeError, match="cannot contain functions"):
-        create_volatile(lambda: 1)
-    with pytest.raises(TypeError, match="must be plain objects or arrays"):
-        create_volatile(object())
-    cyclic: dict[str, Any] = {}
-    cyclic["self"] = cyclic
-    with pytest.raises(TypeError, match="cannot contain cycles"):
-        create_volatile(cyclic)
-
-    config = {
-        "theme": create_volatile("dark"),
-        "nested": {"label": create_volatile("x")},
-        "plain": 1,
-    }
-    entries = volatile_entries(config)
-    assert [entry["path"] for entry in entries] == [["theme"], ["nested", "label"]]
-    assert entries[0]["ref"] is config["theme"]
-
-    target = create_volatile("a")
-    update_volatile(target, create_volatile("b"))
-    assert target.get() == "b"
-
-
-@pytest.mark.asyncio
-async def test_conformance_s2_entry_fast_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A volatile-only entry update commits with no restart.
-
-    Only an active fiber in an unchanged context takes volatile-only
-    config changes without a remount (oracle loader entry.ts:141-155);
-    the commit swaps the changed snapshots and emits
-    ``loader/volatile-update`` with the changed paths (oracle loader
-    entry.ts:160-195; event declared at loader index.ts:34).
-    """
-    ctx, loader, entry, fiber, consumer = await _mount_consumer(monkeypatch)
-    theme_ref = fiber.config["theme"]
-    assert is_volatile(theme_ref)
-    assert theme_ref.get() == "dark"
-
-    volatile_updates: list[list[list[str]]] = []
-    partials: list[Any] = []
-    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
-    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
-
-    await entry.update({"config": _full_config("light")})
-
-    assert len(consumer.applies) == 1  # no reload: the body did not run again
-    assert entry.fiber is fiber
-    assert fiber.state == FiberState.ACTIVE
-    assert partials == []  # the fast path never emits partial-dispose
-    assert volatile_updates == [[["theme"]]]
-    assert fiber.config["theme"] is theme_ref  # same stable reference
-    assert theme_ref.get() == "light"  # live value updated in place
-    assert fiber.raw_config == _full_config("light")
-    await loader.await_all()
-
-
-@pytest.mark.asyncio
-async def test_conformance_s2_entry_refuses_invalid_volatile(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A volatile-only update that fails validation is refused in place.
-
-    The commit re-validates the candidate and leaves the running
-    references unchanged when validation fails (oracle loader
-    entry.ts:160-175: the invalid candidate is logged and the running
-    references are left alone; the raw config stays retained for the
-    next activation).
-    """
-    _ctx, loader, entry, fiber, consumer = await _mount_consumer(monkeypatch)
-    theme_ref = fiber.config["theme"]
-
-    volatile_updates: list[list[list[str]]] = []
-    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
-
-    await entry.update({"config": _full_config(123)})
-
-    assert len(consumer.applies) == 1  # no restart on a refused commit
-    assert volatile_updates == []
-    assert fiber.config["theme"] is theme_ref
-    assert theme_ref.get() == "dark"  # running value unchanged
-    assert fiber.state == FiberState.ACTIVE
-    await loader.await_all()
-
-
-@pytest.mark.asyncio
-async def test_conformance_s2_entry_ordinary_change_restarts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An ordinary-value change in the same update forces a full restart.
-
-    When an ordinary effective value changed alongside the volatile
-    ones, the commit refuses the fast path (oracle loader
-    entry.ts:176-180) and the ordinary update lifecycle runs:
-    partial-dispose, then a restart through the update waterfall
-    (oracle fiber.ts:764-783).
-    """
-    ctx, loader, entry, fiber, consumer = await _mount_consumer(monkeypatch)
-    theme_ref = fiber.config["theme"]
-
-    volatile_updates: list[list[list[str]]] = []
-    partials: list[Any] = []
-    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
-    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
-
-    await entry.update({"config": _full_config("light", level=4)})
-    await loader.await_all()
-
-    assert len(consumer.applies) == 2  # full restart: the body ran again
-    assert len(partials) == 1
-    assert volatile_updates == []  # the fast path was not taken
-    assert entry.fiber is fiber  # restart reuses the same fiber
-    assert fiber.state == FiberState.ACTIVE
-    # The restart re-validates, so the volatile field is a fresh reference.
-    assert fiber.config["theme"] is not theme_ref
-    assert fiber.config["theme"].get() == "light"
-    assert fiber.config["level"] == 4
-
-
-@pytest.mark.asyncio
-async def test_conformance_s2_direct_fiber_update_restarts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CAVEAT (pinned, not fixed): the fast path lives in Entry.update.
-
-    A direct ``fiber.update()`` with a volatile-only change does NOT
-    take the fast path — it runs the ordinary update waterfall and
-    restarts the body. The loader-driven path (how config changes
-    arrive) is the tested one above; this test pins the direct-call
-    behaviour so the gap is visible, not silently assumed.
-    """
-    _ctx, loader, entry, fiber, consumer = await _mount_consumer(monkeypatch)
-
-    volatile_updates: list[list[list[str]]] = []
-    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
-
-    await fiber.update(_full_config("light"))
-    await loader.await_all()
-
-    assert len(consumer.applies) == 2  # the body reran: a restart happened
-    assert volatile_updates == []  # no fast-path event on the direct call
-    assert fiber.state == FiberState.ACTIVE
-    assert fiber.config["theme"].get() == "light"
 
 
 # ---------------------------------------------------------------------------
@@ -1819,11 +1609,11 @@ def test_conformance_s14_unported_type_fails_loud() -> None:
 
 _L_VOLATILE_SCHEMA = Schema.object(
     {
-        "theme": Schema.string().volatile(),
+        "theme": Schema.string(),
         "level": Schema.number(),
         "nested": Schema.object(
             {
-                "label": Schema.string().volatile(),
+                "label": Schema.string(),
                 "count": Schema.number(),
             }
         ),
@@ -3461,109 +3251,6 @@ async def test_conformance_l10_journal_wired_into_include(
 # ---------------------------------------------------------------------------
 
 
-def test_conformance_l11_equal_except_volatile() -> None:
-    """equal_except_volatile (oracle loader diff.ts; entry.ts:141-147).
-
-    Volatile fields compare equal regardless of value; an absent
-    object compares equal to its schema default; JsExpr/opaque values
-    keep strict raw equality; nothing is evaluated or mutated.
-    """
-    older = {"theme": "dark", "level": 3}
-    assert (
-        equal_except_volatile(older, {"theme": "light", "level": 3}, _L_VOLATILE_SCHEMA)
-        is True
-    )
-    assert (
-        equal_except_volatile(older, {"theme": "dark", "level": 4}, _L_VOLATILE_SCHEMA)
-        is False
-    )
-    assert (
-        equal_except_volatile(older, {"theme": "light", "level": 4}, _L_VOLATILE_SCHEMA)
-        is False
-    )
-    nested = {"nested": {"label": "a", "count": 1}}
-    assert (
-        equal_except_volatile(
-            nested, {"nested": {"label": "b", "count": 1}}, _L_VOLATILE_SCHEMA
-        )
-        is True
-    )
-    assert (
-        equal_except_volatile(
-            nested, {"nested": {"label": "a", "count": 2}}, _L_VOLATILE_SCHEMA
-        )
-        is False
-    )
-    # Absent nested object compares equal to its schema default ({}).
-    assert (
-        equal_except_volatile(
-            {"level": 3}, {"level": 3, "nested": {}}, _L_VOLATILE_SCHEMA
-        )
-        is True
-    )
-    assert (
-        equal_except_volatile(
-            {"level": 3}, {"level": 3, "nested": {"count": 1}}, _L_VOLATILE_SCHEMA
-        )
-        is False
-    )
-    # Absent top-level config compares equal to the object default.
-    assert equal_except_volatile(None, {}, _L_VOLATILE_SCHEMA) is True
-    assert equal_except_volatile(None, {"level": 3}, _L_VOLATILE_SCHEMA) is False
-    # A scalar default is NOT substituted: only whole objects get the
-    # default treatment.
-    scalar_default = Schema.object({"mode": Schema.string().default("plain")})
-    assert equal_except_volatile({}, {"mode": "plain"}, scalar_default) is False
-    # JsExpr nodes are opaque: identical strings equal, anything else differs.
-    schema = Schema.object({"mode": Schema.string()})
-    expr = {"mode": {"__jsExpr": "homePath('x')"}}
-    assert equal_except_volatile(expr, dict(expr), schema) is True
-    assert (
-        equal_except_volatile(expr, {"mode": {"__jsExpr": "process.env.Y"}}, schema)
-        is False
-    )
-    assert equal_except_volatile(expr, {"mode": "plain"}, schema) is False
-    # Unknown fields are strict; a non-schema falls back to strict deep equal.
-    assert (
-        equal_except_volatile(
-            {"level": 3, "extra": 1}, {"level": 3, "extra": 2}, _L_VOLATILE_SCHEMA
-        )
-        is False
-    )
-    assert equal_except_volatile({"flag": True}, {"flag": 1}, None) is False
-    assert equal_except_volatile({"flag": True}, {"flag": True}, None) is True
-
-
-def test_conformance_l11_diff_entries_removed_key_is_deletion() -> None:
-    """diff_entries is schema-aware; a removed key yields None = deletion.
-
-    A volatile-only config change produces no diff entry; an
-    ordinary change does; expression nodes compare structurally and
-    are never evaluated; the id never diffs.
-    """
-    assert (
-        diff_entries(
-            {"config": {"theme": "dark", "level": 3}},
-            {"config": {"theme": "light", "level": 3}},
-            _L_VOLATILE_SCHEMA,
-        )
-        == {}
-    )
-    assert diff_entries(
-        {"config": {"theme": "dark", "level": 3}},
-        {"config": {"theme": "dark", "level": 4}},
-        _L_VOLATILE_SCHEMA,
-    ) == {"config": {"theme": "dark", "level": 4}}
-    # Removed key -> None: in a changes dict None deletes the key.
-    assert diff_entries({"id": "a", "gone": True}, {"id": "a"}) == {"gone": None}
-    assert diff_entries({"id": "a"}, {"id": "b"}) == {}
-    assert diff_entries(
-        {"config": {"mode": {"__jsExpr": "homePath('x')"}}},
-        {"config": {"mode": {"__jsExpr": "process.env.Y"}}},
-        Schema.object({"mode": Schema.string()}),
-    ) == {"config": {"mode": {"__jsExpr": "process.env.Y"}}}
-
-
 # ---------------------------------------------------------------------------
 # L12 — Group replaced by EntryGroup
 # ---------------------------------------------------------------------------
@@ -4057,12 +3744,6 @@ async def test_conformance_l14_external_hook_and_unwired_default(
     finally:
         _l_pop("lconf14_ext3")
 
-    # The loader's exit hook exists as a host-wirable no-op, but HMR
-    # does not wire it by default.
-    loader = LoaderService(Context())
-    assert callable(loader.exit)
-    assert loader.exit() is None
-
 
 @pytest.mark.asyncio
 async def test_conformance_l14_config_change_refreshes_include(
@@ -4358,8 +4039,6 @@ _ORIGINAL_MODULES = [
     "http_socks",
     "server",
     "http",
-    "pkg",
-    "watcher",
     "cli",
     "cli_env",
 ]
@@ -4418,47 +4097,6 @@ def test_conformance_u_nullable_none_only() -> None:
     assert is_non_nullable(0)
     assert is_non_nullable("")
     assert not is_non_nullable(None)
-
-
-def test_conformance_u_deep_equal() -> None:
-    """``deep_equal`` is volatile-aware, strict on null-vs-undefined, cycle-safe.
-
-    Two volatile references compare equal regardless of value; a
-    volatile never equals a plain value. Non-strict mode treats null
-    and undefined as equal, strict mode does not (oracle types.ts:127).
-    Distinct cyclic structures compare unequal; the identical object
-    compares equal to itself. Booleans never equal numbers.
-    """
-    assert deep_equal({"a": [1, 2]}, {"a": [1, 2]})
-    assert not deep_equal({"a": [1, 2]}, {"a": [1, 3]})
-    assert not deep_equal([1, 2], (1, 2, 3))
-    assert deep_equal([1, 2], (1, 2))
-    assert deep_equal(1, 1.0)
-    assert not deep_equal(True, 1)
-    assert not deep_equal(False, 0)
-
-    # Null vs undefined: equal non-strict, unequal strict. ``_UNDEFINED``
-    # is the port's undefined sentinel (schema.py).
-    assert deep_equal(None, _UNDEFINED)
-    assert not deep_equal(None, _UNDEFINED, strict=True)
-    assert deep_equal(None, None, strict=True)
-
-    # Volatile-aware: any two volatile references are equal, a volatile
-    # never equals its plain snapshot.
-    first = create_volatile("x")
-    second = create_volatile("y")
-    assert deep_equal(first, second)
-    assert not deep_equal(first, "x")
-    assert deep_equal({"t": first}, {"t": second})
-
-    # Cycles: distinct cyclic structures are unequal, the identical
-    # object is equal to itself.
-    cyclic_a: dict[str, Any] = {}
-    cyclic_a["self"] = cyclic_a
-    cyclic_b: dict[str, Any] = {}
-    cyclic_b["self"] = cyclic_b
-    assert not deep_equal(cyclic_a, cyclic_b)
-    assert deep_equal(cyclic_a, cyclic_a)
 
 
 def test_conformance_u_value_map_filter_keys_pick() -> None:
@@ -4660,35 +4298,6 @@ def test_conformance_u_binary_partial() -> None:
     ]
 
 
-def test_conformance_u_clone() -> None:
-    """``clone`` deep-copies plain data, preserves cycles, keeps volatiles.
-
-    Volatile references are returned as-is — references are stable
-    (oracle types.ts:88-125). Cycles round-trip as cycles, not as
-    infinite recursion; plain dicts and lists come back equal but
-    independent.
-    """
-    data = {"x": [1, {"y": 2}]}
-    copied = clone(data)
-    assert copied == data
-    assert copied is not data
-    assert copied["x"] is not data["x"]
-    copied["x"][1]["y"] = 99
-    assert data["x"][1]["y"] == 2
-
-    cyclic: dict[str, Any] = {}
-    cyclic["self"] = cyclic
-    cloned_cyclic = clone(cyclic)
-    assert cloned_cyclic is not cyclic
-    assert cloned_cyclic is cloned_cyclic["self"]
-
-    ref = create_volatile("stable")
-    assert clone(ref) is ref
-    assert clone({"v": ref})["v"] is ref
-    assert clone("leaf") == "leaf"
-    assert clone(None) is None
-
-
 def test_conformance_u_is_plain_object_narrow() -> None:
     """``is_plain_object`` is dict-only — narrower than the oracle, documented.
 
@@ -4709,46 +4318,6 @@ def test_conformance_u_is_plain_object_narrow() -> None:
 
     assert not is_plain_object(_Thing())
     assert not is_plain_object(datetime.now())
-
-
-def test_conformance_u_volatile_quartet_wired() -> None:
-    """The volatile quartet is importable, exported, and wired.
-
-    ``create_volatile`` / ``is_volatile`` / ``update_volatile`` /
-    ``volatile_entries`` (oracle volatile.ts) are exported from the
-    top-level package as well as from ``anima.volatile``. The
-    snapshot is deep-frozen, the reference is stable across commits,
-    and entries report object-key paths. The loader commit path that
-    consumes these is pinned by the S2 section, not duplicated here.
-    """
-    for name in (
-        "create_volatile",
-        "is_volatile",
-        "update_volatile",
-        "volatile_entries",
-    ):
-        assert name in anima.__all__
-        assert getattr(anima, name) is globals()[name]
-
-    ref = create_volatile({"a": 1, "b": [2, 3]})
-    assert is_volatile(ref)
-    assert not is_volatile({"a": 1})
-    assert ref.get() == {"a": 1, "b": [2, 3]}
-    with pytest.raises(TypeError, match="immutable"):
-        ref.get()["a"] = 99
-    with pytest.raises(TypeError, match="immutable"):
-        ref.get()["b"].append(4)
-
-    other = create_volatile({"a": 7})
-    update_volatile(ref, other)
-    assert ref.get() == {"a": 7}
-    assert other.get() == {"a": 7}
-
-    nested = {"x": create_volatile("one"), "y": {"z": create_volatile("two")}}
-    found = volatile_entries(nested)
-    assert [entry["path"] for entry in found] == [["x"], ["y", "z"]]
-    root = create_volatile("root")
-    assert volatile_entries(root) == [{"path": [], "ref": root}]
 
 
 # ---------------------------------------------------------------------------

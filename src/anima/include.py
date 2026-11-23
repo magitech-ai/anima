@@ -40,7 +40,6 @@ from anima.tree import (
     EntryChange,
     EntryGroup,
     EntryTree,
-    equal_except_volatile,
 )
 
 __all__ = [
@@ -61,7 +60,6 @@ __all__ = [
     "diff_options",
     "ensure_ids",
     "ensure_insert_ids",
-    "equal_except_volatile",
     "flatten",
     "merge",
     "merge_records",
@@ -135,8 +133,6 @@ def diff_entries(
 
     A removed key yields ``None``: in a changes dict None deletes the
     key, it is never stored as a value. The ``config`` key compares with
-    the schema-aware diff when ``config_schema`` is given, so a
-    volatile-only config change produces no diff entry; without a schema
     every key compares by strict raw equality. Expression nodes compare
     structurally and are never evaluated.
     """
@@ -146,10 +142,7 @@ def diff_entries(
             continue
         old_value = older.get(key)
         new_value = newer.get(key)
-        if key == "config" and config_schema is not None:
-            if equal_except_volatile(old_value, new_value, config_schema):
-                continue
-        elif deep_equal(old_value, new_value, strict=True):
+        if deep_equal(old_value, new_value, strict=True):
             continue
         changes[key] = new_value
     return changes

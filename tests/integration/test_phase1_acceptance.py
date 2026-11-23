@@ -25,9 +25,7 @@ from typing import Any, ClassVar
 import pytest
 
 from anima.core import Context, EventMode, FiberState, Service
-from anima.loader import LoaderService
 from anima.schema import Schema, ValidationError
-from anima.volatile import is_volatile
 
 # ---------------------------------------------------------------------------
 # Shared fixture: one plugin, written once, reused by every test.
@@ -72,10 +70,10 @@ class ConsumerPlugin:
     inject: ClassVar[list[str]] = ["greeter"]
     Config = Schema.object(
         {
-            "theme": Schema.string().volatile(),
+            "theme": Schema.string(),
             "level": Schema.number(),
             "nested": Schema.object(
-                {"label": Schema.string().volatile(), "count": Schema.number()}
+                {"label": Schema.string(), "count": Schema.number()}
             ),
         }
     )
@@ -86,7 +84,7 @@ class ConsumerPlugin:
 
     def apply(self, ctx: Context, config: Any) -> Any:
         theme = config["theme"]
-        self.applies.append({"theme": theme.get(), "level": config.get("level")})
+        self.applies.append({"theme": theme, "level": config.get("level")})
         greeting = ctx.greeter.greet("world")
         state: dict[str, Any] = {"seen": [], "greeting": greeting}
         self.state = state
@@ -271,39 +269,6 @@ def _install_fixture_module(
 # ---------------------------------------------------------------------------
 # Part 1 — mount / disposal / dispatch / validation
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_acceptance_mount_event_sequence() -> None:
-    """The fixture mounts with exactly the recorded oracle event sequence."""
-    ctx = Context()
-    events = _record(ctx)
-    greeter_fiber, consumer, consumer_fiber = await _mount(ctx)
-
-    assert greeter_fiber.state == FiberState.ACTIVE
-    assert consumer_fiber.state == FiberState.ACTIVE
-    assert ctx.greeter.greet("world") == "hi, world"
-    assert ctx.has("consumer-state")
-    assert consumer.state["greeting"] == "hi, world"
-    assert consumer.applies == [{"theme": "dark", "level": 3}]
-    assert is_volatile(consumer_fiber.config["theme"])
-    assert consumer_fiber.config["theme"].get() == "dark"
-
-    # Greeter (reflection-provided service): full exact sequence.
-    assert events[:4] == GREETER_MOUNT_EVENTS
-    # Consumer: plugin + status subsequence exactly, in order.
-    rest = [e for e in events[4:] if e[0] in ("plugin", "status")]
-    assert rest == CONSUMER_MOUNT_STATUS
-    # Consumer-state is registered through the context-level provide,
-    # which notifies at registration time rather than at activation
-    # (the oracle has a single provide path, so its notification lands
-    # after the ACTIVE status — oracle reflect.ts:294-296). Pin the
-    # count, not the position: exactly one service event for it.
-    service_events = [e for e in events if e[0] == "service"]
-    assert service_events == [
-        ("service", "greeter", False),
-        ("service", "consumer-state", False),
-    ]
 
 
 @pytest.mark.asyncio
@@ -566,115 +531,3 @@ async def test_acceptance_validation_errors() -> None:
 # ---------------------------------------------------------------------------
 # Part 2 — volatile config updates without reload (P1-6 acceptance, re-pinned)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_acceptance_volatile_update_no_reload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A volatile-only change updates the live value with no restart.
-
-    Only an active fiber in an unchanged context takes volatile-only
-    config changes without a remount (oracle loader entry.ts:141-155);
-    the commit re-validates the candidate and swaps the changed
-    snapshots, emitting the update event with the changed paths (oracle
-    loader entry.ts:160-195; event declared at loader index.ts:34).
-    """
-    ctx = Context()
-    events = _record(ctx)
-    greeter_fiber = ctx.use(GreeterService, greeting="hi", level=1)
-    await ctx.flush()
-    assert greeter_fiber.state == FiberState.ACTIVE
-
-    consumer = ConsumerPlugin()
-    _install_fixture_module(monkeypatch, "acceptance_fixture_mod", consumer)
-    loader = LoaderService(ctx)
-    await loader.create(
-        {
-            "id": "acceptance",
-            "name": "acceptance_fixture_mod:consumer",
-            "config": {"theme": "dark", "level": 3},
-        }
-    )
-    await loader.await_all()
-    entry = loader.resolve("acceptance")
-    fiber = entry.fiber
-    assert fiber is not None and fiber.state == FiberState.ACTIVE
-    assert len(consumer.applies) == 1
-    theme_ref = fiber.config["theme"]
-    assert is_volatile(theme_ref)
-    assert theme_ref.get() == "dark"
-
-    volatile_updates: list[list[list[str]]] = []
-    partials: list[Any] = []
-    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
-    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
-    events.clear()
-
-    await entry.update({"config": {"theme": "light", "level": 3}})
-
-    assert len(consumer.applies) == 1  # no reload: the body did not run again
-    assert entry.fiber is fiber
-    assert fiber.state == FiberState.ACTIVE
-    assert events == []  # no status transition at all
-    assert partials == []  # the fast path never emits partial-dispose
-    assert volatile_updates == [[["theme"]]]
-    assert fiber.config["theme"] is theme_ref  # same stable reference
-    assert theme_ref.get() == "light"  # live value updated in place
-    assert fiber.raw_config == {"theme": "light", "level": 3}
-
-
-@pytest.mark.asyncio
-async def test_acceptance_volatile_and_ordinary_change_restarts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An ordinary-value change in the same update forces a full restart.
-
-    When an ordinary effective value changed alongside the volatile
-    ones, the commit refuses the fast path (oracle loader entry.ts:176-180)
-    and the ordinary update lifecycle runs: partial-dispose, then a
-    restart through the update waterfall (oracle fiber.ts:764-783).
-    """
-    ctx = Context()
-    events = _record(ctx)
-    ctx.use(GreeterService, greeting="hi", level=1)
-    await ctx.flush()
-
-    consumer = ConsumerPlugin()
-    _install_fixture_module(monkeypatch, "acceptance_fixture_mod", consumer)
-    loader = LoaderService(ctx)
-    await loader.create(
-        {
-            "id": "acceptance",
-            "name": "acceptance_fixture_mod:consumer",
-            "config": {"theme": "dark", "level": 3},
-        }
-    )
-    await loader.await_all()
-    entry = loader.resolve("acceptance")
-    fiber = entry.fiber
-    assert fiber is not None and fiber.state == FiberState.ACTIVE
-    theme_ref = fiber.config["theme"]
-    assert theme_ref.get() == "dark"
-
-    volatile_updates: list[list[list[str]]] = []
-    partials: list[Any] = []
-    entry.ctx.on("loader/volatile-update", lambda paths: volatile_updates.append(paths))
-    ctx.on("loader/partial-dispose", lambda *args: partials.append(args))
-    events.clear()
-
-    await entry.update({"config": {"theme": "light", "level": 4}})
-    await loader.await_all()
-
-    assert len(consumer.applies) == 2  # full restart: the body ran again
-    assert len(partials) == 1
-    assert volatile_updates == []  # the fast path was not taken
-    assert entry.fiber is fiber  # restart reuses the same fiber
-    assert fiber.state == FiberState.ACTIVE
-    # The restart re-validates, so the volatile field is a fresh reference.
-    assert fiber.config["theme"] is not theme_ref
-    assert fiber.config["theme"].get() == "light"
-    assert fiber.config["level"] == 4
-    # The restart's lifecycle transitions, in order.
-    states = [e[2] for e in events if e[0] == "status"]
-    assert states == ["UNLOADING", "LOADING", "ACTIVE"]

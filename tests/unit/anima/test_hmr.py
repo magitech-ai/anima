@@ -23,10 +23,9 @@ from unittest.mock import patch
 import pytest
 
 from anima.core import Context, FiberState
-from anima.fs import FsService
+from anima.fs import FsService, LocalFs
 from anima.hmr import HmrService, Reload, handle_error
 from anima.loader import LoaderService
-from anima.watcher import WatcherService
 
 # --- helpers ----------------------------------------------------------------
 
@@ -79,8 +78,9 @@ def _pop(*names: str) -> None:
 @pytest.mark.asyncio
 async def test_hmr_service_lifecycle_and_start_stop(tmp_path: Path):
     ctx = Context()
-    ctx.use(WatcherService)
     ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)
     ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
 
@@ -762,8 +762,9 @@ async def test_hmr_debounce_coalesces_rapid_changes(tmp_path: Path):
 async def test_hmr_stop_cancels_pending_debounce(tmp_path: Path):
     shared_path = _write(tmp_path, "p18_stop_shared.py", "VALUE = 1\n")
     ctx = Context()
-    ctx.use(WatcherService)
     ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)
     ctx.use(HmrService, root=tmp_path, interval=0.01, debounce=200)
     await ctx.flush()
     hmr: HmrService = ctx.hmr
@@ -930,8 +931,9 @@ async def test_hmr_reload_class_component(tmp_path: Path):
     )
 
     ctx = Context()
-    ctx.use(WatcherService)
     ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)
     ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
 
@@ -1026,7 +1028,6 @@ async def test_hmr_reload_concurrent_deduped(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_hmr_reload_instance_and_function_components(tmp_path: Path):
     ctx = Context()
-    ctx.use(WatcherService)
     hmr = HmrService(ctx, {"root": tmp_path})
 
     mod_file = tmp_path / "variants_component.py"
@@ -1218,8 +1219,9 @@ async def test_hmr_reload_joins_stale_inflight_then_reloads(tmp_path: Path):
 async def test_hmr_reload_missing_file_returns_none(tmp_path: Path):
     """reload_module on a missing file returns None instead of raising."""
     ctx = Context()
-    ctx.use(WatcherService)
     ctx.use(FsService)
+    await ctx.flush()
+    LocalFs(ctx)
     ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
     hmr: HmrService = ctx.hmr

@@ -37,8 +37,15 @@ are listed in [PARITY.md](../../PARITY.md).
 
 ## Verification
 
-At the last checkpoint: 1399 tests passed with 100% statement and branch
+At the last checkpoint: 1331 tests passed with 100% statement and branch
 coverage; `ruff check`, `ruff format --check` and `mypy src` all green.
 `tests/unit/anima/test_rc13_core_conformance.py` (34 probes) and
 `tests/unit/anima/test_rc13_hmr_reconcile.py` (9 probes) carry upstream
 citations for each behavior.
+
+## Extension removal (ADR 0016)
+
+By user decision the DSH-fork-only surfaces were deleted: `volatile.py`,
+`watcher.py`, `pkg.py`, `Schema.volatile()`, `loader/volatile-update`,
+`loader.builtins` and `loader.exit()`. HMR's legacy watch path now uses
+`ctx.fs.watch()`. Magitech-original `†` modules are unchanged.

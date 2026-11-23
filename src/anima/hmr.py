@@ -281,18 +281,32 @@ class HmrService(Service):
         return result
 
     def start(self) -> None:
-        """Start watching root directory for Python module changes."""
+        """Start watching the root through the rc.13 fs service."""
         if self._active:
             return
 
-        watcher = self.ctx.watcher
-        self._disposer = watcher.watch(
-            self.root,
-            self._on_file_change,
-            interval=self.interval,
-            ignored=self.ignored,
-            ignore_initial=True,
-        )
+        from urllib.parse import urlsplit
+        from urllib.request import url2pathname
+
+        from anima.fs import WatchOptions
+
+        files = self._watch_config["files"] if self._watch_config is not None else None
+        watch = self.ctx.fs.watch(self.root, WatchOptions(filter=files))
+
+        def on_change(url: str) -> None:
+            path = Path(url2pathname(urlsplit(url).path))
+            result = self._on_file_change("change", path)
+            if inspect.isawaitable(result):
+                asyncio.ensure_future(result)
+
+        watch.on("change", on_change)
+
+        def dispose() -> None:
+            result = watch.dispose()
+            if result is not None and inspect.isawaitable(result):
+                asyncio.ensure_future(result)
+
+        self._disposer = dispose
         self._active = True
 
     def stop(self) -> None:
