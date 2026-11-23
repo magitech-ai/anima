@@ -294,7 +294,11 @@ class Scaffold:
                 tar_path = Path(tmp) / "archive.tar"
                 tar_path.write_bytes(data)
                 with tarfile.open(tar_path) as tar:
-                    tar.extractall(path=Path(self.root_dir))
+                    # Python 3.12 deprecates the implicit filter (and with
+                    # filterwarnings=error the warning would abort the
+                    # download). The explicit data filter is also the safe
+                    # choice: it rejects absolute paths and traversal.
+                    tar.extractall(path=Path(self.root_dir), filter="data")
         except Exception as error:  # noqa: BLE001
             msg = (
                 "timed out downloading"
