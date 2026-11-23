@@ -349,6 +349,11 @@ class Fiber:
 
             impl.release = release
         if futures:
+            logger.debug(
+                "fiber %s waiting for %d provision(s) to drain",
+                self.name,
+                len(futures),
+            )
             await asyncio.gather(*futures.values())
         for impl in futures:
             impl.release = None
@@ -358,11 +363,13 @@ class Fiber:
         # Leave our providers' dependent sets before waiting on our own.
         for impl in (self.store or {}).values():
             self._drop_dependent(impl)
-        await self._drain_provisions()
-        # Dispose child fibers first
+        # Dispose child fibers first: a child may itself provide a service
+        # that a sibling depends on, and it must stop providing before we
+        # wait for that sibling's teardown, otherwise the wait deadlocks.
         for child in reversed(list(self.child_fibers)):
             await child.dispose()
         self.child_fibers.clear()
+        await self._drain_provisions()
 
         # Run registered effect disposers in reverse order (LIFO). A disposer
         # can yield to the loop, and something woken by that yield can append
