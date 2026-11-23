@@ -42,7 +42,7 @@ Items proven against rc.13 so far:
 | `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
 | Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
-Verified counts at this checkpoint: 1395 passed, 100% statement and branch coverage.
+Verified counts at this checkpoint: 1399 passed, 100% statement and branch coverage.
 
 ## rc.13 work items and current verdicts
 
@@ -70,27 +70,22 @@ not substitutes for that evidence.
 | `emit()` propagates listener exceptions | DONE | `EventBus.emit` no longer swallows sync errors; probes (upstream `core/src/events.ts:121-126`) |
 | Volatile updates, `rawConfig`/`effectiveConfig`, include journal | EXTENSION (not a port item) | Canonical rc.13 has no volatile mechanism; this is DSH-fork behavior kept as an Anima extension — ADR 0014 |
 
-Anima-original extensions (volatile, `WatcherService`, `PkgService`) are kept
-but are explicitly not counted as rc.13 parity; see ADR 0014.
+Anima-original and DSH-fork extensions (volatile, `WatcherService`, `PkgService`)
+are kept but are explicitly not counted as rc.13 parity; see ADR 0014. The port
+target and divergence policy were ratified by the user in ADR 0015.
 
-## Remaining divergences — awaiting user ratification
+## Ratified decisions
 
-These are observed behavioral differences with direct source evidence. They
-are **not ratified**: an agent decision is not an accepted gap. They are listed
-here rather than claimed as parity. The user must decide whether each is an
-accepted platform/compatibility adaptation or work still to be done.
+The user ratified the port target (canonical `cordis@4.0.0-rc.13`) and decided
+that all four remaining divergences were to be fixed, not accepted. Recorded in
+ADR 0015. All four now have executable upstream-cited probes:
 
-| Divergence | Evidence |
-|---|---|
-| Access errors capture their stack eagerly; rc.13 defers stack creation until failure | `src/anima/reflect.py` vs `core/src/reflect.ts:20-36` |
-| `await_settle()` drives a never-attempted PENDING fiber; rc.13 `await` only observes | `src/anima/core.py` vs `core/src/fiber.ts:520-526` |
-| Legacy HMR events `hmr/change` / `hmr/reload` are still emitted alongside the rc.13 result object | `src/anima/hmr.py` vs `hmr/src/index.ts` (release notes, "Breaking Changes") |
-| `HmrService` still injects `watcher` for legacy callers; rc.13 injects `fs` | `src/anima/hmr.py` vs `hmr/src/index.ts:163-185` |
-
-Port target itself is also awaiting user confirmation: ADR 0013 selected
-canonical `cordis@4.0.0-rc.13` from evidence (npm `latest`, GitHub release),
-but the user has not ratified that choice over the newer DSH fork
-`@deepseek-ai/cordis@4.2.0-alpha.1`.
+| Item | Status | Evidence |
+|---|---|---|
+| Deferred/enriched access-error stacks | DONE | `_enhance_error()` rebuilds the error without kernel frames (upstream `core/src/reflect.ts:20-36`) |
+| `await_settle()` only observes PENDING fibers | DONE | `Fiber.await_settle` no longer calls `load()`; probe (upstream `core/src/fiber.ts:520-526`) |
+| Legacy `hmr/change` / `hmr/reload` events removed | DONE | HMR reports through `reconcile()` / `last_reload`; probes assert event names absent (upstream `hmr/src/index.ts`, release notes) |
+| `HmrService` injects `fs` | DONE | `HmrService.inject == ["fs"]`; probe (upstream `hmr/src/index.ts:163-185`) |
 
 The outer/inner-fiber scopes and config-path reporting are now ported. Two
 earlier outer-fiber attempts were reverted (broken registry identity, then

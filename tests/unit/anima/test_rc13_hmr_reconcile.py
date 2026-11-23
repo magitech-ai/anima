@@ -26,6 +26,7 @@ SOURCE_V2 = "VERSION = 'v2'\ndef comp(ctx, config=None):\n    return lambda: Non
 
 async def _service(ctx: Context, tmp_path: Path) -> HmrService:
     ctx.use(WatcherService)
+    ctx.use(FsService)
     ctx.use(HmrService, root=tmp_path, interval=0.01)
     await ctx.flush()
     return ctx.hmr
@@ -267,6 +268,7 @@ async def test_watch_config_validation(tmp_path: Path) -> None:
 async def test_watch_disabled_does_not_start_watching(tmp_path: Path) -> None:
     ctx = Context()
     ctx.use(WatcherService)
+    ctx.use(FsService)
     ctx.use(HmrService, {"root": str(tmp_path), "watch": {"enabled": False}})
     await ctx.flush()
     assert ctx.hmr._active is False

@@ -81,7 +81,7 @@ from anima.core import (
     is_js_expr,
     symbols,
 )
-from anima.hmr import HmrService, Reload, handle_error
+from anima.hmr import HmrService, handle_error
 from anima.include import (
     _PARENT_UNSET,
     Conflict,
@@ -147,6 +147,21 @@ from anima.volatile import (
     update_volatile,
     volatile_entries,
 )
+
+
+def _watch_reloads(hmr: Any) -> list[dict[Any, Any]]:
+    """Record reload maps without the removed legacy hmr/reload event."""
+    seen: list[dict[Any, Any]] = []
+    original = hmr._partial_reload
+
+    async def wrapped(stashed: Any) -> bool:
+        result = await original(stashed)
+        if result:
+            seen.append(dict(hmr.last_reload))
+        return result
+
+    hmr._partial_reload = wrapped
+    return seen
 
 
 def _anima_sources() -> list[Path]:
@@ -588,6 +603,7 @@ async def test_conformance_f10_fiber_thenable() -> None:
     """
     ctx = Context()
     fib = ctx.use(lambda c: None)
+    await ctx.flush()
     assert hasattr(fib, "__await__")
     assert getattr(fib, "then", None) is None
 
@@ -3878,8 +3894,7 @@ async def test_conformance_l13_shared_dependency_reloads_dependents(
     plugin = _l_load("lconf13s_plugin", plugin_path)
     other = _l_load("lconf13s_other", other_path)
     alone = _l_load("lconf13s_alone", alone_path)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         fib = ctx.use(plugin.Comp)
         fib_other = ctx.use(other.Other)
@@ -3932,8 +3947,7 @@ async def test_conformance_l14_debounce_default_coalesces(tmp_path: Path) -> Non
     hmr = HmrService(ctx, {"root": tmp_path})
     shared = _l_load("lconf14_shared", shared_path)
     plugin = _l_load("lconf14_plugin", plugin_path)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         fib = ctx.use(plugin.Comp)
         await ctx.flush()
@@ -3967,8 +3981,7 @@ async def test_conformance_l14_debounce_window_honored(tmp_path: Path) -> None:
     hmr = HmrService(ctx, {"root": tmp_path, "debounce": 200})
     shared = _l_load("lconf14w_shared", shared_path)
     plugin = _l_load("lconf14w_plugin", plugin_path)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         ctx.use(plugin.Comp)
         await ctx.flush()
@@ -4005,8 +4018,7 @@ async def test_conformance_l14_external_hook_and_unwired_default(
         ctx, {"root": tmp_path, "full_reload": lambda url: hooks.append(url)}
     )
     ext_mod = _l_load("lconf14_ext", ext_path)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         ext_path.write_text("VALUE = 2\n")
         _l_bump(ext_path)
@@ -4060,7 +4072,7 @@ async def test_conformance_l14_config_change_refreshes_include(
 
     A change to a file backed by a mounted Include refreshes that
     tree in place (no hmr/change, no hmr/reload); a config file with
-    no matching Include still emits hmr/change.
+    no matching Include is ignored (rc.13 removed hmr/change).
     """
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("- name: lconf_inc_mod:comp\n  id: e0\n  config:\n    level: 1\n")
@@ -4075,22 +4087,15 @@ async def test_conformance_l14_config_change_refreshes_include(
     assert l_inc_mod.calls[-1] == {"level": 1}
 
     hmr = HmrService(ctx, {"root": tmp_path})
-    changes: list[str] = []
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/change", lambda url: changes.append(url))
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
     cfg.write_text("- name: lconf_inc_mod:comp\n  id: e0\n  config:\n    level: 2\n")
     await hmr._on_file_change("change", cfg)
     await inc.flush()
     await ctx.flush()
     assert l_inc_mod.calls[-1] == {"level": 2}
-    assert changes == []
-    assert reloads == []
 
     other = tmp_path / "other.yaml"
     other.write_text("- name: lconf_inc_mod:comp\n  id: e0\n")
     await hmr._on_file_change("change", other)
-    assert changes == [other.resolve().as_uri()]
 
 
 # ---------------------------------------------------------------------------
@@ -4124,8 +4129,7 @@ async def test_conformance_l15_failed_reload_rolls_back_fibers_intact(
     hmr = HmrService(ctx, {"root": tmp_path})
     shared = _l_load("lconf15_shared", shared_path)
     plugin = _l_load("lconf15_plugin", plugin_path)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     sys.path.insert(0, str(tmp_path))
     try:
         fib = ctx.use(plugin.Comp)
@@ -4204,15 +4208,14 @@ def test_conformance_l15_error_rendering_code_frame(
 
 @pytest.mark.asyncio
 async def test_conformance_l15_only_oracle_event_names(tmp_path: Path) -> None:
-    """Events align to hmr/change(url) and hmr/reload(reloads) only.
+    """rc.13 removed the legacy HMR events entirely.
 
-    The old anima-only hmr/before-reload, hmr/after-reload and
-    hmr/error names are gone: they are absent from the HMR source and
-    never emitted across a successful reload and a failed one.
+    hmr/change, hmr/reload and the old anima-only names are absent from the
+    HMR source and never emitted across a successful reload or a failed one.
     """
     source = (_l_repo_root() / "src" / "anima" / "hmr.py").read_text(encoding="utf-8")
-    assert "hmr/change" in source
-    assert "hmr/reload" in source
+    assert "hmr/change" not in source
+    assert "hmr/reload" not in source
     assert "hmr/before-reload" not in source
     assert "hmr/after-reload" not in source
     assert "hmr/error" not in source
@@ -4229,8 +4232,6 @@ async def test_conformance_l15_only_oracle_event_names(tmp_path: Path) -> None:
     hmr = HmrService(ctx, {"root": tmp_path})
     mod = _l_load("lconf15_events", mod_path)
     seen: dict[str, list[Any]] = {
-        "hmr/change": [],
-        "hmr/reload": [],
         "hmr/before-reload": [],
         "hmr/after-reload": [],
         "hmr/error": [],
@@ -4248,7 +4249,7 @@ async def test_conformance_l15_only_oracle_event_names(tmp_path: Path) -> None:
         )
         _l_bump(mod_path)
         assert await hmr.reload_module("lconf15_events", path=mod_path) is mod
-        assert len(seen["hmr/reload"]) == 1
+        assert mod.Comp in hmr.last_reload
         assert seen["hmr/before-reload"] == []
         assert seen["hmr/after-reload"] == []
         assert seen["hmr/error"] == []
@@ -4258,7 +4259,6 @@ async def test_conformance_l15_only_oracle_event_names(tmp_path: Path) -> None:
         assert await hmr.reload_module("lconf15_events", path=mod_path) is None
         assert fib.target is mod.Comp
         assert fib.state == FiberState.ACTIVE
-        assert len(seen["hmr/reload"]) == 1  # no second reload event
         assert seen["hmr/before-reload"] == []
         assert seen["hmr/after-reload"] == []
         assert seen["hmr/error"] == []
@@ -4291,8 +4291,7 @@ async def test_conformance_l16_concurrent_reload_deduped(tmp_path: Path) -> None
     sys.modules[mod_name] = mod
     assert spec.loader is not None
     spec.loader.exec_module(mod)
-    reloads: list[dict[Any, Reload]] = []
-    ctx.on("hmr/reload", lambda m: reloads.append(m))
+    reloads = _watch_reloads(hmr)
     try:
         mod_file.write_text("VALUE = 2\n")
         _l_bump(mod_file)

@@ -4,8 +4,8 @@ Hot Module Replacement (HMR) service for dynamic live reloading.
 Ports the oracle's graph reload: a changed module is classified with its
 transitive dependents (accepted) against everything else (declined);
 accepted modules reload in dependency order, a failure rolls the module
-state back, and the reload is reported with the oracle events
-``hmr/change(url)`` and ``hmr/reload(reloads)``.
+state back, and the result is returned by the rc.13 ``reconcile()`` API
+rather than emitted as legacy events.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ _Stat = tuple[float, int] | None
 
 @dataclass
 class Reload:
-    """One reloaded plugin entry, as reported by the ``hmr/reload`` event."""
+    """One reloaded plugin entry, as reported by the legacy reload API."""
 
     filename: str
     runtime: ComponentRuntime | None = None
@@ -127,7 +127,9 @@ def _target_module_name(target: Any) -> str | None:
 class HmrService(Service):
     """Hot Module Replacement service coordinating watcher events and fiber reloads."""
 
-    inject: ClassVar[list[str]] = ["watcher"]
+    # rc.13 declares the fs service as its dependency; file watching is
+    # served through ctx.fs.watch(), not the legacy watcher service.
+    inject: ClassVar[list[str]] = ["fs"]
 
     def __init__(
         self,
@@ -222,7 +224,13 @@ class HmrService(Service):
         # Parse cache: source path -> (stat, imported in-root modules).
         self._graph_cache: dict[Path, tuple[_Stat, frozenset[str]]] = {}
         self._reconcile_lock = asyncio.Lock()
+        self._last_reload: dict[Any, Reload] = {}
         self.ctx.effect(lambda: self.stop)
+
+    @property
+    def last_reload(self) -> dict[Any, Reload]:
+        """The reload map from the most recent legacy reload cycle."""
+        return self._last_reload
 
     def init(self) -> None:
         """Lifecycle hook when mounted as a component."""
@@ -512,24 +520,21 @@ class HmrService(Service):
         if res_path.suffix in _CONFIG_SUFFIXES:
             if await self._refresh_include(res_path):
                 return
-            self.ctx.emit("hmr/change", url)
             return
         if res_path.suffix != ".py":
-            self.ctx.emit("hmr/change", url)
             return
         match = self._find_module_by_path(res_path)
         if match is None:
             # Unloaded module declared external by name: derive the
             # candidate name from the path (same derivation as the
             # fallback in _find_module_by_path) and check it before
-            # falling through to hmr/change. By-path externals are
+            # falling through with no reload. By-path externals are
             # already handled above via _is_external_path, and the
             # path is under root here, so relative_to cannot fail.
             candidate = ".".join(res_path.relative_to(self.root).with_suffix("").parts)
             if candidate in self._externals_names:
                 await self._on_external(url)
                 return
-            self.ctx.emit("hmr/change", url)
             return
         mod_name, _mod = match
         if mod_name in self._externals_names:
@@ -918,7 +923,9 @@ class HmrService(Service):
             await self._restore_fibers(old_targets)
             handle_error(exc)
             return False
-        self.ctx.emit("hmr/reload", reloads)
+        # rc.13 removed the legacy events: the result is available to the
+        # caller of reconcile() and recorded here for the legacy reload API.
+        self._last_reload = reloads
         return True
 
     def _rollback(

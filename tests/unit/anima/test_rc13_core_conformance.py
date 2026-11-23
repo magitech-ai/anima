@@ -1126,6 +1126,58 @@ async def test_rc13_create_rejects_invalid_options() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rc13_await_settle_observes_but_does_not_drive_load() -> None:
+    """Fiber.await only observes; it never starts a load (fiber.ts:520-526)."""
+    from anima.core import Fiber
+
+    ctx = Context()
+    fiber = Fiber(ctx, lambda c: None, (), {})
+    assert fiber.state is FiberState.PENDING
+    assert fiber.inertia is None
+    result = await fiber.await_settle()
+    assert result is fiber
+    assert fiber.state is FiberState.PENDING
+
+
+def test_rc13_hmr_injects_fs_service() -> None:
+    """rc.13's HMR component depends on fs, not the legacy watcher."""
+    from anima.hmr import HmrService
+
+    assert HmrService.inject == ["fs"]
+
+
+def test_rc13_set_error_uses_enhanced_stack() -> None:
+    """A failed property set rethrows the enhanced access error."""
+    ctx = Context()
+    ctx.fiber.runtime = object()  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="without provide") as info:
+        ctx.reflect.handler_set(ctx, "rc13_unprovided_prop", 1, ctx)
+    assert info.value.__traceback__ is not None
+
+
+@pytest.mark.asyncio
+async def test_rc13_access_error_stack_excludes_kernel_frames() -> None:
+    """A failed access rethrows with a caller-facing stack."""
+    import traceback
+
+    from anima.reflect import ReflectService, _enhance_error
+
+    ctx = Context()
+    service = ReflectService(ctx)
+    try:
+        service.set("never_provided", 1)
+    except ValueError as error:
+        enhanced = _enhance_error(error)
+        frames = traceback.extract_tb(enhanced.__traceback__)
+    else:
+        raise AssertionError("set must fail without provide")
+    assert not any(
+        "anima/reflect.py" in frame.filename or "anima/core.py" in frame.filename
+        for frame in frames
+    )
+
+
+@pytest.mark.asyncio
 async def test_rc13_fiber_state_unloading_exists() -> None:
     """rc.13 keeps the six fiber states, including UNLOADING (fiber.ts:90-97)."""
     assert {state.name for state in FiberState} == {

@@ -550,6 +550,7 @@ async def test_isolate_only_change_re_resolves(monkeypatch):
     await ctx.flush()
     entry = loader.resolve("d")
     assert entry.fiber is not None
+    await entry.fiber.await_settle()
     assert entry.fiber.state == FiberState.ACTIVE
     assert "config" not in entry.options
     await loader.update("d", {"isolate": {"svc": True}})

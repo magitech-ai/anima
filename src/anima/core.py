@@ -752,21 +752,10 @@ class Fiber:
     async def await_settle(self) -> Fiber:
         """Wait for current lifecycle work and rethrow startup errors.
 
-        Fiber.await() parity. Awaits any in-flight inertia (load/unload)
-        transition, then rethrows any startup error stored on the fiber.
-        A PENDING fiber with no transition in flight drives its own load
-        first, so awaiting a fiber whose load was only scheduled still
-        settles it; a fiber that already completed a load cycle is left
-        alone, so awaiting a fiber that deliberately settled to PENDING
-        does not reload it. Returns the fiber so `await fiber` yields the
-        fiber itself.
+        Upstream fiber.ts:520-526: only observes the in-flight transition
+        and rethrows a startup error. It never starts a transition of its
+        own; callers must use load()/restart() to drive one.
         """
-        if (
-            self.state == FiberState.PENDING
-            and self.inertia is None
-            and not self._load_attempted
-        ):
-            await self.load()
         while self.inertia is not None:
             await self.inertia
         if self.error is not None:
