@@ -674,9 +674,57 @@ class Entry:
             if not pending and not force:
                 return
             self.ctx.emit("loader/partial-dispose", self, legacy, True)
+            if "name" in pending:
+                await self._rebind(legacy)
+                pending = [key for key in pending if key not in ("name", "config")]
             await self._patch_context(pending)
         else:
             await self.init()
+
+    async def _rebind(self, legacy: dict[str, Any]) -> None:
+        """Point the mounted fiber at the component the row now names.
+
+        A row rename is a different component, not a config change: the fiber
+        swaps its target and restarts on the row's config, and the registry
+        record moves with it — the registry is keyed by the component, so
+        ``Fiber.replace()`` alone leaves a runtime pointing at a component that
+        is no longer mounted (which is why ``hmr.py`` re-keys itself).
+
+        A rename that cannot be imported, unwrapped, or validated is undone in
+        the row and committed back, so the tree never names a component the
+        fiber is not running. Once the restart itself has started the row keeps
+        the new name: ``Fiber.replace()`` sets the target before restarting, so
+        a failed load is a FAILED fiber on the new component, not a rename to
+        undo.
+        """
+        fiber = cast(Fiber, self.fiber)
+        raw = self.options.get("config", {})
+        old_target = fiber.target
+        try:
+            namespace = self.parent.tree.import_(
+                self.options["name"], self.get_outer_stack()
+            )
+            plugin = self.loader.unwrap_exports(namespace)
+            resolved = await fiber.resolve_config(raw)
+        except Exception:
+            self.options["name"] = legacy["name"]
+            self.parent.tree.commit(
+                EntryChange(
+                    id=self.options["id"],
+                    group=self.parent,
+                    options=self.options,
+                    legacy=legacy,
+                )
+            )
+            self.parent.tree.write()
+            raise
+        fiber.config = resolved
+        fiber.raw_config = raw
+        try:
+            await fiber.replace(plugin)
+        finally:
+            self.ctx.registry.rekey(old_target, plugin, fiber)
+            self.module_namespace = namespace
 
     async def _commit_volatile(self) -> bool:
         """Commit a volatile-only raw config change into the live fiber.
