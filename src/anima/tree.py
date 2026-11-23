@@ -650,6 +650,20 @@ class Entry:
                     self.options.get(key), legacy.get(key), key == "config"
                 )
             ]
+            # Upstream entry.ts:243-248: identity (`name`) and the entry's
+            # declared `inject` are rebuild triggers. Patching the context in
+            # place keeps the old component running, which is wrong when the
+            # component itself or its dependency set changed.
+            if "name" in changes or "inject" in changes:
+                # The outer guard above already guarantees a live fiber.
+                old = self.fiber
+                assert old is not None
+                self._loader_disposing = True
+                self.fiber = None
+                await old.dispose()
+                await self.init()
+                return
+
             # Volatile-only fast path: a change confined to volatile
             # fields commits into the running fiber without a restart.
             # The fiber must be ACTIVE and the entry ctx must still be

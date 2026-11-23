@@ -39,8 +39,10 @@ Items proven against rc.13 so far:
 | `notify` respects isolation realms | DONE | `ReflectService.notify` default filter; rc.13 probe (upstream `reflect.ts:251-254`) |
 | `set` rejects an unprovided name | DONE | `Context.set` delegates to `ReflectService.set`; rc.13 probe (upstream `reflect.ts:200-211`) |
 | `bail` rejects async listeners inside a running loop | DONE (Python adaptation) | `src/anima/events.py`; rc.13 probe. JS returns a Promise; Python closes the coroutine and fails loud rather than leaking it |
+| `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
+| Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
-Verified counts at this checkpoint: 1333 passed, 100% statement and branch coverage.
+Verified counts at this checkpoint: 1338 passed, 100% statement and branch coverage.
 
 ## Open gaps against rc.13
 

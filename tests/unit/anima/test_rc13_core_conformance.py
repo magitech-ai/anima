@@ -11,11 +11,13 @@ the port is brought up to the rc.13 contract.
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 from typing import Any
 
 import pytest
 
-from anima import Context, FiberState
+from anima import Context, FiberState, LoaderService
 from anima.events import EventBus, EventMode
 
 
@@ -507,6 +509,144 @@ async def test_rc13_bail_rejects_awaitable_without_close() -> None:
     bus.on("bail", lambda: Awaitable(), mode=EventMode.BAIL)
     with pytest.raises(TypeError, match="use serial"):
         bus.bail("bail")
+
+
+@pytest.mark.asyncio
+async def test_rc13_commit_uses_raw_config_on_pending_fiber() -> None:
+    """internal/commit fires with the raw input even when not loaded.
+
+    Upstream fiber.ts:536-542; the loader writes that raw value back to the
+    entry, preserving expressions for the next activation.
+    """
+    ctx = Context()
+    commits: list[Any] = []
+    ctx.on(
+        "internal/commit",
+        lambda _fiber, config: commits.append(config),
+        mode=EventMode.EMIT,
+    )
+
+    def dependent(_c: Any) -> None:
+        return None
+
+    dependent.inject = ["missing_service"]
+    fiber = ctx.use(dependent)
+    await ctx.flush()
+    assert fiber.state == FiberState.PENDING
+
+    raw = {"v": {"__jsExpr": "process.env.X"}}
+    await fiber.update(raw)
+    assert commits == [raw]
+
+
+@pytest.mark.asyncio
+async def test_rc13_commit_does_not_receive_resolved_config() -> None:
+    """A resolved expression/default must not be written back to the profile."""
+    ctx = Context()
+    commits: list[Any] = []
+
+    def component(_c: Any, config: Any = None) -> None:
+        return None
+
+    fiber = ctx.use(component, {"v": 1})
+    await ctx.flush()
+    ctx.on(
+        "internal/commit",
+        lambda _fiber, config: commits.append(config),
+        mode=EventMode.EMIT,
+    )
+
+    raw = {"v": {"__jsExpr": "Number(process.env.X)"}}
+    await fiber.update(raw)
+    assert commits == [raw]
+    assert "v" in commits[0]
+
+
+@pytest.mark.asyncio
+async def test_rc13_entry_name_change_rebuilds_component(monkeypatch: Any) -> None:
+    """Changing `name` rebuilds the entry (loader entry.ts:243-248)."""
+    calls: list[str] = []
+
+    def first(_c: Any, config: Any = None) -> None:
+        calls.append("first")
+
+    def second(_c: Any, config: Any = None) -> None:
+        calls.append("second")
+
+    module = types.ModuleType("rc13_rebuild_mod")
+    module.first = first
+    module.second = second
+    monkeypatch.setitem(sys.modules, "rc13_rebuild_mod", module)
+
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load([{"id": "e", "name": "rc13_rebuild_mod:first"}])
+    await ctx.flush()
+    assert calls == ["first"]
+    old_fiber = loader.resolve("e").fiber
+
+    await loader.update("e", {"name": "rc13_rebuild_mod:second"})
+    await ctx.flush()
+    await loader.resolve("e").fiber.await_settle()
+
+    assert calls[-1] == "second"
+    assert loader.resolve("e").fiber is not old_fiber
+
+
+@pytest.mark.asyncio
+async def test_rc13_entry_rebuild_when_no_prior_fiber(monkeypatch: Any) -> None:
+    """A name change on an entry that never loaded still initializes."""
+    calls: list[str] = []
+
+    def comp(_c: Any, config: Any = None) -> None:
+        calls.append("comp")
+
+    module = types.ModuleType("rc13_rebuild_mod2")
+    module.comp = comp
+    monkeypatch.setitem(sys.modules, "rc13_rebuild_mod2", module)
+
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load([{"id": "e", "name": "rc13_missing_mod:comp"}])
+    await ctx.flush()
+    assert loader.resolve("e").fiber is None
+
+    await loader.update("e", {"name": "rc13_rebuild_mod2:comp"})
+    await ctx.flush()
+    await loader.resolve("e").fiber.await_settle()
+    assert calls == ["comp"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_entry_rebuild_after_disposal(monkeypatch: Any) -> None:
+    """A disposed fiber does not need another dispose during rebuild."""
+    calls: list[str] = []
+
+    def comp(_c: Any, config: Any = None) -> None:
+        calls.append("comp")
+
+    def comp2(_c: Any, config: Any = None) -> None:
+        calls.append("comp2")
+
+    module = types.ModuleType("rc13_rebuild_mod3")
+    module.comp = comp
+    module.comp2 = comp2
+    monkeypatch.setitem(sys.modules, "rc13_rebuild_mod3", module)
+
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loader.load([{"id": "e", "name": "rc13_rebuild_mod3:comp"}])
+    await ctx.flush()
+    entry = loader.resolve("e")
+    fiber = entry.fiber
+    entry._loader_disposing = True
+    await fiber.dispose()
+    assert fiber.uid is None
+
+    await loader.update("e", {"name": "rc13_rebuild_mod3:comp2"})
+    await ctx.flush()
+    await loader.resolve("e").fiber.await_settle()
+    assert calls == ["comp", "comp2"]
 
 
 @pytest.mark.asyncio

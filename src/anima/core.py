@@ -668,6 +668,12 @@ class Fiber:
         self.assertActive()
         self.raw_config = dict(config) if isinstance(config, dict) else config
 
+        # Upstream fiber.ts:540-542: persistence receives the raw input, on
+        # every fiber, before resolution. Committing the resolved value would
+        # bake expressions and schema defaults into the stored profile.
+        if not no_save:
+            self.ctx.emit("internal/commit", self, self.raw_config)
+
         if self.state != FiberState.ACTIVE:
             self.error = None
             self._setEpoch("__INACTIVE__")
@@ -675,8 +681,6 @@ class Fiber:
             return
 
         resolved = await self._resolve_config(config)
-        if not no_save:
-            self.ctx.emit("internal/commit", self, resolved)
 
         async def _default(cfg: Any) -> None:
             self.config = cfg
