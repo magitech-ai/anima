@@ -290,17 +290,17 @@ class EventBus:
 
         Every listener is awaited to completion whether or not a sibling fails,
         so a failing listener can neither cancel the healthy ones nor mask the
-        other failures. Failures are attributed to the listener that raised
-        them: a single failure is re-raised unchanged (callers keep the concrete
-        exception type), two or more are raised together as an ``ExceptionGroup``
-        naming each failing listener in registration order. Each raised exception
-        also carries a note identifying its listener.
+        other failures. All ``Exception`` failures are aggregated into one
+        ``ExceptionGroup`` — including a single failure, which becomes a group
+        with one member. This is the Cordis rc.13 contract: ``parallel`` throws
+        ``AggregateError`` whenever any listener rejects (``events.ts:110-119``).
+        A non-``Exception`` ``BaseException`` (e.g. ``CancelledError``) cannot be
+        grouped and is re-raised as-is once every listener has finished. Each
+        failure carries a note identifying its listener.
 
         Raises:
-            BaseException: The listener's own exception when exactly one listener
-                failed, or the first non-``Exception`` failure (e.g. a
-                ``CancelledError``), which is always re-raised as-is.
-            ExceptionGroup: When two or more listeners failed with exceptions.
+            BaseException: The first non-``Exception`` failure, re-raised as-is.
+            ExceptionGroup: Whenever one or more listeners failed with exceptions.
         """
         listeners = [
             listener
@@ -332,8 +332,6 @@ class EventBus:
             raise fatal
         if not failures:
             return list(results)
-        if len(failures) == 1:
-            raise failures[0][1]
         labels = ", ".join(label for label, _ in failures)
         raise ExceptionGroup(
             f"{len(failures)} of {len(listeners)} listeners failed "
@@ -402,7 +400,14 @@ class EventBus:
             if current_listener.removed:
                 return await dispatch(index + 1, *current_args, **current_kwargs)
 
+            called = False
+
             async def next_fn(*next_args: Any, **next_kwargs: Any) -> Any:
+                nonlocal called
+                if called:
+                    # Upstream events.ts:155-157 rejects a second delegation.
+                    raise RuntimeError("next() called multiple times")
+                called = True
                 call_args = next_args if next_args else current_args
                 merged_kwargs = {**current_kwargs, **next_kwargs}
                 return await dispatch(index + 1, *call_args, **merged_kwargs)

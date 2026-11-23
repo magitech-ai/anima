@@ -438,12 +438,15 @@ async def test_acceptance_dispatch_modes() -> None:
 
     failing_ctx.on("work", boom, mode=EventMode.PARALLEL)
     failing_ctx.on("work", slow_ok, mode=EventMode.PARALLEL)
-    with pytest.raises(RuntimeError, match="kaboom"):
+    # rc.13 aggregates even a single failure into an ExceptionGroup.
+    with pytest.raises(ExceptionGroup) as single:
         await failing_ctx.parallel("work", "w")
+    assert len(single.value.exceptions) == 1
+    assert isinstance(single.value.exceptions[0], RuntimeError)
     await asyncio.sleep(0.1)
     assert settled == ["slow-ok"]
 
-    # Two failures now aggregate into an ExceptionGroup (parity: PIN-01 done).
+    # Two failures aggregate into the same ExceptionGroup shape (PIN-01).
     group_ctx = Context()
 
     async def boom_a(_x: Any) -> Any:

@@ -13,7 +13,7 @@ Documentation: [AGENTS.md](AGENTS.md) · [CONTEXT.md](CONTEXT.md) · [docs/adr/]
 
 ## Status
 
-Anima is at `0.3.0` and under active development. **The API is not yet stable and may change without notice.**
+Anima is at `0.3.0` and under active development. **The API is not yet stable and may change without notice.** The port target is canonical Cordis `v4.0.0-rc.13`; see [PARITY.md](PARITY.md) for what is proven and what remains open against that target. The former rc.1 "1.0 gate" is historical context, not a claim of rc.13 parity (ADR 0013).
 
 ---
 
@@ -26,13 +26,16 @@ Cordis — *"A Programming Paradigm for Spatiotemporal Composability"*
 Cordis-powered harness whose plugin kernel is built on reversible effects,
 reactive coeffects and a shared context.
 
-The 0.3.0 kernel was built and conformance-checked against DeepSeek Harness at
-pin `fcc0ad46` (`dsh v0.2.2-rc.1`). The frozen pin and every DONE/PARTIAL verdict
-are recorded in [PARITY.md](PARITY.md) and in the
+The 0.3.0 kernel was originally built and conformance-checked against DeepSeek
+Harness at pin `fcc0ad46` (`dsh v0.2.2-rc.1`); that pin and its DONE/PARTIAL
+verdicts are historical and are recorded in the
 [magitech-harness parity map](https://github.com/magitech-ai/magitech-harness/blob/main/PARITY.md).
-Anima is Magitech's
-Python kernel: the asyncio runtime, component surface and product built on top
-are ours; the theory and reference kernel are credited in [NOTICE](NOTICE).
+On 2026-11-23 the port target was moved to canonical Cordis `v4.0.0-rc.13`
+(commit `bc9fae7`), the latest published `cordis` release; the current verdicts
+and open gaps are in [PARITY.md](PARITY.md) and the decision in
+[ADR 0013](docs/adr/0013-rc13-port-target.md). Anima is Magitech's Python
+kernel: the asyncio runtime, component surface and product built on top are
+ours; the theory and reference kernel are credited in [NOTICE](NOTICE).
 
 ---
 

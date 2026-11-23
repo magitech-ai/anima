@@ -1,26 +1,56 @@
 # Parity
 
-The authoritative 1.0 parity map lives in the harness repo:
-[`magitech-harness/PARITY.md`](../magitech-harness/PARITY.md). It is the Phase 8
-re-audit deliverable that proves acceptance criterion 1 (every in-scope item
-DONE or PARTIAL-with-accepted-gap, nothing MISSING in-scope).
+## Current port target
 
-Anima is a Python implementation of the Cordis kernel paradigm
-([arXiv:2608.25512](https://arxiv.org/abs/2608.25512)), conformance-checked
-against DeepSeek Harness. The frozen pin below is a deliberate compatibility
-target, not a concealed provenance; see the README "Lineage" section,
-[NOTICE](NOTICE) for MIT attributions, and ADR 0012.
+Anima's port target is **canonical Cordis `v4.0.0-rc.13`** (`cordiverse/cordis`,
+commit `bc9fae7`, published 2026-11-12), with the paper
+["A Programming Paradigm for Spatiotemporal Composability"](https://arxiv.org/abs/2608.25512)
+as the theory reference. This supersedes the former rc.1 pin by decision
+[ADR 0013](docs/adr/0013-rc13-port-target.md), dated 2026-11-23. DeepSeek
+Harness at `fcc0ad46` (`dsh v0.2.2-rc.1`) remains historical provenance and a
+harness conformance source, not the port target.
 
-Anima-specific pins at the 1.0 gate:
+The 1.0 gate recorded in `magitech-harness/PARITY.md` was a verdict against the
+frozen rc.1 target. It is **not** a claim of parity with rc.13 and is not
+reused here.
 
-- Version `0.3.0`, audited at commit `02f728e` on `main`.
-- Suite: 1228 tests, 100% statement + branch coverage; CI green on all 6 legs.
-- Accepted anima divergences (Malcom, via the ratified conformance map):
-  PIN-02 (`Context.provide` notifies at registration) remains PARTIAL. PIN-01
-  (parallel dispatch failure aggregation) was **re-ratified from PARTIAL to
-  DONE on 2026-11-19** at Malcom's decision: parallel dispatch now aggregates
-  failures (one → original error, ≥2 → `ExceptionGroup`), with a conformance
-  probe in `tests/integration/test_phase1_acceptance.py`. Both states are
-  recorded in the authoritative map.
-- The reference is frozen at `fcc0ad46…` (0.2.2-rc.1) for the 1.0 audit; rc.3
-  drift is in the post-1.0 appendix of the authoritative map.
+## Verified baseline at this target (2026-11-23)
+
+- `uv run pytest`: 1328 passed, 100% statement and branch coverage.
+- `uv run ruff check src tests`, `uv run ruff format --check src tests`,
+  `uv run python -m mypy src`: green.
+- `filterwarnings = ["error", "ignore::ResourceWarning"]` is configured, so
+  unawaited coroutines and other unexpected warnings fail the suite.
+- 24 executable rc.13 core conformance probes live in
+  `tests/unit/anima/test_rc13_core_conformance.py`. Each cites the upstream
+  `file:line` it validates.
+
+Items proven against rc.13 so far:
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| Effect shapes: disposer, iterable, awaitable, async iterable | DONE | `src/anima/core.py` `Context.effect`/`Fiber._collect_effect`; probes in `test_rc13_core_conformance.py` (upstream `core/src/fiber.ts:60-76,240-289`) |
+| Async-generator effect closed on epoch change | DONE | `Fiber._collect_effect` `finally: aclose()`; probe `test_rc13_async_generator_effect_is_closed_on_epoch_change` (upstream `#268`, `fiber.ts:267-285`) |
+| Per-step epoch guard for effect iterators | DONE | same code and probes (paper Algorithm 1) |
+| `parallel` aggregates every failure (one → `ExceptionGroup` of one) | DONE | `src/anima/events.py` (upstream `core/src/events.ts:110-119`); rc.13 probe |
+| `waterfall` rejects a second `next()` call | DONE | `src/anima/events.py` (upstream `events.ts:155-157`); rc.13 probe |
+| `registry.delete()` removed | DONE | deleted from `src/anima/registry.py`; disposal is the public path (upstream `registry.ts` has no `delete`) |
+
+## Open gaps against rc.13
+
+These are recorded as **OPEN**, not DONE or PARTIAL-with-accepted-gap. They are
+tracked work, not hidden divergences:
+
+| Item | Status | Upstream evidence |
+|---|---|---|
+| Programmatic `ctx.hmr.reconcile()` returning `{settled, aborted, skipped}` | OPEN | `hmr/src/index.ts:286-301,525-753` |
+| Per-unit commit/abort isolation in HMR | OPEN | `hmr/src/index.ts:674-721` |
+| `fs` service with mountable providers and `ctx.fs.watch()` | OPEN | `packages/fs`, `packages/fs-node` |
+| Loader explicit injection scopes (outer/inner fiber) and config-file error locations | OPEN | `loader/src/index.ts` |
+| `entry.fiber` → `entry.innerFiber` rename | OPEN | rc.13 release notes, "Breaking Changes" |
+| Host-module / native-addon skip reasons | OPEN | `hmr/src/index.ts:546-553,819-836` |
+| Volatile updates, `rawConfig`/`effectiveConfig`, include journal | VERIFYING | `vendor/cordis/README.md`; `src/anima/volatile.py`, `include.py` |
+
+A gap is closed only when an executable probe citing the upstream source is
+added and the full gate is green. Agent-accepted reasons are not accepted
+substitutes for that evidence.

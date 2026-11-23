@@ -679,8 +679,13 @@ async def test_a9_self_dispose_marks_disabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_self_dispose_ignored_after_registry_delete(monkeypatch):
-    """Disposal driven by registry deletion (HMR path) does not disable the entry."""
+async def test_dispose_with_unregistered_runtime_does_not_disable_entry(monkeypatch):
+    """A fiber whose runtime was already removed does not disable its entry.
+
+    rc.13 removes the public ``registry.delete()``; the guard remains for the
+    replacement path where a runtime is unregistered before its fiber is
+    disposed. This probe exercises that guard directly.
+    """
     ctx = Context()
     loader = LoaderService(ctx)
     calls: list[Any] = []
@@ -698,7 +703,10 @@ async def test_self_dispose_ignored_after_registry_delete(monkeypatch):
     entry = loader.resolve("a")
     assert entry.fiber is not None
     fiber = entry.fiber
-    entry.ctx.registry.delete(fiber.target)
+    runtime = entry.ctx.registry.get(fiber.target)
+    assert runtime is not None
+    entry.ctx.registry._unregister(runtime)
+    await fiber.dispose()
     await entry.ctx.flush()
     assert fiber.state == FiberState.DISPOSED
     assert entry.options.get("disabled") is not True

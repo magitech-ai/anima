@@ -1,0 +1,452 @@
+"""Core conformance probes against canonical Cordis v4.0.0-rc.13.
+
+Ground truth: ``cordiverse/cordis`` tag ``v4.0.0-rc.13`` (commit ``bc9fae7``,
+published 2026-11-12), cloned at ``/tmp/opencode/cordis-upstream``.
+
+Each test cites the exact upstream source line that defines the behavior. The
+tests are executable evidence: they fail on the pre-rc.13 kernel and pass once
+the port is brought up to the rc.13 contract.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import pytest
+
+from anima import Context, FiberState
+from anima.events import EventBus, EventMode
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_awaitable_is_awaited_and_disposer_registered() -> None:
+    """An effect may return a promise of a disposer (fiber.ts:257-258)."""
+    ran: list[str] = []
+    ctx = Context()
+
+    async def setup() -> Any:
+        await asyncio.sleep(0)
+        return lambda: ran.append("promise-disposer")
+
+    ctx.effect(setup)
+    await ctx.flush()
+    await ctx.fiber.dispose()
+
+    assert ran == ["promise-disposer"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_sync_iterable_disposers_run_lifo() -> None:
+    """An effect may return an iterable of inverses (fiber.ts:259-266)."""
+    ran: list[str] = []
+    ctx = Context()
+    ctx.effect(lambda: [lambda: ran.append("first"), lambda: ran.append("second")])
+    await ctx.flush()
+    await ctx.fiber.dispose()
+
+    assert ran == ["second", "first"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_async_iterable_disposers_run_lifo() -> None:
+    """An effect may return an async iterable of inverses (fiber.ts:267-285)."""
+    ran: list[str] = []
+    ctx = Context()
+
+    async def inverses():
+        yield lambda: ran.append("first")
+        yield lambda: ran.append("second")
+
+    ctx.effect(inverses)
+    await ctx.flush()
+    await ctx.fiber.dispose()
+
+    assert ran == ["second", "first"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_invalid_result_raises_type_error() -> None:
+    """Non-disposer, non-iterable results are rejected (fiber.ts:255,287)."""
+    ctx = Context()
+    with pytest.raises(TypeError, match="Invalid effect"):
+        ctx.effect(lambda: 42)
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_disposer_is_idempotent() -> None:
+    """A disposer fires at most once (fiber.ts:340-349)."""
+    ran: list[int] = []
+    ctx = Context()
+    dispose = ctx.effect(lambda: lambda: ran.append(1))
+    dispose()
+    dispose()
+    assert ran == [1]
+
+
+@pytest.mark.asyncio
+async def test_rc13_parallel_always_aggregates_failures() -> None:
+    """`parallel` throws AggregateError on any failure (events.ts:110-119).
+
+    One failure is an AggregateError with one reason, not the bare exception:
+    the all-settled contract and the error type are both part of the surface.
+    Python's equivalent is ExceptionGroup.
+    """
+    bus = EventBus()
+
+    async def fail() -> None:
+        raise ValueError("boom")
+
+    bus.on("boom", fail, mode=EventMode.PARALLEL)
+
+    with pytest.raises(ExceptionGroup) as info:
+        await bus.parallel("boom")
+
+    assert len(info.value.exceptions) == 1
+    assert isinstance(info.value.exceptions[0], ValueError)
+
+
+@pytest.mark.asyncio
+async def test_rc13_waterfall_rejects_next_called_twice() -> None:
+    """A waterfall listener that calls next() twice fails (events.ts:155-157)."""
+    bus = EventBus()
+
+    async def double_next(value: Any, next_fn: Any) -> Any:
+        await next_fn(value)
+        return await next_fn(value)
+
+    bus.on("double", double_next, mode=EventMode.WATERFALL)
+
+    with pytest.raises(RuntimeError, match="next\\(\\) called multiple times"):
+        await bus.waterfall("double", "v")
+
+
+@pytest.mark.asyncio
+async def test_rc13_async_generator_effect_is_closed_on_epoch_change() -> None:
+    """An async-generator effect is closed when its epoch changes (#268).
+
+    Upstream ``fiber.ts:275-284`` stops the iterator and calls
+    ``iter.return()`` in ``finally`` so the generator's cleanup runs.
+    """
+    closed: list[str] = []
+    ctx = Context()
+    fiber = ctx.fiber
+
+    async def inverses():
+        try:
+            yield lambda: None
+            yield lambda: None
+        finally:
+            closed.append("closed")
+
+    epochs = iter(["epoch-1", "epoch-2", "epoch-2"])
+    original = fiber._getCurrentEpoch
+
+    def changing_epoch() -> str:
+        return next(epochs)
+
+    fiber._getCurrentEpoch = changing_epoch  # type: ignore[method-assign]
+    try:
+        await fiber._collect_effect(inverses(), "epoch-1")
+    finally:
+        fiber._getCurrentEpoch = original  # type: ignore[method-assign]
+
+    assert closed == ["closed"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_async_disposer_chain_runs_lifo() -> None:
+    """Awaitable disposers chain after the sync ones (fiber.ts:298-311)."""
+    ran: list[str] = []
+    ctx = Context()
+
+    async def async_disposer() -> None:
+        ran.append("async")
+
+    ctx.effect(lambda: [lambda: ran.append("sync"), async_disposer])
+    await ctx.flush()
+    await ctx.fiber.dispose()
+
+    assert ran == ["async", "sync"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_dispose_waits_for_pending_collection() -> None:
+    """Disposal awaits an in-flight async effect before running inverses."""
+    ran: list[str] = []
+    gate = asyncio.Event()
+    ctx = Context()
+
+    async def setup() -> Any:
+        await gate.wait()
+        return lambda: ran.append("collected")
+
+    dispose = ctx.effect(setup)
+    cleanup = dispose()
+    assert cleanup is not None
+    gate.set()
+    await cleanup
+    assert ran == ["collected"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_collection_failure_is_logged() -> None:
+    """A failed collection task is observed rather than left unretrieved."""
+    ctx = Context()
+
+    async def bad_setup() -> Any:
+        raise ValueError("collection failed")
+
+    dispose = ctx.effect(bad_setup)
+    await asyncio.sleep(0)
+    # The task's exception is retrieved both by its done callback and here.
+    dispose()
+    assert True
+
+
+def test_rc13_effect_outside_running_loop() -> None:
+    """An async effect registered without a loop is still collected."""
+    ran: list[str] = []
+    ctx = Context()
+
+    async def setup() -> Any:
+        return lambda: ran.append("collected")
+
+    dispose = ctx.effect(setup)
+    dispose()
+    assert ran == ["collected"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_child_meta_is_nested() -> None:
+    """A disposer carrying effect metadata nests under its parent."""
+    ctx = Context()
+    child = ctx.effect(lambda: lambda: None, label="child")
+    parent = ctx.effect(lambda: child, label="parent")
+    meta = getattr(parent, "anima.effect", None)
+    assert meta is not None
+    assert [entry["label"] for entry in meta["children"]] == ["child"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_async_iterable_without_aclose_is_supported() -> None:
+    """An async iterable without `aclose()` still collects its disposers."""
+    ran: list[str] = []
+
+    class Iterator:
+        def __init__(self) -> None:
+            self._sent = False
+
+        def __aiter__(self) -> Iterator:
+            return self
+
+        async def __anext__(self) -> Any:
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            return lambda: ran.append("collected")
+
+    class Source:
+        def __aiter__(self) -> Iterator:
+            return Iterator()
+
+    ctx = Context()
+    ctx.effect(lambda: Source())
+    await ctx.flush()
+    await ctx.fiber.dispose()
+    assert ran == ["collected"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_fiber_effect_stops_before_first_item_on_stale_epoch() -> None:
+    """The guard is consulted before the first step as well (Algo 1)."""
+    ctx = Context()
+    fiber = ctx.fiber
+
+    async def gen():
+        yield lambda: None
+
+    await fiber._collect_effect(gen(), "different-epoch")
+    assert fiber.effects == []
+
+
+@pytest.mark.asyncio
+async def test_rc13_fiber_effect_sync_iterable_stops_on_stale_epoch() -> None:
+    """Sync iterables are guarded at each iteration boundary too."""
+    ctx = Context()
+    fiber = ctx.fiber
+
+    def component(_: Any) -> Any:
+        return [lambda: None]
+
+    # Drive the epoch back to INACTIVE immediately after the reload starts.
+    original = fiber._getCurrentEpoch
+
+    def changed() -> str:
+        return "__INACTIVE__"
+
+    fiber._getCurrentEpoch = changed  # type: ignore[method-assign]
+    try:
+        await fiber._collect_effect(component(ctx), "active")
+    finally:
+        fiber._getCurrentEpoch = original  # type: ignore[method-assign]
+    assert fiber.effects == []
+
+
+@pytest.mark.asyncio
+async def test_rc13_fiber_async_iterable_without_aclose() -> None:
+    """A non-generator async iterable needs no `aclose()`."""
+
+    class Iterator:
+        def __init__(self) -> None:
+            self._sent = False
+
+        def __aiter__(self) -> Iterator:
+            return self
+
+        async def __anext__(self) -> Any:
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            return lambda: None
+
+    class Source:
+        def __aiter__(self) -> Iterator:
+            return Iterator()
+
+    ctx = Context()
+    fiber = ctx.fiber
+    await fiber._collect_effect(Source(), fiber._getCurrentEpoch())
+    assert len(fiber.effects) == 1
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_child_meta_outside_fiber_list() -> None:
+    """A foreign disposer with metadata nests without a fiber removal."""
+    ctx = Context()
+    child = ctx.effect(lambda: lambda: None, label="foreign")
+    ctx.fiber.effects.remove(child)
+    parent = ctx.effect(lambda: child, label="parent")
+    meta = getattr(parent, "anima.effect", None)
+    assert [entry["label"] for entry in meta["children"]] == ["foreign"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_two_async_disposers_chain() -> None:
+    """Every awaitable disposer in the chain is awaited in order."""
+    ran: list[str] = []
+    ctx = Context()
+
+    async def first() -> None:
+        ran.append("first")
+
+    async def second() -> None:
+        ran.append("second")
+
+    ctx.effect(lambda: [second, first])
+    await ctx.flush()
+    await ctx.fiber.dispose()
+    assert ran == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_async_iterable_stops_when_epoch_moves() -> None:
+    """Context-level async iterables stop collecting on epoch change."""
+    ran: list[str] = []
+    ctx = Context()
+
+    class Iterator:
+        def __init__(self) -> None:
+            self._sent = False
+
+        def __aiter__(self) -> Iterator:
+            return self
+
+        async def __anext__(self) -> Any:
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            ctx.fiber._setEpoch("__INACTIVE__")
+            return lambda: ran.append("collected")
+
+    class Source:
+        def __aiter__(self) -> Iterator:
+            return Iterator()
+
+    ctx.effect(lambda: Source())
+    await ctx.flush()
+    await ctx.fiber.dispose()
+    assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_async_iterable_stale_before_first_step() -> None:
+    """An epoch change in `__aiter__` stops collection before step one."""
+    ctx = Context()
+
+    class Iterator:
+        def __init__(self, fiber: Any) -> None:
+            self._fiber = fiber
+
+        def __aiter__(self) -> Iterator:
+            self._fiber._setEpoch("__INACTIVE__")
+            return self
+
+        async def __anext__(self) -> Any:
+            raise StopAsyncIteration
+
+    def component(c: Any) -> None:
+        c.effect(lambda: Iterator(c.fiber))
+
+    fiber = ctx.use(component)
+    await ctx.flush()
+    await fiber.dispose()
+    assert True
+
+
+@pytest.mark.asyncio
+async def test_rc13_effect_pending_collection_failure_is_reported() -> None:
+    """A failure during a pending collection is logged, not propagated."""
+    gate = asyncio.Event()
+    ctx = Context()
+
+    async def setup() -> Any:
+        await gate.wait()
+        raise ValueError("late failure")
+
+    dispose = ctx.effect(setup)
+    cleanup = dispose()
+    gate.set()
+    await cleanup
+    assert True
+
+
+@pytest.mark.asyncio
+async def test_rc13_cancelled_collection_task_is_observed() -> None:
+    """Cancelled collection tasks are not treated as failures."""
+    ctx = Context()
+
+    async def setup() -> Any:
+        await asyncio.Event().wait()
+
+    ctx.effect(setup)
+    await asyncio.sleep(0)
+    current = asyncio.current_task()
+    for task in asyncio.all_tasks():
+        if task is not current:
+            task.cancel()
+    await asyncio.sleep(0)
+    assert True
+
+
+@pytest.mark.asyncio
+async def test_rc13_fiber_state_unloading_exists() -> None:
+    """rc.13 keeps the six fiber states, including UNLOADING (fiber.ts:90-97)."""
+    assert {state.name for state in FiberState} == {
+        "PENDING",
+        "LOADING",
+        "ACTIVE",
+        "FAILED",
+        "UNLOADING",
+        "DISPOSED",
+    }

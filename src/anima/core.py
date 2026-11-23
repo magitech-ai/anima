@@ -592,13 +592,31 @@ class Fiber:
             await self._collect_effect(await result, epoch)
             return
         if isinstance(result, AsyncIterable):
-            async for item in result:
-                if self._getCurrentEpoch() != epoch:
-                    return
-                self._collect_item(item)
+            # Close the generator when the epoch moves so its `finally` blocks
+            # run deterministically (upstream rc.13 fiber.ts:267-285, #268).
+            iterator = result.__aiter__()
+            try:
+                while True:
+                    if self._getCurrentEpoch() != epoch:
+                        break
+                    try:
+                        item = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    # The body may change the epoch while producing the item.
+                    if self._getCurrentEpoch() != epoch:
+                        break
+                    self._collect_item(item)
+            finally:
+                aclose = getattr(iterator, "aclose", None)
+                if aclose is not None:
+                    await aclose()
             return
         if isinstance(result, Iterable):
+            # Algorithm 1 consults the guard at every iteration boundary.
             for item in result:
+                if self._getCurrentEpoch() != epoch:
+                    break
                 self._collect_item(item)
             return
         raise TypeError("Invalid effect")
@@ -1607,10 +1625,16 @@ class Context:
         for fiber in dependents:
             await fiber.dispose()
 
-    def effect(
-        self, func: Callable[[], Disposer | None], label: str | None = None
-    ) -> Disposer:
+    def effect(self, func: Callable[[], Any], label: str | None = None) -> Disposer:
         """Register a cleanup-aware reversible effect on the active fiber.
+
+        ``func`` may return any effect shape accepted by Cordis rc.13
+        (``fiber.ts:60-76, 240-289``): a disposer, nothing, an iterable of
+        disposers, a promise of one of those, or an async iterable of
+        disposers. Every yielded disposer is collected and run once, in
+        reverse registration order, when the returned disposer is called or
+        the owning fiber unloads. An async iterable is closed when the fiber's
+        epoch changes so its ``finally`` blocks run deterministically.
 
         The returned disposer carries effect metadata
         (``{"label": ..., "children": []}``) and is itself the entry
@@ -1619,26 +1643,126 @@ class Context:
         A disposer runs at most once: disposing it directly marks it
         spent, so a parent effect wrapping it will not run it again.
         """
-        fiber = _current_fiber.get()
-        disposer = func()
+        # Upstream binds `effect` to `ctx.fiber`, so the effect belongs to the
+        # fiber that owns this context scope, including the root fiber when
+        # registered outside a component body.
+        fiber = self.fiber
         meta: dict[str, Any] = {"label": label or "anonymous", "children": []}
+        disposables: list[Callable[[], Any]] = []
+        state: dict[str, Any] = {"armed": True, "task": None}
 
-        def _cleanup() -> Any:
-            if getattr(_cleanup, "_spent", False):
-                return None
-            # The spent flag must live on the disposer itself so a
-            # parent effect wrapper can see a manual dispose.
-            setattr(_cleanup, "_spent", True)  # noqa: B010
-            if fiber is not None and _cleanup in fiber.effects:
-                fiber.effects.remove(_cleanup)
-            if callable(disposer):
-                res = disposer()
-                return res
+        def collect(item: Any) -> None:
+            if item is None:
+                return
+            if callable(item):
+                item_meta = getattr(item, symbols["effect"], None)
+                if item_meta is not None:
+                    if item in fiber.effects:
+                        fiber.effects.remove(item)
+                    meta["children"].append(item_meta)
+                disposables.append(item)
+                return
+            if isinstance(item, Iterable) and not isinstance(
+                item, (str, bytes, bytearray)
+            ):
+                for sub in item:
+                    collect(sub)
+                return
+            raise TypeError("Invalid effect")
+
+        def run_disposers() -> Any:
+            items = list(reversed(disposables))
+            disposables.clear()
+            for index, item in enumerate(items):
+                res = item()
+                if inspect.isawaitable(res):
+
+                    async def chain(res: Any = res, start: int = index + 1) -> None:
+                        await res
+                        for rest in items[start:]:
+                            res_rest = rest()
+                            if inspect.isawaitable(res_rest):
+                                await res_rest
+
+                    return chain()
             return None
 
+        async def awaitable_effect(result: Any) -> None:
+            collect(await result)
+
+        async def async_iterable_effect(result: AsyncIterable[Any]) -> None:
+            epoch = fiber._getCurrentEpoch()
+            iterator = result.__aiter__()
+            try:
+                while True:
+                    if fiber._getCurrentEpoch() != epoch:
+                        break
+                    try:
+                        item = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    if fiber._getCurrentEpoch() != epoch:
+                        break
+                    collect(item)
+            finally:
+                aclose = getattr(iterator, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+
+        def start(coro: Any) -> Any:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(coro)
+            task = loop.create_task(coro)
+
+            def report(done: Any) -> None:
+                if not done.cancelled():
+                    error = done.exception()
+                    if error is not None:
+                        logger.exception(
+                            "Effect %s collection failed", label, exc_info=error
+                        )
+
+            task.add_done_callback(report)
+            return task
+
+        result = func()
+        if inspect.isawaitable(result):
+            state["task"] = start(awaitable_effect(result))
+        elif isinstance(result, AsyncIterable):
+            state["task"] = start(async_iterable_effect(result))
+        else:
+            collect(result)
+
+        def _cleanup() -> Any:
+            if not state["armed"]:
+                return None
+            state["armed"] = False
+            setattr(_cleanup, "_spent", True)  # noqa: B010
+            if _cleanup in fiber.effects:
+                fiber.effects.remove(_cleanup)
+            task = state["task"]
+            if task is not None and not task.done():
+
+                async def after_collection() -> Any:
+                    try:
+                        await task
+                    except Exception:
+                        logger.exception("Effect %s collection failed", label)
+                    return run_disposers()
+
+                return after_collection()
+            if task is not None and task.exception() is not None:
+                logger.exception(
+                    "Effect %s collection failed",
+                    label,
+                    exc_info=task.exception(),
+                )
+            return run_disposers()
+
         setattr(_cleanup, symbols["effect"], meta)
-        if callable(disposer) and fiber is not None:
-            fiber.effects.append(_cleanup)
+        fiber.effects.append(_cleanup)
 
         return _cleanup
 

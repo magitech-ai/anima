@@ -126,7 +126,7 @@ async def test_parallel_aggregates_multiple_failures():
 
 
 @pytest.mark.asyncio
-async def test_parallel_single_failure_keeps_concrete_exception_type():
+async def test_parallel_single_failure_is_aggregated_rc13():
     bus = EventBus()
     error = RuntimeError("only-one")
     completed = []
@@ -141,12 +141,13 @@ async def test_parallel_single_failure_keeps_concrete_exception_type():
     bus.on("one", raises_sync)
     bus.on("one", ok)
 
-    # Backwards compatible: one failure re-raises the original exception object,
-    # even though the sibling is still awaited to completion.
-    with pytest.raises(RuntimeError) as excinfo:
+    # rc.13: `parallel` throws AggregateError on any failure, including one.
+    # Python's equivalent is ExceptionGroup with a single member. The sibling
+    # is still awaited to completion.
+    with pytest.raises(ExceptionGroup) as excinfo:
         await bus.parallel("one", 1)
 
-    assert excinfo.value is error
+    assert excinfo.value.exceptions == (error,)
     assert completed == ["ok"]
     assert any("parallel listener" in n for n in error.__notes__)
 
