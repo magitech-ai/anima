@@ -1723,6 +1723,20 @@ async def test_include_on_internal_update_sync_next_fn(
 
 
 @pytest.mark.asyncio
+async def test_include_on_internal_update_async_next_fn_is_awaited(
+    tmp_path: Path, mod: Any
+) -> None:
+    """A foreign config delegates to an async next_fn and awaits it."""
+    _ctx, _loader, _inc_id, _entry, inc = await _boot(tmp_path, _rows(1))
+
+    async def async_next(config: Any) -> str:
+        return "async_done"
+
+    result = await inc._on_internal_update({"path": "foreign.yaml"}, async_next)
+    assert result == "async_done"
+
+
+@pytest.mark.asyncio
 async def test_include_on_internal_update_without_next_fn_is_noop(
     tmp_path: Path, mod: Any
 ) -> None:

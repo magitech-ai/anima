@@ -691,6 +691,7 @@ class Fiber:
             "internal/update",
             resolved,
             default_handler=_default,
+            owner=self,
         )
 
     def status(self) -> dict[str, Any]:
@@ -1847,7 +1848,13 @@ class Context:
     ) -> Disposer:
         """Register an event listener as an effect."""
         disposer = self._event_bus.on(
-            event, callback, mode=mode, prepend=prepend, ctx=self, global_=global_
+            event,
+            callback,
+            mode=mode,
+            prepend=prepend,
+            ctx=self,
+            global_=global_,
+            owner=self.fiber if event == "internal/update" and not global_ else None,
         )
         self.effect(lambda: disposer, label=f'ctx.on("{event}")')
         return disposer
@@ -1890,11 +1897,17 @@ class Context:
         event: str,
         *args: Any,
         default_handler: Callable[..., Any] | None = None,
+        owner: Any = None,
         **kwargs: Any,
     ) -> Any:
         """Around-middleware pipeline passing (*args, next)."""
         return await self._event_bus.waterfall(
-            event, *args, this_arg=self, default_handler=default_handler, **kwargs
+            event,
+            *args,
+            this_arg=self,
+            default_handler=default_handler,
+            owner=owner,
+            **kwargs,
         )
 
     def isolate(self, service_name: str, label: Any | None = None) -> Context:

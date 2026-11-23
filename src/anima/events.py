@@ -107,7 +107,9 @@ class Listener:
         prepend: bool = False,
         ctx: Any | None = None,
         global_: bool = False,
+        owner: Any | None = None,
     ):
+        self.owner = owner
         self.event = event
         self.callback = callback
         self.mode = mode
@@ -156,8 +158,20 @@ class EventBus:
     def __init__(self) -> None:
         self._listeners: dict[str, list[Listener]] = {}
 
-    def _filter_listeners(self, event: str, this_arg: Any = None) -> list[Listener]:
+    def _filter_listeners(
+        self, event: str, this_arg: Any = None, owner: Any = None
+    ) -> list[Listener]:
         listeners = list(self._listeners.get(event, []))
+        if event == "internal/update" and owner is not None:
+            # rc.13 routes non-global internal/update listeners into the
+            # registering fiber's hook list (events.ts:54-79). The owner is
+            # passed explicitly by Fiber.update(), since the ambient fiber may
+            # belong to the caller of a nested update.
+            listeners = [
+                listener
+                for listener in listeners
+                if listener.global_ or listener.owner is None or listener.owner is owner
+            ]
         if this_arg is None or not hasattr(this_arg, "match"):
             return listeners
         filtered: list[Listener] = []
@@ -175,6 +189,7 @@ class EventBus:
         prepend: bool = False,
         ctx: Any | None = None,
         global_: bool = False,
+        owner: Any | None = None,
     ) -> Disposer:
         """Register an event listener. Returns a disposer function."""
         listener = Listener(
@@ -184,6 +199,7 @@ class EventBus:
             prepend=prepend,
             ctx=ctx,
             global_=global_,
+            owner=owner,
         )
         if event not in self._listeners:
             self._listeners[event] = []
@@ -388,6 +404,7 @@ class EventBus:
         *args: Any,
         this_arg: Any = None,
         default_handler: Callable[..., Any] | None = None,
+        owner: Any = None,
         **kwargs: Any,
     ) -> Any:
         """Around-middleware pipeline.
@@ -396,7 +413,7 @@ class EventBus:
         Calling `await next(*args)` passes control down the chain.
         Returning without calling `next()` short-circuits.
         """
-        listeners = self._filter_listeners(event, this_arg)
+        listeners = self._filter_listeners(event, this_arg, owner)
 
         async def dispatch(
             index: int, *current_args: Any, **current_kwargs: Any

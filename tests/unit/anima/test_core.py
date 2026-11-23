@@ -998,7 +998,14 @@ async def test_fiber_restart_and_update():
         received_updates.append(cfg["val"])
         # Return without next_fn to accept in-place
 
-    ctx.on("internal/update", update_interceptor, mode=EventMode.WATERFALL)
+    # rc.13 scopes internal/update to the registering fiber; a context-wide
+    # interceptor must be marked global.
+    ctx.on(
+        "internal/update",
+        update_interceptor,
+        mode=EventMode.WATERFALL,
+        global_=True,
+    )
 
     committed = []
     ctx.on("internal/commit", lambda f, cfg: committed.append(cfg))

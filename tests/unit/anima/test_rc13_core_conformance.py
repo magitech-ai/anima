@@ -671,6 +671,35 @@ async def test_rc13_entry_exposes_inner_fiber_alias(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rc13_internal_update_listeners_are_fiber_scoped() -> None:
+    """A sibling fiber's config update does not reach this listener.
+
+    Upstream events.ts:54-79 routes non-global internal/update listeners into
+    the registering fiber's own hook list.
+    """
+    ctx = Context()
+    hits: list[str] = []
+
+    def component_a(c: Any) -> None:
+        c.on("internal/update", lambda _cfg: hits.append("a"), mode=EventMode.WATERFALL)
+
+    def component_b(c: Any) -> None:
+        c.on("internal/update", lambda _cfg: hits.append("b"), mode=EventMode.WATERFALL)
+
+    a = ctx.use(component_a)
+    b = ctx.use(component_b)
+    await ctx.flush()
+
+    await a.update({"v": 1})
+    await ctx.flush()
+    assert hits == ["a"]
+
+    await b.update({"v": 2})
+    await ctx.flush()
+    assert hits == ["a", "b"]
+
+
+@pytest.mark.asyncio
 async def test_rc13_fiber_state_unloading_exists() -> None:
     """rc.13 keeps the six fiber states, including UNLOADING (fiber.ts:90-97)."""
     assert {state.name for state in FiberState} == {
