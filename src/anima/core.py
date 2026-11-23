@@ -222,6 +222,7 @@ class Fiber:
         # drives a load only for a fiber that never attempted one, so a
         # fiber that deliberately settled to PENDING is not reloaded.
         self._load_attempted: bool = False
+        self._revision: int = 0
 
         # Read inject dependencies. Validation is lazy: it runs in _reload
         # at activation time, so a bad config leaves the fiber FAILED but
@@ -680,20 +681,37 @@ class Fiber:
             return
         raise TypeError("Invalid effect")
 
-    async def replace(self, new_target: Any) -> None:
-        """Replace component target and reload fiber with updated target."""
+    async def replace(
+        self,
+        new_target: Any,
+        runtime: Any = None,
+        inject: Any = None,
+        old_runtime: Any = None,
+    ) -> None:
+        """Replace component target in place and reload it.
+
+        Upstream fiber.ts:401-416 moves the fiber into the new component
+        runtime, emits internal/replace, re-checks its dependencies and
+        recomputes the epoch without a full restart.
+        """
         if self.state in (FiberState.UNLOADING, FiberState.DISPOSED):
             return
 
+        if runtime is not None and old_runtime is not runtime:
+            if old_runtime is not None and self in old_runtime.fibers:
+                old_runtime.fibers.remove(self)
+            runtime.fibers.append(self)
+            self.runtime = runtime
+
         self.target = new_target
-        # Upstream _replace() clears the failure before recomputing the target:
-        # a replacement is an explicit recovery, unlike a notification.
         self.error = None
         self.name = getattr(
             new_target, "name", getattr(new_target, "__name__", str(new_target))
         )
 
-        inject_decl = getattr(new_target, "inject", None)
+        inject_decl = (
+            inject if inject is not None else getattr(new_target, "inject", None)
+        )
         if isinstance(inject_decl, dict):
             self.inject = list(inject_decl.keys())
             self.inject_config = dict(inject_decl)
@@ -704,7 +722,16 @@ class Fiber:
             self.inject = []
             self.inject_config = getattr(new_target, "inject_config", None)
 
-        await self.restart()
+        self.ctx.emit("internal/replace", self)
+        self.store = {}
+        for name in self.inject:
+            self._checkImpl(name)
+        self._revision += 1
+        if runtime is not None:
+            self._refresh()
+            await self.await_settle()
+        else:
+            await self.restart()
 
     async def update(self, config: Any, no_save: bool = False) -> None:
         """Update component configuration with live lifecycle hooks.

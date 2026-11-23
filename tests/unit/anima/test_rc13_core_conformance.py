@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from anima import Context, FiberState, FsService, LoaderService, Service
+from anima.core import Fiber
 from anima.events import EventBus, EventMode
 
 
@@ -1217,6 +1218,188 @@ async def test_rc13_hmr_start_tolerates_sync_watch(tmp_path: Any) -> None:
         hmr.stop()
     finally:
         ctx.fs.watch = monkeypatched  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_rc13_timer_mixin_and_aliases() -> None:
+    """rc.13 mixes timer methods onto the context and keeps deprecated aliases."""
+    from anima.timer import TimerService
+
+    ctx = Context()
+    ctx.use(TimerService)
+    await ctx.flush()
+    for name in (
+        "timeout",
+        "interval",
+        "throttle",
+        "debounce",
+        "setTimeout",
+        "setInterval",
+    ):
+        assert callable(getattr(ctx, name))
+    calls: list[int] = []
+    dispose = ctx.setTimeout(lambda: calls.append(1), 0.001)
+    await asyncio.sleep(0.1)
+    dispose()
+    assert calls == [1]
+    dispose_interval = ctx.setInterval(lambda: calls.append(2), 0.001)
+    await asyncio.sleep(0.1)
+    dispose_interval()
+    assert 2 in calls
+
+
+@pytest.mark.asyncio
+async def test_rc13_timer_interval_async_iterator() -> None:
+    """interval(delay) with no callback yields on each tick and can be closed."""
+    from anima.timer import TimerService
+
+    ctx = Context()
+    ctx.use(TimerService)
+    await ctx.flush()
+
+    iterator = ctx.timer.interval(0.001).__aiter__()
+    first = await asyncio.wait_for(iterator.__anext__(), timeout=0.5)
+    second = await asyncio.wait_for(iterator.__anext__(), timeout=0.5)
+    assert first is None and second is None
+    await iterator.aclose()
+    with pytest.raises(StopAsyncIteration):
+        await iterator.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_rc13_timer_interval_rejects_on_dispose() -> None:
+    """A pending async interval tick fails when its context unloads."""
+    from anima.timer import TimerService
+
+    ctx = Context()
+    fiber = ctx.use(TimerService)
+    await ctx.flush()
+    iterator = ctx.timer.interval(1.0).__aiter__()
+    pending = asyncio.ensure_future(iterator.__anext__())
+    await asyncio.sleep(0)
+    await fiber.dispose()
+    with pytest.raises(RuntimeError, match="disposed"):
+        await pending
+
+
+@pytest.mark.asyncio
+async def test_rc13_registry_replace_moves_fiber_and_emits(
+    monkeypatch: Any,
+) -> None:
+    """A replaced fiber moves to the new runtime and emits internal/replace."""
+    module = types.ModuleType("rc13_replace_mod")
+
+    def first(_c: Any, config: Any = None) -> None:
+        return None
+
+    def second(_c: Any, config: Any = None) -> None:
+        return None
+
+    module.first = first
+    module.second = second
+    monkeypatch.setitem(sys.modules, "rc13_replace_mod", module)
+
+    ctx = Context()
+    seen: list[Fiber] = []
+    ctx.on("internal/replace", seen.append, mode=EventMode.EMIT)
+    fiber = ctx.use(first)
+    await ctx.flush()
+
+    fibers = ctx.registry.replace(first, second)
+    await ctx.flush()
+    assert fibers == [fiber]
+    assert seen == [fiber]
+    runtime = ctx.registry.get(second)
+    assert runtime is not None
+    assert fiber in runtime.fibers
+    assert fiber.target is second
+
+
+@pytest.mark.asyncio
+async def test_rc13_timer_interval_edge_paths() -> None:
+    """Iterator cleanup paths: double close, throw, and cancelled waiters."""
+    from anima.timer import TimerService
+
+    ctx = Context()
+    ctx.use(TimerService)
+    await ctx.flush()
+    iterator = ctx.timer.interval(0.001)
+    pending = asyncio.ensure_future(iterator.__anext__())
+    await asyncio.sleep(0)
+    iterator._pending[0].cancel()  # a tick resolves an already-done future
+    await asyncio.sleep(0.01)
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await iterator.aclose()
+    await iterator.aclose()
+    with pytest.raises(StopAsyncIteration):
+        await iterator.athrow(ValueError("stop"))
+
+    other = ctx.timer.interval(0.001)
+    waiter = asyncio.ensure_future(other.__anext__())
+    await asyncio.sleep(0)
+    other._pending[0].set_result(None)  # already done while stopping
+    await other.aclose()
+    await waiter
+    with pytest.raises(StopAsyncIteration):
+        await other.__anext__()
+    other._stop(ValueError("ignored"))  # already stopped: idempotent
+    with pytest.raises(StopAsyncIteration):
+        await other.athrow(ValueError("ignored"))
+
+    closing = ctx.timer.interval(0.001)
+    pending_close = asyncio.ensure_future(closing.__anext__())
+    await asyncio.sleep(0)
+    await closing.aclose()  # stops a pending, not-yet-done waiter
+    with pytest.raises(StopAsyncIteration):
+        await pending_close
+
+    thrown = ctx.timer.interval(0.001)
+    with pytest.raises(StopAsyncIteration):
+        await thrown.athrow(ValueError("stop"))
+
+    idle = ctx.timer.interval(0.001)
+    idle._emit_tick()  # a tick with no waiters is a no-op
+    await idle.aclose()
+
+    disposed = ctx.timer.interval(0.001)
+    service_fiber = ctx.fiber
+    await service_fiber.dispose()
+    with pytest.raises(RuntimeError, match="disposed"):
+        await disposed.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_rc13_hmr_cancelled_debounce_returns(tmp_path: Any) -> None:
+    """A cancelled debounce timer exits without starting a reload."""
+    ctx = Context()
+    from anima.fs import FsService
+    from anima.hmr import HmrService
+
+    ctx.use(FsService)
+    await ctx.flush()
+    hmr = HmrService(ctx, {"root": str(tmp_path)})
+    task = asyncio.ensure_future(hmr._debounced_reload())
+    await asyncio.sleep(0)
+    task.cancel()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_rc13_replace_without_old_runtime_membership() -> None:
+    """A fiber not listed in the old runtime still joins the new one."""
+    ctx = Context()
+    first = ctx.use(lambda c: None)
+    await ctx.flush()
+    old_runtime = ctx.registry.get(first.target)
+    second = ctx.use(lambda c: None)
+    await ctx.flush()
+    new_runtime = ctx.registry.get(second.target)
+    if old_runtime is not None:
+        old_runtime.fibers.clear()
+    assert new_runtime is not None
+    await first.replace(new_runtime.callback, new_runtime, old_runtime=old_runtime)
+    assert first in new_runtime.fibers
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from anima.core import Context, Service
+from anima.core import Context, Fiber, Service
 from anima.events import Disposer
 
 
@@ -30,12 +30,100 @@ class Scheduled[F: Callable[..., Any]]:
         self._disposer()
 
 
+class _AsyncInterval:
+    """Async iterator over timer ticks, bound to a context's lifecycle."""
+
+    def __init__(self, fiber: Fiber, delay: float) -> None:
+        self._delay = delay
+        self._pending: list[asyncio.Future[None]] = []
+        self._done = False
+        self._reason: BaseException | None = None
+        self._task = asyncio.get_running_loop().create_task(self._ticks())
+        # Bind to the service's own fiber so disposing the service stops the
+        # ticks even when interval() is called from another context.
+        self._disposer = fiber.effect(
+            lambda: lambda: self._stop(RuntimeError("Context has been disposed"))
+        )
+
+    async def _ticks(self) -> None:
+        while True:
+            await asyncio.sleep(self._delay)
+            self._emit_tick()
+
+    def _emit_tick(self) -> None:
+        if self._pending:
+            future = self._pending.pop(0)
+            if not future.done():
+                future.set_result(None)
+
+    def _stop(self, reason: BaseException | None = None) -> None:
+        if self._done:
+            return
+        self._done = True
+        self._reason = reason
+        self._task.cancel()
+        for future in self._pending:
+            if future.done():
+                continue
+            if reason is None:
+                future.set_exception(StopAsyncIteration())
+            else:
+                future.set_exception(reason)
+        self._pending.clear()
+
+    def __aiter__(self) -> _AsyncInterval:
+        return self
+
+    async def __anext__(self) -> None:
+        if self._reason is not None:
+            raise self._reason
+        if self._done:
+            raise StopAsyncIteration
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._pending.append(future)
+        await future
+
+    async def aclose(self) -> None:
+        if self._done:
+            return
+        self._stop()
+
+    async def athrow(self, error: BaseException) -> None:
+        if self._done:
+            raise StopAsyncIteration
+        self._stop(error)
+        raise StopAsyncIteration
+
+
 class TimerService(Service):
     """Contextual timer service providing lifecycle-bound scheduling primitives."""
 
     def __init__(self, ctx: Context) -> None:
         super().__init__(ctx, "timer")
+        self._own_fiber = ctx.fiber
         self._active_tasks: set[asyncio.Task[Any]] = set()
+        # Upstream packages/timer/src/index.ts:14 mixes these methods onto
+        # the context so components can call ctx.interval() directly.
+        ctx.mixin(
+            "timer",
+            [
+                "timeout",
+                "interval",
+                "throttle",
+                "debounce",
+                "setTimeout",
+                "setInterval",
+            ],
+        )
+
+    def setTimeout(self, callback: Callable[..., Any], delay: float) -> Any:
+        """Deprecated alias for timeout() (upstream timer.ts:17-20)."""
+        result: Any = self.timeout(callback, delay)
+        return result
+
+    def setInterval(self, callback: Callable[..., Any], delay: float) -> Any:
+        """Deprecated alias for interval() (upstream timer.ts:22-25)."""
+        return self.interval(callback, delay)
 
     def timeout(
         self,
@@ -101,11 +189,19 @@ class TimerService(Service):
 
     def interval(
         self,
-        callback: Callable[..., Any],
-        delay: float,
-    ) -> Disposer:
-        """Repeatedly invoke a callback every delay seconds until disposed."""
-        d = float(delay)
+        callback_or_delay: Callable[..., Any] | float,
+        delay: float | None = None,
+    ) -> Any:
+        """Invoke a callback every delay seconds, or yield ticks when called with only a delay.
+
+        Upstream timer.ts:54-104 overloads `interval`: with a callback it
+        returns a disposer; with only a delay it returns an async iterator
+        whose ticks stop when the owning context is disposed.
+        """
+        if not callable(callback_or_delay):
+            return _AsyncInterval(self._own_fiber, float(callback_or_delay))
+        callback = callback_or_delay
+        d = float(delay if delay is not None else 0.0)
 
         async def _loop() -> None:
             while True:
