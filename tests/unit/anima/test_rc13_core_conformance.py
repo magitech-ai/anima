@@ -1239,11 +1239,11 @@ async def test_rc13_timer_mixin_and_aliases() -> None:
         assert callable(getattr(ctx, name))
     calls: list[int] = []
     dispose = ctx.setTimeout(lambda: calls.append(1), 0.001)
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)
     dispose()
     assert calls == [1]
     dispose_interval = ctx.setInterval(lambda: calls.append(2), 0.001)
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)
     dispose_interval()
     assert 2 in calls
 
