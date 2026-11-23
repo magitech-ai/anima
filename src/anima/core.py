@@ -1627,9 +1627,7 @@ class Context:
 
         # Check pending fibers across this context and children; a global
         # realm can have dependents in sibling contexts (paper Algorithm 7).
-        candidates = (
-            self.root.all_fibers() if key is not None else list(self._fibers)
-        )
+        candidates = self.root.all_fibers() if key is not None else list(self._fibers)
         scheduler = self.root if key is not None else self
         for fiber in candidates:
             if fiber.state == FiberState.PENDING and fiber.check_dependencies():
