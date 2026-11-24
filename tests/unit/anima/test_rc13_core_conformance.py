@@ -1413,3 +1413,10 @@ async def test_rc13_fiber_state_unloading_exists() -> None:
         "UNLOADING",
         "DISPOSED",
     }
+
+
+def test_context_is_brand_check() -> None:
+    """Context.is_ uses the symbol brand, not inheritance or duck typing."""
+    ctx = Context()
+    assert Context.is_(ctx) is True
+    assert Context.is_(object()) is False

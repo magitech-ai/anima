@@ -2,12 +2,8 @@
 Anima: The Composable Micro-Kernel by Magitech.
 """
 
-__version__ = "0.3.0"
+__version__ = "1.0.0"
 
-import importlib
-from typing import Any
-
-from anima.cli_env import CliEnv
 from anima.core import Context, Fiber, FiberState, Service, inject
 from anima.events import DisposableList, Disposer, EventBus, EventMode, is_bailed
 from anima.fs import (
@@ -29,7 +25,6 @@ from anima.hmr import (
     SkipReason,
     handle_error,
 )
-from anima.http import HttpConfig, HttpError, HttpRequest, HttpResponse, HttpService
 from anima.include import (
     Conflict,
     EntryOwner,
@@ -75,7 +70,6 @@ from anima.logger import (
 from anima.reflect import ReflectService
 from anima.registry import Inject, RegistryService, resolve_inject
 from anima.schema import Schema, SchemaError, ValidationError, z
-from anima.server import Route, ServerRequest, ServerResponse, ServerService, WebSocket
 from anima.timer import Scheduled, TimerService
 from anima.tree import Entry, EntryChange, EntryGroup, EntryOptions, EntryTree, Group
 from anima.utils import (
@@ -93,32 +87,10 @@ from anima.utils import (
     value_map,
 )
 
-# CLI symbols resolve lazily: importing anima.cli eagerly puts it in
-# sys.modules before `python -m anima.cli` executes it, which triggers a
-# RuntimeWarning about the double import.
-_LAZY_CLI_EXPORTS = {
-    "CliCommand": "anima.cli",
-    "CliService": "anima.cli",
-    "CliSyntaxError": "anima.cli",
-}
-
-
-def __getattr__(name: str) -> Any:
-    """Lazily resolve CLI exports (PEP 562)."""
-    if name in _LAZY_CLI_EXPORTS:
-        module = importlib.import_module(_LAZY_CLI_EXPORTS[name])
-        return getattr(module, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 __all__ = [
     "Abort",
     "BaseFs",
     "Binary",
-    "CliCommand",
-    "CliEnv",
-    "CliService",
-    "CliSyntaxError",
     "Conflict",
     "ConsoleExporter",
     "Context",
@@ -142,11 +114,6 @@ __all__ = [
     "FsService",
     "Group",
     "HmrService",
-    "HttpConfig",
-    "HttpError",
-    "HttpRequest",
-    "HttpResponse",
-    "HttpService",
     "Include",
     "IncludeError",
     "Inject",
@@ -166,13 +133,9 @@ __all__ = [
     "ReflectService",
     "RegistryService",
     "Reload",
-    "Route",
     "Scheduled",
     "Schema",
     "SchemaError",
-    "ServerRequest",
-    "ServerResponse",
-    "ServerService",
     "Service",
     "Skip",
     "SkipReason",
@@ -182,7 +145,6 @@ __all__ = [
     "ValidationError",
     "WatchOptions",
     "Watcher",
-    "WebSocket",
     "apply_changes",
     "apply_entry_patches",
     "apply_journal",

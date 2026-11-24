@@ -1,31 +1,31 @@
 # Parity
 
-## Current port target
+## Completed conformance milestone (historical record)
 
-Anima's port target is **canonical Cordis `v4.0.0-rc.13`** (`cordiverse/cordis`,
-commit `bc9fae7`, published 2026-11-12), with the paper
-["A Programming Paradigm for Spatiotemporal Composability"](https://arxiv.org/abs/2608.25512)
-as the theory reference. This supersedes the former rc.1 pin by decision
-[ADR 0013](docs/adr/0013-rc13-port-target.md), dated 2026-11-23. DeepSeek
-Harness at `fcc0ad46` (`dsh v0.2.2-rc.1`) remains historical provenance and a
-harness conformance source, not the port target.
+Anima completed its conformance milestone against canonical Cordis
+`v4.0.0-rc.13` (`cordiverse/cordis`, commit `bc9fae7`, published 2026-11-12),
+with the paper ["A Programming Paradigm for Spatiotemporal Composability"](https://arxiv.org/abs/2608.25512)
+as the theory reference. The decision and its ratification are recorded in
+[ADR 0013](docs/adr/0013-rc13-port-target.md) and
+[ADR 0015](docs/adr/0015-rc13-target-ratification.md). DeepSeek Harness at
+`fcc0ad46` (`dsh v0.2.2-rc.1`) remains historical provenance.
 
-The 1.0 gate recorded in `magitech-harness/PARITY.md` was a verdict against the
-frozen rc.1 target. It is **not** a claim of parity with rc.13 and is not
-reused here.
+Anima is now an independent project (ADR 0017). This map is evidence of a
+completed milestone, not a forward-looking pin or roadmap: no future Cordis
+release is a target.
 
-## Verified baseline at this target (2026-11-23)
+## Verified baseline at 1.0.0 (2026-11-24)
 
-- `uv run pytest`: 1328 passed, 100% statement and branch coverage.
+- `uv run pytest`: 1148 passed, 100% statement and branch coverage.
 - `uv run ruff check src tests`, `uv run ruff format --check src tests`,
   `uv run python -m mypy src`: green.
 - `filterwarnings = ["error", "ignore::ResourceWarning"]` is configured, so
   unawaited coroutines and other unexpected warnings fail the suite.
-- 66 executable rc.13 core conformance probes live in
+- 67 executable rc.13 core conformance probes live in
   `tests/unit/anima/test_rc13_core_conformance.py`. Each cites the upstream
   `file:line` it validates.
 
-Items proven against rc.13 so far:
+Items proven against rc.13:
 
 | Item | Verdict | Evidence |
 |---|---|---|
@@ -73,9 +73,12 @@ not substitutes for that evidence.
 | Timer async-iterator interval, aliases and context mixin | DONE | `TimerService.interval(delay)` async iterator, `setTimeout`/`setInterval`, `ctx.mixin("timer", ...)`; probes (upstream `packages/timer/src/index.ts:4-25,54-104`) |
 | Registry replace: runtime move + `internal/replace` | DONE | `Fiber.replace` moves the fiber into the new runtime, emits `internal/replace` and re-checks deps (upstream `core/src/fiber.ts:401-416`, `events.ts:214`) |
 
-The DSH-fork extension set was deleted by user decision (ADR 0016). Magitech
-originals marked `†` in the README remain but were never claimed as Cordis
-parity. The port target and divergence policy were ratified in ADR 0015.
+The DSH-fork extension set was deleted by user decision (ADR 0016). The
+Magitech-original CLI/server/HTTP surfaces were removed before 1.0.0 by user
+decision (ADR 0018); they were never Cordis parity items. The rc.13 target and
+divergence policy were ratified in ADR 0015; Anima's independence and 1.0
+contract are recorded in ADR 0017. This map is a completed historical
+conformance record, not a forward-looking roadmap.
 
 ## Ratified decisions
 

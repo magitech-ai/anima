@@ -61,15 +61,12 @@ import yaml
 
 import anima
 from anima import (
-    CliEnv,
     Context,
     FiberState,
     Service,
     core,
     utils,
 )
-from anima.cli import console_main
-from anima.cli_create import Scaffold
 from anima.core import (
     FIBER_STATE_WIRE_VALUES,
     AnimaError,
@@ -4017,18 +4014,6 @@ def test_conformance_l17_unwrap_exports_home() -> None:
 # module docstring (audit §3.6).
 _ORIGINAL_LABEL = "Anima-original surface: not part of the ported kernel."
 
-_ORIGINAL_MODULES = [
-    "server_echo",
-    "server_acl",
-    "server_proxy",
-    "server_static",
-    "http_socks",
-    "server",
-    "http",
-    "cli",
-    "cli_env",
-]
-
 
 def _repo_root() -> Path:
     """Return the anima repo root (two levels above this file)."""
@@ -4400,53 +4385,6 @@ def test_conformance_u_loader_utils_deleted() -> None:
     if readme.exists() and "loader_utils" in readme.read_text(encoding="utf-8"):
         hits.append("README.md")
     assert hits == []
-
-
-def test_conformance_u_create_subcommand_via_console_main(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``create [name]`` is reachable through the real CLI entry point.
-
-    The subcommand is registered as ``create [name:string]`` with
-    default name ``my-app`` (cli.py), and the console script maps to
-    ``console_main`` (pyproject). The scaffold's network-bound start
-    is stubbed at the boundary — the wiring under test is entry point
-    to action dispatch, not the download.
-    """
-    calls: list[dict[str, Any]] = []
-
-    def fake_start(self: Scaffold, prompt: Any = input) -> None:
-        calls.append(dict(self.options))
-
-    monkeypatch.setattr(Scaffold, "start", fake_start)
-
-    monkeypatch.setattr(sys, "argv", ["anima", "create"])
-    assert console_main() == 0
-    assert calls == [{"name": "my-app"}]
-
-    calls.clear()
-    monkeypatch.setattr(sys, "argv", ["anima", "create", "demo-app"])
-    assert console_main() == 0
-    assert calls == [{"name": "demo-app"}]
-
-
-def test_conformance_u_cli_env_public_surface() -> None:
-    """``cli_env`` is kept as public surface, exported from the package."""
-    assert CliEnv is importlib.import_module("anima.cli_env").CliEnv
-    assert "CliEnv" in anima.__all__
-    assert CliEnv.name == "cli:env"
-
-
-@pytest.mark.parametrize("module_name", _ORIGINAL_MODULES)
-def test_conformance_u_original_surface_labels(module_name: str) -> None:
-    """Each anima-original module labels itself in its module docstring.
-
-    The label is the observable contract for the §3.6 decision: these
-    modules are anima-original surface, not part of the ported kernel.
-    """
-    module = importlib.import_module(f"anima.{module_name}")
-    assert module.__doc__ is not None
-    assert _ORIGINAL_LABEL in module.__doc__
 
 
 @pytest.mark.asyncio
