@@ -401,7 +401,11 @@ def test_number_coercion(monkeypatch: pytest.MonkeyPatch) -> None:
     assert evaluate(ctx, "Number('')") == 0
     assert evaluate(ctx, "Number('  12  ')") == 12
     assert evaluate(ctx, "Number('0x10')") == 16
-    assert evaluate(ctx, "Number('-0x10')") == -16
+    # ES2023 7.1.4.1: signs are decimal-only, and binary/octal literals convert.
+    assert math.isnan(evaluate(ctx, "Number('-0x10')"))
+    assert evaluate(ctx, "Number('0b11')") == 3
+    assert evaluate(ctx, "Number('0o17')") == 15
+    assert math.isnan(evaluate(ctx, "Number('+0b11')"))
     assert evaluate(ctx, "Number('Infinity')") == math.inf
     assert evaluate(ctx, "Number('-Infinity')") == -math.inf
     assert math.isnan(evaluate(ctx, "Number('nope')"))
@@ -708,7 +712,7 @@ def test_js_number_and_string_helpers() -> None:
     assert _js_number(math.inf) == math.inf
     assert math.isnan(_js_number("0x"))
     assert _js_number("  ") == 0
-    assert _js_number("+0x1F") == 31
+    assert _js_number("+0x1F") != _js_number("+0x1F")  # NaN: signs are decimal-only
     assert math.isnan(_js_number([]))
     assert _js_string(0) == "0"
     assert _js_string(-1.5) == "-1.5"
