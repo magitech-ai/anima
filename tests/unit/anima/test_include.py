@@ -2361,3 +2361,61 @@ async def test_include_direct_construction_cannot_persist_patches(
     assert "cannot be persisted" in _logger_text(ctx)
     assert file.read_text(encoding="utf-8") == _rows(1)
     await inc.stop()
+
+
+@pytest.mark.asyncio
+async def test_rejected_direct_update_leaves_include_file_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A config the component refuses is never journaled into the include file.
+
+    ``internal/commit`` is what runs the loader's write-back: the entry options
+    take the new config and the journal rewrites the file the entries came
+    from. It used to fire before the update waterfall settled, so a restart that
+    raised still left the rejected value in the YAML for the next boot to read.
+    """
+    module = types.ModuleType("reject_inc_mod")
+
+    class Reject:
+        def __init__(self, ctx: Context, config: Any = None) -> None:
+            if dict(config or {}).get("reject"):
+                raise RuntimeError("refuses this config")
+
+    module.Reject = Reject
+    monkeypatch.setitem(sys.modules, "reject_inc_mod", module)
+
+    content = "- name: reject_inc_mod:Reject\n  id: e0\n  config:\n    level: 1\n"
+    _ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, content)
+    file = tmp_path / "cfg.yaml"
+    before = file.read_text(encoding="utf-8")
+
+    fiber = loader.resolve(f"{inc_id}:e0").fiber
+    assert fiber is not None
+    assert fiber.state is FiberState.ACTIVE
+    with pytest.raises(RuntimeError, match="refuses this config"):
+        await fiber.update({"reject": True})
+    await _settle(inc, loader)
+
+    assert loader.resolve(f"{inc_id}:e0").options["config"] == {"level": 1}
+    assert fiber.state is FiberState.FAILED
+    assert file.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_accepted_direct_update_rewrites_include_file(
+    tmp_path: Path, mod: Any
+) -> None:
+    """Control for the rejected case: an accepted update does reach the file."""
+    _ctx, loader, inc_id, _entry, inc = await _boot(tmp_path, _rows(1))
+    file = tmp_path / "cfg.yaml"
+    before = file.read_text(encoding="utf-8")
+
+    fiber = loader.resolve(f"{inc_id}:e0").fiber
+    assert fiber is not None
+    await fiber.update({"level": 2})
+    await _settle(inc, loader)
+
+    assert loader.resolve(f"{inc_id}:e0").options["config"] == {"level": 2}
+    after = file.read_text(encoding="utf-8")
+    assert after != before
+    assert "level: 2" in after

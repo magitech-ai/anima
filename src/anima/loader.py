@@ -179,6 +179,7 @@ class LoaderService(Service, EntryTree):
             self.ctx.baseUrl = cfg["baseUrl"]
         # 3. Hooks, registered on the ORIGINAL ctx.
         ctx.on("internal/commit", self._on_commit)
+        ctx.on("internal/commit-rollback", self._on_commit_rollback)
         ctx.on(
             "internal/config",
             self._on_internal_config,
@@ -383,6 +384,26 @@ class LoaderService(Service, EntryTree):
         )
         entry.parent.tree.write()
         self.show_log(entry, "reload")
+
+    def _on_commit_rollback(self, fiber: Fiber, options: dict[str, Any]) -> None:
+        """Restore an entry's options after an update that never applied."""
+        entry = fiber.entry
+        if entry is None:  # pragma: no cover - only emitted for entry fibers
+            return
+        legacy = dict(entry.options)
+        for key in list(entry.options):
+            if key not in options:
+                del entry.options[key]
+        entry.options.update(options)
+        entry.parent.tree.commit(
+            EntryChange(
+                id=entry.options["id"],
+                group=entry.parent,
+                options=entry.options,
+                legacy=legacy,
+            )
+        )
+        entry.parent.tree.write()
 
     async def _on_patch_context(self, entry: Entry, next_fn: Any) -> Any:
         """Apply an entry's isolate/intercept options, then delegate down the chain."""

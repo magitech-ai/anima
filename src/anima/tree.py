@@ -692,10 +692,34 @@ class Entry:
                 # The outer guard above already guarantees a live fiber.
                 old = self.fiber
                 assert old is not None
+                if "name" in changes:
+                    # Pre-flight the new component before tearing down the old
+                    # fiber. A row that cannot import/validate its component is
+                    # restored to the name that is actually running.
+                    try:
+                        namespace = self.parent.tree.import_(
+                            self.options["name"], self.get_outer_stack()
+                        )
+                        self.loader.unwrap_exports(namespace)
+                        await old.resolve_config(self.options.get("config"))
+                    except Exception:
+                        self.options["name"] = legacy.get("name")
+                        self.parent.tree.commit(
+                            EntryChange(
+                                id=self.options["id"],
+                                group=self.parent,
+                                options=self.options,
+                                legacy=legacy,
+                            )
+                        )
+                        self.parent.tree.write()
+                        raise
                 self._loader_disposing = True
                 self.fiber = None
                 await old.dispose()
                 await self.init()
+                assert self.fiber is not None
+                await self.fiber.await_settle()
                 return
 
             pending = changes

@@ -71,6 +71,15 @@ _access_context: ContextVar[Context | None] = ContextVar(
     "_access_context", default=None
 )
 
+# ids of fibers whose update() is in flight on this task chain. ContextVars
+# are copied into tasks spawned from the owner, so a listener that reaches
+# update() on the same fiber through create_task/gather/ensure_future is
+# still recognised as reentry; comparing against the holding Task (the old
+# _update_owner) missed exactly those and deadlocked on our own lock.
+_updating_fibers: ContextVar[frozenset[int]] = ContextVar(
+    "_updating_fibers", default=frozenset()
+)
+
 
 def _schedule_cleanup(coro: Any) -> None:
     """Schedule error logging for a fire-and-forget cleanup coroutine.
@@ -190,6 +199,15 @@ class Fiber:
         self.child_fibers: list[Fiber] = []
         self.effects: list[Disposer] = []
         self._is_root = root
+        # update() is serialised per fiber: two concurrent calls otherwise
+        # interleave their waterfalls, and one restart tears the epoch down
+        # while the other is still resolving against it (assertActive fails
+        # with INACTIVE_EFFECT on a perfectly valid update). The lock is
+        # created on first use so a fiber built outside a running loop still
+        # works. Reentry is tracked with _updating_fibers (a ContextVar), not
+        # with the holding Task: a listener that spawns a task and awaits
+        # update() on the same fiber from it must not grab our own lock.
+        self._update_lock: asyncio.Lock | None = None
         self.uid: int | None
         self.state: FiberState
         self._runner_epoch: str
@@ -247,11 +265,7 @@ class Fiber:
         return schema
 
     def _validate_config_value(self, config: Any) -> Any:
-        """Validate a config value against the component's declared schema.
-
-        Synchronous validation used by _resolve_config at activation time.
-        Returns the validated config; raises on failure.
-        """
+        """Validate a config value against the component's declared schema."""
         config_schema = self.config_schema
         if config_schema is None:
             return config
@@ -273,6 +287,37 @@ class Fiber:
     def check_dependencies(self) -> bool:
         """Check if all required services exist on context."""
         return all(self.ctx.has(service) for service in self.inject)
+
+    @property
+    def declared_provides(self) -> list[str]:
+        """Service names this component declares it will provide.
+
+        A PENDING fiber has not run, so the name it registers through
+        ``Service.__init__`` is not in the registry yet. Only a declaration
+        on the component itself is readable before it runs: the ``provide``
+        class attribute (the name ``Service.__init__`` falls back to), an
+        explicit ``name`` class attribute, and optional
+        ``provides``/``services`` lists.
+
+        A component that passes its name to ``Service.__init__`` positionally
+        (``super().__init__(ctx, "timer")``, which is what the built-in
+        services do) declares nothing here. Callers must treat an empty list
+        as "provider unknown", never as "provides nothing".
+        """
+        declared = [self._safe_getattr_static(self.target, "provide")]
+        if isinstance(self.target, type) and "name" in vars(self.target):
+            # An explicit class-level name is the identity Fiber.name uses;
+            # an inherited one is not a declaration of what this serves.
+            declared.append(vars(self.target)["name"])
+        for attr in ("provides", "services"):
+            declared.append(self._safe_getattr_static(self.target, attr))
+        names: list[str] = []
+        for value in declared:
+            if isinstance(value, str):
+                names.append(value)
+            elif isinstance(value, Iterable):
+                names.extend(v for v in value if isinstance(v, str))
+        return names
 
     async def load(self) -> Any:
         """Mount and activate the component, joining any in-flight transition.
@@ -741,9 +786,43 @@ class Fiber:
         keeps its old config). On a non-ACTIVE fiber resolution is
         deferred: the error is cleared and the epoch machine drives a
         fresh activation, which validates then.
+
+        Calls are serialised: a concurrent update waits for the in-flight
+        one to finish instead of racing it. The slot is held across resolve,
+        commit, the ``internal/update`` waterfall and the restart — so one
+        slow listener on a fiber delays later updates to that fiber. That is
+        deliberate: the restart tears down the epoch the other call resolved
+        against. Reentry from inside an update is recognised across task
+        boundaries (a listener that spawns a task and awaits update() on the
+        same fiber joins the in-flight update rather than deadlocking on the
+        lock its ancestor holds).
         """
-        self.assertActive()
+        # Do not assert here: a concurrent update can arrive while a previous
+        # one's restart has the fiber in UNLOADING. The slot below serialises
+        # the calls and assertActive() is re-checked once the slot is ours.
+        in_flight = _updating_fibers.get()
+        if id(self) in in_flight:
+            await self._update_locked(config, no_save)
+            return
+        if self._update_lock is None:
+            self._update_lock = asyncio.Lock()
+        async with self._update_lock:
+            token = _updating_fibers.set(in_flight | {id(self)})
+            try:
+                # Re-check once the slot is ours: the fiber may have been
+                # disposed while this call was queued behind another update.
+                self.assertActive()
+                await self._update_locked(config, no_save)
+            finally:
+                _updating_fibers.reset(token)
+
+    async def _update_locked(self, config: Any, no_save: bool) -> None:
+        """Body of update(), run with the fiber's update slot held."""
         self.raw_config = dict(config) if isinstance(config, dict) else config
+        entry = self.entry
+        previous_config = self.config
+        previous_options = dict(entry.options) if entry is not None else None
+        applied = False
 
         # Upstream fiber.ts:540-542: persistence receives the raw input, on
         # every fiber, before resolution. Committing the resolved value would
@@ -760,16 +839,30 @@ class Fiber:
         resolved = await self._resolve_config(config)
 
         async def _default(cfg: Any) -> None:
+            nonlocal applied
             self.config = cfg
             self.error = None
             await self.restart()
+            applied = True
 
-        await self.ctx.waterfall(
-            "internal/update",
-            resolved,
-            default_handler=_default,
-            owner=self,
-        )
+        try:
+            await self.ctx.waterfall(
+                "internal/update",
+                resolved,
+                default_handler=_default,
+                owner=self,
+            )
+        except BaseException:
+            # The commit already wrote the candidate into the entry options
+            # (and, for a file-backed tree, into the file). An update that
+            # never applied must be compensated so the next boot reads the
+            # config that actually ran. Moving the commit after the waterfall
+            # would break the entry-owned Group identity path in tree.py.
+            if not applied:
+                self.config = previous_config
+                if not no_save and previous_options is not None:
+                    self.ctx.emit("internal/commit-rollback", self, previous_options)
+            raise
 
     def status(self) -> dict[str, Any]:
         """Return diagnostic status snapshot of this fiber."""
@@ -1517,6 +1610,102 @@ class Context:
         for child in self._children:
             fibers.extend(child.all_fibers())
         return fibers
+
+    def check_pending_cycles(self) -> None:
+        """Fail loud when a boot drain left components that can never activate.
+
+        ``flush()`` only drains scheduled tasks, so a component whose
+        injected service never appears stays PENDING and the boot looks
+        successful. This walks the fibers that are still PENDING with an
+        unmounted dependency and raises once, reporting every one of them
+        with the services it waits for.
+
+        When the components are declared (``provide`` / ``provides`` /
+        ``services``, or an explicit ``name``), the provider edges are walked
+        to name the closed loop:
+
+            circular dependency between components: a -> b -> a
+
+        A component that provides a name it never declares counts as an
+        unknown provider, so a loop through it is not named as a cycle; it is
+        still reported as a component that did not activate. Callers should
+        run this after the boot drain; it is deliberately not folded into
+        ``flush()``, which stays a pure drain barrier for its ~200 callers.
+        """
+        blocked: dict[str, list[str]] = {}
+        for fiber in self.all_fibers():
+            if fiber.state != FiberState.PENDING:
+                continue
+            missing = [name for name in fiber.inject if not fiber.ctx.has(name)]
+            # A PENDING fiber whose dependencies are all mounted is waiting
+            # on its own scheduled load, not on a service that never arrives.
+            if missing:
+                seen = blocked.setdefault(fiber.name, [])
+                seen.extend(name for name in missing if name not in seen)
+        if not blocked:
+            return
+
+        cycle = self._find_pending_cycle(blocked)
+        if cycle:
+            raise RuntimeError(
+                "circular dependency between components: " + " -> ".join(cycle)
+            )
+        detail = "; ".join(
+            f"{name} waits for {', '.join(missing)}"
+            for name, missing in blocked.items()
+        )
+        raise RuntimeError(f"components did not activate: {detail}")
+
+    def _find_pending_cycle(self, blocked: dict[str, list[str]]) -> list[str]:
+        """Return the first closed loop of declared providers, else empty.
+
+        Nodes are service names, not components: an inject edge is written in
+        service names (``inject = ["db"]``), so the loop has to be walked in
+        the same vocabulary. A service name is a node only when the fiber
+        that declares it is itself blocked. Colour-marked depth-first walk:
+        white (unvisited) -> grey (on the stack) -> black (fully explored).
+        Reaching a grey node means the walk closed on itself, and the slice of
+        the stack from that node on is the loop.
+        """
+        providers: dict[str, str] = {}
+        for fiber in self.all_fibers():
+            for name in fiber.declared_provides:
+                providers.setdefault(name, fiber.name)
+        edges: dict[str, list[str]] = {}
+        for service, label in providers.items():
+            if label in blocked:
+                # Only a name whose provider is itself blocked can be part of
+                # a loop; anything else is a plain missing service.
+                edges[service] = [
+                    n
+                    for n in blocked[label]
+                    if n in providers and providers[n] in blocked
+                ]
+
+        WHITE, GREY, BLACK = 0, 1, 2
+        colour: dict[str, int] = dict.fromkeys(edges, WHITE)
+        stack: list[str] = []
+
+        def walk(service: str) -> list[str]:
+            colour[service] = GREY
+            stack.append(service)
+            for dependency in edges[service]:
+                if colour[dependency] == GREY:
+                    return stack[stack.index(dependency) :] + [dependency]
+                if colour[dependency] == WHITE:
+                    found = walk(dependency)
+                    if found:
+                        return found
+            stack.pop()
+            colour[service] = BLACK
+            return []
+
+        for service in edges:
+            if colour[service] == WHITE:
+                found = walk(service)
+                if found:
+                    return found
+        return []
 
     async def flush(self) -> None:
         """Wait for all pending component load and event tasks to settle.
