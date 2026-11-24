@@ -14,15 +14,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from animas.core import Context, Fiber, FiberState, Service, _current_fiber
+from animas.core import Context, Fiber, FiberState, Service
 from animas.events import Disposer, EventMode
-from animas.jsexpr import JsExprError, interpolate
 from animas.profile_yaml import dump_yaml, load_yaml
 from animas.tree import (
     _UNSET,
     Entry,
     EntryChange,
-    EntryGroup,
     EntryTree,
     check_unique_ids,
     resolve_component_target,
@@ -182,12 +180,6 @@ class LoaderService(Service, EntryTree):
         ctx.on("internal/commit", self._on_commit)
         ctx.on("internal/commit-rollback", self._on_commit_rollback)
         ctx.on(
-            "internal/config",
-            self._on_internal_config,
-            mode=EventMode.WATERFALL,
-            global_=True,
-        )
-        ctx.on(
             "loader/patch-context",
             self._on_patch_context,
             mode=EventMode.WATERFALL,
@@ -318,42 +310,6 @@ class LoaderService(Service, EntryTree):
             raise ValueError("No destination path specified to save profile")
         save_profile(target_path, self.root.data)
 
-    async def _on_internal_config(self, config: Any, next_fn: Any) -> Any:
-        """Interpolate expression nodes in a resolving entry's config.
-
-        The waterfall runs first and the result is interpolated. Entries
-        without a loader entry, child components of an entry, and tree
-        carriers (Group, Include) keep their configs literal: a carrier's
-        entry and patch lists hold other rows' configs, whose expressions
-        belong to those rows' own fibers.
-        """
-        resolved = next_fn()
-        if inspect.isawaitable(resolved):
-            resolved = await resolved
-        fiber = _current_fiber.get()
-        if fiber is None or fiber.entry is None:
-            return resolved
-        # Child components of an entry carry entry=None (unlike the
-        # oracle, where the entry marker is inherited through the ctx),
-        # so the entry-None return above already subsumes this guard.
-        if (  # pragma: no cover
-            fiber.parent_fiber is not None and fiber.parent_fiber.entry is fiber.entry
-        ):
-            return resolved
-        if EntryGroup.is_tree_carrier(fiber.target):
-            return resolved
-        try:
-            return interpolate(fiber.ctx, resolved)
-        except JsExprError as error:
-            entry = fiber.entry
-            error.add_note(f"in entry {entry.id!r}")
-            location = entry.get_location(error.path)
-            if location is not None:
-                filename = getattr(entry.parent.tree, "filename", None)
-                where = f"{filename}:" if filename else ""
-                error.add_note(f"at {where}{location[0]}:{location[1]}")
-            raise
-
     def _on_commit(self, fiber: Fiber, config: Any) -> None:
         """Write a runtime config change back into the owning entry's options.
 
@@ -423,12 +379,7 @@ class LoaderService(Service, EntryTree):
         entry.ctx._isolated_services.update(new_map)
         # Intercept: replace the entry ctx's map wholesale with the entry's
         # own intercept dict (parent-chain resolution supplies inheritance).
-        # Upstream entry.ts:169-179 interpolates the intercept options before
-        # they reach the component: a ``__jsExpr`` value must be evaluated,
-        # not stored verbatim.
-        entry.ctx._intercept_configs = interpolate(
-            entry.ctx, entry.options.get("intercept") or {}
-        )
+        entry.ctx._intercept_configs = entry.options.get("intercept") or {}
         # Notify when the isolate map actually changed, so dependent fibers
         # re-resolve through the epoch machinery.
         changed = {

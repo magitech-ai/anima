@@ -146,58 +146,6 @@ async def _settle(inc: Include, loader: LoaderService) -> None:
 # --- P1-5: patches and include config must stay literal ---
 
 
-def test_apply_entry_patches_rejects_js_expr() -> None:
-    entries = [{"id": "a", "name": "comp"}]
-    with pytest.raises(IncludeError, match="include patches must be literal mappings"):
-        apply_entry_patches(entries, [{"__jsExpr": "process.env.X"}])
-    with pytest.raises(IncludeError, match="include patches must be literal mappings"):
-        apply_entry_patches(entries, ["not-a-mapping"])  # type: ignore[list-item]
-    with pytest.raises(
-        IncludeError, match="include patches must be a literal patch list"
-    ):
-        apply_entry_patches(entries, {"__jsExpr": "process.env.X"})  # type: ignore[arg-type]
-    with pytest.raises(IncludeError, match="expected a literal entry list"):
-        apply_entry_patches({"__jsExpr": "process.env.X"}, [])  # type: ignore[arg-type]
-
-
-def test_apply_entry_patches_rejects_js_expr_insert() -> None:
-    entries = [{"id": "a", "name": "comp"}]
-    with pytest.raises(IncludeError, match="expected a literal entry list"):
-        apply_entry_patches(entries, [{"insert": {"__jsExpr": "process.env.X"}}])
-    with pytest.raises(IncludeError, match="expected a literal entry list"):
-        apply_entry_patches(entries, [{"insert": "not-a-list"}])
-    with pytest.raises(IncludeError, match="expected a literal entry list"):
-        apply_entry_patches(entries, [{"insert": [{"__jsExpr": "process.env.X"}]}])
-    # A literal insert still applies; a JsExpr patch value is data, not
-    # an instruction, so it is applied literally and never evaluated.
-    patched = apply_entry_patches(entries, [{"insert": [{"id": "b", "name": "other"}]}])
-    assert [e["id"] for e in patched] == ["a", "b"]
-    patched = apply_entry_patches(
-        entries,
-        [{"id": "a", "config": {"mode": {"__jsExpr": "process.env.X"}}}],
-    )
-    assert patched[0]["config"] == {"mode": {"__jsExpr": "process.env.X"}}
-
-
-def test_diff_treats_js_expr_as_opaque() -> None:
-    # Identical expression nodes: no change, and nothing is evaluated
-    # (an out-of-scope expression would raise if it were).
-    older = {"id": "a", "config": {"mode": {"__jsExpr": "homePath('x')"}}}
-    newer = {"id": "a", "config": {"mode": {"__jsExpr": "homePath('x')"}}}
-    assert diff_entries(older, newer) == {}
-    # A changed expression string is a raw change, still unevaluated.
-    changed = {"id": "a", "config": {"mode": {"__jsExpr": "process.env.Y"}}}
-    assert diff_entries(older, changed) == {
-        "config": {"mode": {"__jsExpr": "process.env.Y"}}
-    }
-    # An expression node replacing a literal (and vice versa) is a change.
-    literal = {"id": "a", "config": {"mode": "plain"}}
-    assert diff_entries(literal, older) == {
-        "config": {"mode": {"__jsExpr": "homePath('x')"}}
-    }
-    assert diff_entries(older, literal) == {"config": {"mode": "plain"}}
-
-
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
@@ -1655,36 +1603,6 @@ async def test_include_on_internal_update_returns_apply_task(
     assert mod.calls[-1] == {"level": 7}
 
 
-@pytest.mark.asyncio
-async def test_include_internal_update_veto_rejects_js_expr_patches(
-    tmp_path: Path, mod: Any
-) -> None:
-    """B4: the veto path validates patches exactly as construction does.
-
-    Both shapes fail loud via fiber.update: a JsExpr patch, and a JsExpr
-    insert item. Neither is adopted, mounted, or persisted; the include
-    fiber stays ACTIVE.
-    """
-    _ctx, loader, _inc_id, entry, inc = await _boot(tmp_path, _rows(1))
-    file = tmp_path / "cfg.yaml"
-    before = file.read_bytes()
-    assert entry.fiber is not None
-    fiber = entry.fiber
-    with pytest.raises(IncludeError, match="include patches must be literal mappings"):
-        await fiber.update({"path": str(file), "patches": [{"__jsExpr": "1 + 1"}]})
-    with pytest.raises(IncludeError, match="expected a literal entry list"):
-        await fiber.update(
-            {"path": str(file), "patches": [{"insert": [{"__jsExpr": "1 + 1"}]}]}
-        )
-    await _settle(inc, loader)
-    assert fiber.state == FiberState.ACTIVE
-    assert inc.config.get("patches") is None
-    assert inc.root.data == [
-        {"id": "e0", "name": "inc_test_mod:comp", "config": {"level": 1}}
-    ]
-    assert file.read_bytes() == before
-
-
 # ---------------------------------------------------------------------------
 # P1-7 — commit protocol: direct fiber update and self-dispose
 # ---------------------------------------------------------------------------
@@ -2419,3 +2337,14 @@ async def test_accepted_direct_update_rewrites_include_file(
     after = file.read_text(encoding="utf-8")
     assert after != before
     assert "level: 2" in after
+
+
+def test_apply_entry_patches_rejects_non_dict_patch_and_insert_item() -> None:
+    with pytest.raises(IncludeError, match="literal patch list"):
+        apply_entry_patches([], "not-a-list")  # type: ignore[arg-type]
+    with pytest.raises(IncludeError, match="literal mappings"):
+        apply_entry_patches([], ["not-a-dict"])  # type: ignore[list-item]
+    with pytest.raises(IncludeError, match="literal entry list"):
+        apply_entry_patches([], [{"insert": ["not-a-dict"]}])  # type: ignore[list-item]
+    with pytest.raises(IncludeError, match="literal entry list"):
+        apply_entry_patches([], [{"insert": "not-a-list"}])  # type: ignore[dict-item]

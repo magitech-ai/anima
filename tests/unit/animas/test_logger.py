@@ -34,129 +34,6 @@ def test_base_exporter_not_implemented():
         exp.export(msg)
 
 
-def test_format_token_interpolation_and_edge_cases():
-    exp = Exporter(colors=True, max_length=1000)
-
-    # Empty args
-    msg_empty = Message(sn=1, ts=0.0, name="n", type="info", level=1, args=[])
-    assert Logger.format(exp, msg_empty) == ""
-
-    # First arg is exception
-    msg_exc = Message(
-        sn=1,
-        ts=0.0,
-        name="err",
-        type="error",
-        level=0,
-        args=[ValueError("first exception")],
-    )
-    assert "first exception" in Logger.format(exp, msg_exc)
-
-    # Custom formatter and escaped %%
-    custom_exp = Exporter(
-        colors=True,
-        formatters={"u": lambda v, _e, _m: v.upper()},
-    )
-    msg_custom = Message(
-        sn=2,
-        ts=0.0,
-        name="custom",
-        type="info",
-        level=1,
-        args=["%% %u", "lower"],
-    )
-    assert "% LOWER" in Logger.format(custom_exp, msg_custom)
-
-    # Tokens: %s, %d, %i, %f, %o, %O, %c, %C, %%, %z (unknown token)
-    msg_tokens = Message(
-        sn=2,
-        ts=0.0,
-        name="formatter",
-        type="info",
-        level=2,
-        args=[
-            "%s %d %i %f %o %c %C %% %z",
-            "text",
-            "12.8",
-            "42",
-            "3.14",
-            {"key": "val"},
-            "ignored",
-            "colored",
-        ],
-    )
-    res = Logger.format(exp, msg_tokens)
-    assert "text" in res
-    assert "12" in res
-    assert "42" in res
-    assert "3.14" in res
-    assert '{"key": "val"}' in res
-
-    # Bad numbers fallback
-    msg_bad_nums = Message(
-        sn=3,
-        ts=0.0,
-        name="bad",
-        type="info",
-        level=2,
-        args=["%d %f", "not_a_num", "not_a_float"],
-    )
-    bad_res = Logger.format(exp, msg_bad_nums)
-    assert "0" in bad_res
-    assert "0.0" in bad_res
-
-    # Non-serializable object for %o fallback
-    class NonSerializable:
-        def __repr__(self):
-            return "<unserializable>"
-
-    msg_non_json = Message(
-        sn=4,
-        ts=0.0,
-        name="unjson",
-        type="info",
-        level=2,
-        args=["%o", NonSerializable()],
-    )
-    assert "<unserializable>" in Logger.format(exp, msg_non_json)
-
-    # Tail args formatting
-    msg_tail = Message(
-        sn=5,
-        ts=0.0,
-        name="tail",
-        type="info",
-        level=2,
-        args=["msg", {"a": 1}, 123],
-    )
-    tail_res = Logger.format(exp, msg_tail)
-    assert '{"a": 1}' in tail_res
-    assert "123" in tail_res
-
-    # Line clipping past max_length
-    exp_clipped = Exporter(max_length=15)
-    long_line = "a" * 50
-    msg_long = Message(
-        sn=6, ts=0.0, name="long", type="info", level=2, args=[long_line]
-    )
-    clipped = Logger.format(exp_clipped, msg_long)
-    assert len(clipped) == 18  # 15 + "..."
-    assert clipped.endswith("...")
-
-    # Colors disabled for %C
-    exp_nocolor = Exporter(colors=False)
-    msg_c = Message(
-        sn=7, ts=0.0, name="tag", type="info", level=2, args=["%C", "plain"]
-    )
-    assert Logger.format(exp_nocolor, msg_c) == "plain"
-
-    # First arg is non-string primitive (e.g. integer or dict)
-    msg_first_nonstr = Message(
-        sn=8, ts=0.0, name="tag", type="info", level=2, args=[{"first": "item"}]
-    )
-    assert '{"first": "item"}' in Logger.format(exp_nocolor, msg_first_nonstr)
-
-
 def test_console_exporter_stream_output(monkeypatch):
     err_buf = io.StringIO()
     monkeypatch.setattr("sys.stderr", err_buf)
@@ -584,3 +461,126 @@ def test_logger_handle_error_level_is_honoured():
     strict.error("kept")
 
     assert seen == ["error"]
+
+
+def test_format_token_interpolation_and_edge_cases():
+    exp = Exporter(colors=True, max_length=1000)
+
+    # Empty args
+    msg_empty = Message(sn=1, ts=0.0, name="n", type="info", level=1, args=[])
+    assert Logger.format(exp, msg_empty) == ""
+
+    # First arg is exception
+    msg_exc = Message(
+        sn=1,
+        ts=0.0,
+        name="err",
+        type="error",
+        level=0,
+        args=[ValueError("first exception")],
+    )
+    assert "first exception" in Logger.format(exp, msg_exc)
+
+    # Custom formatter and escaped %%
+    custom_exp = Exporter(
+        colors=True,
+        formatters={"u": lambda v, _e, _m: v.upper()},
+    )
+    msg_custom = Message(
+        sn=2,
+        ts=0.0,
+        name="custom",
+        type="info",
+        level=1,
+        args=["%% %u", "lower"],
+    )
+    assert "% LOWER" in Logger.format(custom_exp, msg_custom)
+
+    # Tokens: %s, %d, %i, %f, %o, %O, %c, %C, %%, %z (unknown token)
+    msg_tokens = Message(
+        sn=2,
+        ts=0.0,
+        name="formatter",
+        type="info",
+        level=2,
+        args=[
+            "%s %d %i %f %o %c %C %% %z",
+            "text",
+            "12.8",
+            "42",
+            "3.14",
+            {"key": "val"},
+            "ignored",
+            "colored",
+        ],
+    )
+    res = Logger.format(exp, msg_tokens)
+    assert "text" in res
+    assert "12" in res
+    assert "42" in res
+    assert "3.14" in res
+    assert '{"key": "val"}' in res
+
+    # Bad numbers fallback
+    msg_bad_nums = Message(
+        sn=3,
+        ts=0.0,
+        name="bad",
+        type="info",
+        level=2,
+        args=["%d %f", "not_a_num", "not_a_float"],
+    )
+    bad_res = Logger.format(exp, msg_bad_nums)
+    assert "0" in bad_res
+    assert "0.0" in bad_res
+
+    # Non-serializable object for %o fallback
+    class NonSerializable:
+        def __repr__(self):
+            return "<unserializable>"
+
+    msg_non_json = Message(
+        sn=4,
+        ts=0.0,
+        name="unjson",
+        type="info",
+        level=2,
+        args=["%o", NonSerializable()],
+    )
+    assert "<unserializable>" in Logger.format(exp, msg_non_json)
+
+    # Tail args formatting
+    msg_tail = Message(
+        sn=5,
+        ts=0.0,
+        name="tail",
+        type="info",
+        level=2,
+        args=["msg", {"a": 1}, 123],
+    )
+    tail_res = Logger.format(exp, msg_tail)
+    assert '{"a": 1}' in tail_res
+    assert "123" in tail_res
+
+    # Line clipping past max_length
+    exp_clipped = Exporter(max_length=15)
+    long_line = "a" * 50
+    msg_long = Message(
+        sn=6, ts=0.0, name="long", type="info", level=2, args=[long_line]
+    )
+    clipped = Logger.format(exp_clipped, msg_long)
+    assert len(clipped) == 18  # 15 + "..."
+    assert clipped.endswith("...")
+
+    # Colors disabled for %C
+    exp_nocolor = Exporter(colors=False)
+    msg_c = Message(
+        sn=7, ts=0.0, name="tag", type="info", level=2, args=["%C", "plain"]
+    )
+    assert Logger.format(exp_nocolor, msg_c) == "plain"
+
+    # First arg is non-string primitive (e.g. integer or dict)
+    msg_first_nonstr = Message(
+        sn=8, ts=0.0, name="tag", type="info", level=2, args=[{"first": "item"}]
+    )
+    assert '{"first": "item"}' in Logger.format(exp_nocolor, msg_first_nonstr)
