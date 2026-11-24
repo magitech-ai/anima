@@ -27,9 +27,9 @@ under that name), so it stays unchanged here either way. And upstream itself
 kept the old methods as deprecated aliases — a clean rename with no alias
 would be stricter than upstream, not a match of it.
 
-Anima today mounts everything through `Context.plugin()` (`core.py:1049`)
+Animas today mounts everything through `Context.plugin()` (`core.py:1049`)
 and `RegistryService.plugin()` (`registry.py:242`); the harness and plugins
-repos use those call sites throughout. No `Component` name exists in anima.
+repos use those call sites throughout. No `Component` name exists in animas.
 
 ## Decision
 

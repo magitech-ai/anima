@@ -1,12 +1,12 @@
-# Anima compatibility policy
+# Animas compatibility policy
 
-Anima follows [Semantic Versioning 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH`.
+Animas follows [Semantic Versioning 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
 ## Public API
 
 The supported surface is:
 
-- every name exported by `anima` (`anima.__all__`);
+- every name exported by `animas` (`animas.__all__`);
 - documented behavior of those names, including the component lifecycle,
   effect tracking, coeffect resolution, event modes, config reconciliation,
   and the `fs`/`hmr` service contracts;
@@ -38,11 +38,11 @@ replacement and the removal version.
   branch coverage, `ruff check`, `ruff format --check`, and strict `mypy src`.
 - CI on all configured OS legs is green before merge; CI is the authority and
   a human merges.
-- Downstream consumers may pin `anima>=1,<2` and expect no breaking changes.
+- Downstream consumers may pin `animas>=1,<2` and expect no breaking changes.
 
 ## Non-goals
 
 This policy does not freeze the project against improvement, does not promise
 that bugs are impossible, and does not make upstream Cordis releases part of
-the contract. Anima is independent; the research paper remains the design
+the contract. Animas is independent; the research paper remains the design
 invariant, and upstream Cordis is historical reference material.

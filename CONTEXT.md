@@ -1,4 +1,4 @@
-# Anima Micro-Kernel
+# Animas Micro-Kernel
 
 The lightweight asynchronous micro-kernel and event pipeline engine providing context injection, waterfall middleware, and lifecycle management.
 
@@ -19,7 +19,7 @@ A reusable singleton instance mounted onto a context accessible by name.
 _Avoid_: Component, manager, module
 
 **Component Entrypoint**:
-The standard `apply(ctx)` callable exported by an Anima component module to mount services and event bindings onto a context.
+The standard `apply(ctx)` callable exported by an Animas component module to mount services and event bindings onto a context.
 _Avoid_: Setup hook, loader, init function
 
 ### Event Pipelines

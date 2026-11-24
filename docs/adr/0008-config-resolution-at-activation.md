@@ -24,7 +24,7 @@ Wire it in, as part of chunk P1-1 (the epoch-machine chunk): `_reload`
 executes the runner directly, `_checkImpl` callers populate `_store`, and
 config resolution runs at activation. Validation runs synchronously at
 activation, matching upstream; the waterfall itself stays asynchronous
-because anima's waterfall mechanism is asynchronous throughout. If wiring
+because animas's waterfall mechanism is asynchronous throughout. If wiring
 proves unworkable inside P1-1, the fallback is deletion of
 `_resolve_config` and its dead paths with an amendment to this record —
 not silent coverage of dead code.

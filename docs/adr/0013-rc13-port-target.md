@@ -5,9 +5,9 @@ Status: accepted
 
 ## Context
 
-ADR 0012 disclosed Anima's lineage and pinned conformance to DeepSeek Harness
+ADR 0012 disclosed Animas's lineage and pinned conformance to DeepSeek Harness
 at `fcc0ad46` (`dsh v0.2.2-rc.1`, 2026-11-04), the target of the former 1.0
-gate. The user has since directed that Anima must be a port of the **latest**
+gate. The user has since directed that Animas must be a port of the **latest**
 Cordis as of 2026-11-23, not that frozen pin.
 
 Ground truth gathered on 2026-11-23:
@@ -33,7 +33,7 @@ parity with the target.
 
 ## Decision
 
-Anima's port target is canonical Cordis `v4.0.0-rc.13` (`bc9fae7`), with the
+Animas's port target is canonical Cordis `v4.0.0-rc.13` (`bc9fae7`), with the
 paper (arXiv:2608.25512) as the theory reference. Concretely:
 
 - `PARITY.md` records rc.13 as the target and lists verified gaps as OPEN, not
@@ -50,7 +50,7 @@ paper (arXiv:2608.25512) as the theory reference. Concretely:
 - Claims of "1.0 complete" or "all items DONE" against rc.1 are withdrawn.
 - The rc.13 breaking changes become tracked work items; until each is
   implemented and tested it is an admitted gap, not a silent divergence.
-- Where rc.13 depends on Node.js internals (HMR's module loader), Anima ports
+- Where rc.13 depends on Node.js internals (HMR's module loader), Animas ports
   the observable contract onto Python equivalents (`sys.modules`,
   `importlib`), and the substitution is documented rather than presented as
   identical code.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from anima.events import DisposableList
+from animas.events import DisposableList
 
 
 def test_push_disposer_removes_weak_entry() -> None:

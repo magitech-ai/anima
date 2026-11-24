@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-Anima is a Python implementation of the kernel paradigm formalized in
+Animas is a Python implementation of the kernel paradigm formalized in
 "A Programming Paradigm for Spatiotemporal Composability" (arXiv:2608.25512)
 and realized in Cordis, using DeepSeek Harness as the conformance reference
 (frozen at `fcc0ad46`, `dsh v0.2.2-rc.1`). This was documented in internal
@@ -27,7 +27,7 @@ Accepted 2026-11-22: publish the lineage openly.
 - `README.md` gains a "Lineage" section naming the paper, Cordis and DeepSeek
   Harness, the frozen conformance pin, and the attribution file.
 - `NOTICE` carries the MIT copyright and permission notices for Cordis
-  (© Shigma) and DeepSeek Harness (© DeepSeek). Anima's own MIT `LICENSE` is
+  (© Shigma) and DeepSeek Harness (© DeepSeek). Animas's own MIT `LICENSE` is
   unchanged. `pyproject.toml` declares `license-files = ["LICENSE", "NOTICE"]`
   so both ship in built wheels.
 - `PARITY.md` presents the frozen pin as a deliberate compatibility target.
