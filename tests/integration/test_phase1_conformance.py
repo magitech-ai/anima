@@ -41,7 +41,6 @@ import errno
 import importlib
 import importlib.util
 import inspect
-import io
 import json
 import logging
 import os
@@ -75,7 +74,6 @@ from animas.core import (
     Fiber,
     _BoundService,
     _ServiceMeta,
-    is_js_expr,
     symbols,
 )
 from animas.hmr import HmrService, handle_error
@@ -99,13 +97,8 @@ from animas.include import (
     reconcile,
     record,
 )
-from animas.jsexpr import (
-    JsExprError,
-    evaluate,
-    interpolate,
-)
-from animas.loader import LoaderService, load_profile
-from animas.profile_yaml import dump_yaml, load_yaml
+from animas.loader import LoaderService
+from animas.profile_yaml import load_yaml
 from animas.registry import RegistryService
 from animas.schema import (
     Schema,
@@ -775,59 +768,6 @@ def test_conformance_f13_service_ancillaries() -> None:
 
     with pytest.raises(TypeError, match="must be a string"):
         CoreService(ctx, {"name": {"not": "a string"}})
-
-
-@pytest.mark.asyncio
-async def test_conformance_f14_resolve_config_waterfall_and_validation() -> None:
-    """_resolve_config runs the internal/config waterfall, then sync
-    schema validation, at activation time.
-
-    The oracle resolves config synchronously through the schema seam
-    at activation (oracle fiber.ts:50-66, 667-671). Deliberate
-    divergence, ADR 0008: validation stays sync, but the waterfall
-    stays async — animas's waterfall is async throughout.
-    """
-    assert not inspect.iscoroutinefunction(Fiber._validate_config_value)
-
-    ctx = Context()
-
-    async def repair_level(cfg: Any, next_fn: Any) -> Any:
-        if isinstance(cfg, dict) and cfg.get("level") == "bad":
-            return await next_fn({**cfg, "level": 3})
-        return await next_fn(cfg)
-
-    ctx.on("internal/config", repair_level)
-
-    class Leveled:
-        Config = Schema.object({"greeting": Schema.string(), "level": Schema.integer()})
-
-        def __init__(self, c: Context, config: Any = None) -> None:
-            self.config = config
-
-    # The waterfall hook runs before validation, so a hook that repairs
-    # an invalid value lets activation succeed with the repaired config.
-    fib = ctx.use(Leveled, greeting="hi", level="bad")
-    await ctx.flush()
-    assert fib.state == FiberState.ACTIVE
-    assert fib.config == {"greeting": "hi", "level": 3}
-
-    # resolve_config evaluates a candidate without publishing it.
-    candidate = await fib.resolve_config({"greeting": "cand", "level": 1})
-    assert candidate == {"greeting": "cand", "level": 1}
-    assert fib.config == {"greeting": "hi", "level": 3}
-    assert fib.raw_config == {"greeting": "hi", "level": "bad"}
-
-    # An invalid candidate fails validation instead of being returned.
-    with pytest.raises(ValidationError, match="invalid config"):
-        await fib.resolve_config({"greeting": 7, "level": 1})
-    assert fib.config == {"greeting": "hi", "level": 3}
-
-    # Without the repair hook, the same invalid config fails activation.
-    plain_ctx = Context()
-    bad = plain_ctx.use(Leveled, greeting="hi", level="bad")
-    await plain_ctx.flush()
-    assert bad.state == FiberState.FAILED
-    assert isinstance(bad.error, ValidationError)
 
 
 @pytest.mark.asyncio
@@ -2125,275 +2065,14 @@ async def test_conformance_l4_subtree_entry_id_prefix(
 # ---------------------------------------------------------------------------
 
 
-def test_conformance_l5_is_js_expr_strict_string_check() -> None:
-    """is_js_expr: a dict with a string __jsExpr (oracle utils.ts:25-32).
-
-    Deliberate strictness: animas also checks the value is a string,
-    where the oracle does not. A non-string value is not an
-    expression node, so it is never evaluated.
-    """
-    assert is_js_expr({"__jsExpr": "process.env.X"}) is True
-    assert is_js_expr({"__jsExpr": "x", "other": 1}) is True
-    assert is_js_expr({"__jsExpr": 42}) is False
-    assert is_js_expr({"__jsExpr": None}) is False
-    assert is_js_expr({"__jsExpr": ["x"]}) is False
-    assert is_js_expr({}) is False
-    assert is_js_expr({"__jsExpr2": "x"}) is False
-    assert is_js_expr("process.env.X") is False
-    assert is_js_expr(None) is False
-    assert is_js_expr([]) is False
-
-
 # ---------------------------------------------------------------------------
 # L6 — restricted JsExpr evaluation
 # ---------------------------------------------------------------------------
 
 
-def test_conformance_l6_restricted_evaluator_attested_patterns(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The restricted evaluator covers the attested patterns (ADR 0006).
-
-    Deliberate divergence: the oracle evaluates with a full JS engine;
-    animas evaluates a restricted set only — environment access,
-    context access, process accessors, String/Number/JSON.parse,
-    literals, comparisons, ternaries, boolean operators, nullish
-    coalescing, optional chaining. No JS engine is embedded.
-    """
-    ctx = Context()
-    monkeypatch.setenv("LCONF_JSEXPR_MODE", "workspace-write")
-    assert (
-        evaluate(ctx, "process.env.LCONF_JSEXPR_MODE ?? 'workspace-write'")
-        == "workspace-write"
-    )
-    assert (
-        evaluate(ctx, "process.env.LCONF_JSEXPR_MISSING ?? process.cwd()")
-        == os.getcwd()
-    )
-    assert evaluate(ctx, "process.platform === 'win32' ? 'a' : 'b'") == (
-        "a" if sys.platform == "win32" else "b"
-    )
-    ctx.provide("profileContext", {"name": "desktop"})
-    assert evaluate(ctx, "!ctx.get('profileContext')") is False
-    assert evaluate(ctx, "ctx.get('profileContext')?.name !== 'desktop'") is False
-    assert evaluate(ctx, "ctx.get('missing') ?? 'fallback'") == "fallback"
-    assert evaluate(ctx, "String(42)") == "42"
-    assert evaluate(ctx, "Number('3081')") == 3081
-    assert evaluate(ctx, "JSON.parse('{\"a\": 1}')") == {"a": 1}
-    assert evaluate(ctx, "1 < 2 && 'x' === 'x'") is True
-
-
-def test_conformance_l6_out_of_scope_fails_loud() -> None:
-    """Anything outside the restricted scope fails loud with JsExprError.
-
-    Arithmetic, home-path helpers, array methods, template literals
-    and unknown identifiers are all out of scope — never silently
-    evaluated, never silently skipped.
-    """
-    ctx = Context()
-    with pytest.raises(JsExprError, match="unexpected character"):
-        evaluate(ctx, "1 + 1")
-    with pytest.raises(JsExprError, match="unsupported call"):
-        evaluate(ctx, "homePath('sessions')")
-    with pytest.raises(JsExprError, match="unexpected character"):
-        evaluate(ctx, "['a'].includes('a')")
-    with pytest.raises(JsExprError, match="template literals"):
-        evaluate(ctx, "`hello ${name}`")
-    with pytest.raises(JsExprError, match="unknown identifier"):
-        evaluate(ctx, "foo")
-    with pytest.raises(JsExprError, match="unsupported call"):
-        evaluate(ctx, "foo('x')")
-
-
-def test_conformance_l6_interpolate_no_mutation_and_call_sites(
-    l_tree_mod: Any,
-) -> None:
-    """interpolate() never mutates its input; call sites are selective.
-
-    interpolate() recurses and returns new dicts/lists, so the raw
-    nodes stay in the stored options for write-back. The loader's
-    internal/config hook evaluates entry configs but skips tree
-    carriers and entry-less fibers, and Entry.disabledOf evaluates a
-    JsExpr disabled flag (oracle utils.ts:6-22, loader internal/config
-    + Entry.disabledOf call sites).
-    """
-    ctx = Context()
-    ctx.provide("profileContext", {"name": "desktop"})
-    value = {
-        "mode": {"__jsExpr": "process.env.LCONF_MISSING ?? 'workspace-write'"},
-        "ports": [{"__jsExpr": "Number('3081')"}, 8080],
-        "nested": {"flag": {"__jsExpr": "!ctx.get('profileContext')"}},
-        "plain": "keep",
-    }
-    result = interpolate(ctx, value)
-    assert result == {
-        "mode": "workspace-write",
-        "ports": [3081, 8080],
-        "nested": {"flag": False},
-        "plain": "keep",
-    }
-    assert value["mode"] == {
-        "__jsExpr": "process.env.LCONF_MISSING ?? 'workspace-write'"
-    }
-    assert value["ports"][0] == {"__jsExpr": "Number('3081')"}
-    assert result is not value
-    assert result["ports"] is not value["ports"]
-    assert result["nested"] is not value["nested"]
-
-
-@pytest.mark.asyncio
-async def test_conformance_l6_config_hook_evaluates_entries_only(
-    l_tree_mod: Any,
-) -> None:
-    """The internal/config hook evaluates entry configs, nothing else."""
-    ctx = Context()
-    loader = LoaderService(ctx)
-    await loader.create(
-        {
-            "id": "e",
-            "name": "lconf_tree_mod:comp",
-            "config": {"mode": {"__jsExpr": "process.env.LCONF_X ?? 'evald'"}},
-        }
-    )
-    await loader.await_all()
-    entry = loader.resolve("e")
-    assert entry.fiber is not None and entry.fiber.state == FiberState.ACTIVE
-    assert entry.fiber.config["mode"] == "evald"
-    # The stored options keep the raw node for write-back.
-    assert entry.options["config"]["mode"] == {
-        "__jsExpr": "process.env.LCONF_X ?? 'evald'"
-    }
-
-    # An entry-less fiber keeps its config literal: no entry, no hook.
-    calls: list[Any] = []
-
-    def direct_comp(c: Context, config: Any = None) -> None:
-        calls.append(dict(config) if isinstance(config, dict) else config)
-
-    fiber = ctx.use(direct_comp, mode={"__jsExpr": "process.env.LCONF_X ?? 'x'"})
-    await ctx.flush()
-    assert fiber.state == FiberState.ACTIVE
-    assert fiber.config["mode"] == {"__jsExpr": "process.env.LCONF_X ?? 'x'"}
-
-
-@pytest.mark.asyncio
-async def test_conformance_l6_disabled_of_evaluates_js_expr(
-    l_tree_mod: Any,
-) -> None:
-    """Entry.disabledOf evaluates a JsExpr disabled flag."""
-    ctx = Context()
-    loader = LoaderService(ctx)
-    await loader.create(
-        {
-            "id": "d",
-            "name": "lconf_tree_mod:comp",
-            "disabled": {"__jsExpr": "1 === 1"},
-        }
-    )
-    await loader.await_all()
-    entry = loader.resolve("d")
-    assert entry.disabled is True
-    assert entry.fiber is None  # never mounted while disabled
-    assert l_tree_mod.calls == []
-
-    await loader.update("d", {"disabled": False})
-    await loader.await_all()
-    assert entry.disabled is False
-    assert entry.fiber is not None
-    assert entry.fiber.state == FiberState.ACTIVE
-    assert len(l_tree_mod.calls) == 1
-
-
 # ---------------------------------------------------------------------------
-# L7 — !!js YAML tag + round-trip
+# L7 — YAML round-trip (no expression dialect after 2.0.0)
 # ---------------------------------------------------------------------------
-
-
-def test_conformance_l7_js_yaml_tag_round_trip() -> None:
-    """!!js scalars load to expression nodes and dump back (oracle include:9-23)."""
-    text = (
-        "entries:\n"
-        "  - name: comp\n"
-        "    config:\n"
-        "      mode: !!js process.env.MODE ?? 'x'\n"
-    )
-    data = load_yaml(io.StringIO(text))
-    assert data == {
-        "entries": [
-            {
-                "name": "comp",
-                "config": {"mode": {"__jsExpr": "process.env.MODE ?? 'x'"}},
-            }
-        ]
-    }
-
-    original = [
-        {
-            "id": "a",
-            "name": "comp",
-            "config": {
-                "mode": {"__jsExpr": "process.env.MODE ?? 'workspace-write'"},
-                "port": {"__jsExpr": "Number(process.env.PORT ?? 8080)"},
-            },
-            "disabled": {"__jsExpr": "ctx.disabled"},
-        }
-    ]
-    buf = io.StringIO()
-    dump_yaml(original, buf)
-    dumped = buf.getvalue()
-    assert "!!js" in dumped
-    assert "process.env.MODE" in dumped
-    assert load_yaml(io.StringIO(dumped)) == original
-    # A second round-trip is stable.
-    buf2 = io.StringIO()
-    dump_yaml(load_yaml(io.StringIO(dumped)), buf2)
-    assert load_yaml(io.StringIO(buf2.getvalue())) == original
-    # Only single-key {"__jsExpr": str} dicts become !!js scalars.
-    multi = [{"config": {"__jsExpr": "process.env.X", "other": 1}}]
-    buf3 = io.StringIO()
-    dump_yaml(multi, buf3)
-    assert "!!js" not in buf3.getvalue()
-    assert load_yaml(io.StringIO(buf3.getvalue())) == multi
-
-
-@pytest.mark.asyncio
-async def test_conformance_l7_file_load_save_reload(
-    tmp_path: Path, l_tree_mod: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """File load → save → reload preserves !!js nodes and re-evaluates them."""
-    entries = [
-        {
-            "id": "a",
-            "name": "lconf_tree_mod:comp",
-            "config": {"mode": {"__jsExpr": "process.env.LCONF_L7_MODE ?? 'dflt'"}},
-        }
-    ]
-    source = tmp_path / "profile.yaml"
-    buf = io.StringIO()
-    dump_yaml(entries, buf)
-    source.write_text(buf.getvalue(), encoding="utf-8")
-
-    ctx = Context()
-    loader = load_profile(ctx, source)
-    await ctx.flush()
-    entry = loader.resolve("a")
-    assert entry.fiber is not None and entry.fiber.state == FiberState.ACTIVE
-    assert entry.fiber.config["mode"] == "dflt"
-
-    saved = tmp_path / "saved.yaml"
-    loader.save(saved)
-    reloaded = load_yaml(saved.read_text(encoding="utf-8"))
-    assert reloaded[0]["config"]["mode"] == {
-        "__jsExpr": "process.env.LCONF_L7_MODE ?? 'dflt'"
-    }
-
-    monkeypatch.setenv("LCONF_L7_MODE", "live")
-    ctx2 = Context()
-    loader2 = load_profile(ctx2, saved)
-    await ctx2.flush()
-    entry2 = loader2.resolve("a")
-    assert entry2.fiber is not None
-    assert entry2.fiber.config["mode"] == "live"
 
 
 # ---------------------------------------------------------------------------
@@ -4403,73 +4082,3 @@ async def test_conformance_u_core_service_kept_with_justification() -> None:
     await ctx.flush()
     assert fiber.state == FiberState.ACTIVE
     assert ctx.has("core_svc")
-
-
-@pytest.mark.asyncio
-async def test_conformance_u_is_js_expr_wired(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``is_js_expr`` is kept and wired: detected, evaluated, loader-driven.
-
-    Detection is stricter than the oracle — the ``__jsExpr`` value
-    must be a string. A JsExpr dict flows through the loader path:
-    an entry whose ``disabled`` is a JsExpr evaluating true stays
-    unmounted, while one evaluating false mounts and activates
-    (``Entry._disabled_of`` in tree.py). The wiring itself is pinned
-    by the import in all three consuming modules.
-    """
-    assert is_js_expr({"__jsExpr": "process.platform"})
-    assert is_js_expr({"__jsExpr": "x", "extra": 1})
-    assert not is_js_expr({"__jsExpr": 5})
-    assert not is_js_expr({"other": "process.platform"})
-    assert not is_js_expr("process.platform")
-
-    ctx = Context()
-    expected = sys.platform  # "linux" / "darwin" / "win32" — never hardcoded
-    other = "win32" if expected != "win32" else "linux"
-    assert interpolate(ctx, {"__jsExpr": "process.platform"}) == expected
-    assert interpolate(
-        ctx, {"k": {"__jsExpr": f"process.platform === '{expected}'"}}
-    ) == {"k": True}
-
-    root = _repo_root()
-    for name in ("tree.py", "jsexpr.py", "include.py"):
-        source = (root / "src" / "animas" / name).read_text(encoding="utf-8")
-        assert "is_js_expr" in source, name
-
-    ctx2 = Context()
-    loader = LoaderService(ctx2)
-    module = types.ModuleType("conformance_u_probe_mod")
-
-    class _Dummy:
-        name = "dummy"
-
-        def apply(self, ctx: Context, config: Any) -> None:
-            return None
-
-    module.Dummy = _Dummy
-    monkeypatch.setitem(sys.modules, "conformance_u_probe_mod", module)
-
-    disabled_id = await loader.create(
-        {
-            "id": "u-disabled",
-            "name": "conformance_u_probe_mod:Dummy",
-            "disabled": {"__jsExpr": f"process.platform === '{expected}'"},
-        }
-    )
-    disabled_entry = loader.resolve(disabled_id)
-    assert disabled_entry.disabled is True
-    assert disabled_entry.fiber is None
-
-    enabled_id = await loader.create(
-        {
-            "id": "u-enabled",
-            "name": "conformance_u_probe_mod:Dummy",
-            "disabled": {"__jsExpr": f"process.platform === '{other}'"},
-        }
-    )
-    await loader.await_all()
-    enabled_entry = loader.resolve(enabled_id)
-    assert enabled_entry.disabled is False
-    assert enabled_entry.fiber is not None
-    assert enabled_entry.fiber.state == FiberState.ACTIVE

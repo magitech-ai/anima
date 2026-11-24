@@ -2,7 +2,7 @@
 Animas: The Composable Micro-Kernel by Magitech.
 """
 
-__version__ = "1.0.2"
+__version__ = "2.0.0"
 
 from animas.core import Context, Fiber, FiberState, Service, inject
 from animas.events import DisposableList, Disposer, EventBus, EventMode, is_bailed
@@ -51,7 +51,6 @@ from animas.include import (
     record,
     route_journal,
 )
-from animas.jsexpr import JsExprError, evaluate, interpolate
 from animas.loader import (
     LoaderService,
     interpolate_env,
@@ -119,7 +118,6 @@ __all__ = [
     "Inject",
     "Journal",
     "JournalRecord",
-    "JsExprError",
     "LoaderService",
     "LocalFs",
     "Logger",
@@ -153,13 +151,11 @@ __all__ = [
     "diff_options",
     "ensure_ids",
     "ensure_insert_ids",
-    "evaluate",
     "filter_keys",
     "flatten",
     "handle_error",
     "hyphenate",
     "inject",
-    "interpolate",
     "interpolate_env",
     "is_bailed",
     "is_non_nullable",

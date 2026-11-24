@@ -25,12 +25,9 @@ from animas.core import (
     Context,
     Fiber,
     FiberState,
-    is_js_expr,
     platform_name,
 )
 from animas.events import EventMode
-from animas.jsexpr import evaluate as evaluate_js_expr
-from animas.jsexpr import interpolate as interpolate_js_expr
 from animas.registry import resolve_inject
 from animas.schema import deep_equal
 
@@ -210,7 +207,7 @@ def validate_options(
     check(
         "disabled",
         "a boolean",
-        lambda v: isinstance(v, bool) or is_js_expr(v),
+        lambda v: isinstance(v, bool),
     )
 
     def check_platforms(key: str) -> None:
@@ -641,8 +638,6 @@ class Entry:
 
     def _disabled_of(self, options: dict[str, Any]) -> bool:
         raw = options.get("disabled")
-        if is_js_expr(raw):
-            return bool(self.evaluate(raw["__jsExpr"]))
         if bool(raw):
             return True
         enabled_on = options.get("enabled_on")
@@ -652,10 +647,6 @@ class Entry:
         if disabled_on is not None:
             return platform_name() in disabled_on
         return False
-
-    def evaluate(self, expr: str) -> Any:
-        """Evaluate a JS expression against this entry's context."""
-        return evaluate_js_expr(self.ctx, expr)
 
     async def refresh(self) -> None:
         """(Re-)mount this entry when it has no fiber and is not disabled."""
@@ -851,12 +842,6 @@ class Entry:
             entry = self
 
             inject_values = resolve_inject(inject_opt, {})
-            # Upstream entry.ts:155 interpolates each declared dependency's
-            # config before the outer fiber resolves it.
-            inject_values = {
-                name: interpolate_js_expr(entry.ctx, value)
-                for name, value in inject_values.items()
-            }
 
             class Outer:
                 name = "loader:outer"

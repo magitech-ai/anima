@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-from animas.core import Context, Service, is_js_expr
+from animas.core import Context, Service
 from animas.events import EventMode
 from animas.profile_yaml import dump_yaml, load_yaml_with_locations
 from animas.schema import deep_equal
@@ -535,26 +535,26 @@ def _validate_patch_list(patches: Any) -> None:
     """
     if patches is None:
         return
-    if is_js_expr(patches) or not isinstance(patches, list):
+    if not isinstance(patches, list):
         raise IncludeError(
             "include patches must be a literal patch list; "
             "config expressions are not evaluated"
         )
     for patch in patches:
-        if not isinstance(patch, dict) or is_js_expr(patch):
+        if not isinstance(patch, dict):
             raise IncludeError(
                 "include patches must be literal mappings; "
                 "config expressions are not evaluated"
             )
         insert = patch.get("insert")
         if insert is not None:
-            if is_js_expr(insert) or not isinstance(insert, list):
+            if not isinstance(insert, list):
                 raise IncludeError(
                     "expected a literal entry list; "
                     "config expressions are not evaluated"
                 )
             for item in insert:
-                if not isinstance(item, dict) or is_js_expr(item):
+                if not isinstance(item, dict):
                     raise IncludeError(
                         "expected a literal entry list; "
                         "config expressions are not evaluated"
@@ -689,7 +689,7 @@ def apply_entry_patches(
     ``_validate_patch_list``); a JsExpr carried as a patch VALUE is data,
     applied literally and never evaluated.
     """
-    if is_js_expr(data) or not isinstance(data, list):
+    if not isinstance(data, list):
         raise IncludeError(
             "expected a literal entry list; config expressions are not evaluated"
         )

@@ -24,7 +24,7 @@ from collections.abc import (
 )
 from contextvars import ContextVar
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from animas.events import Disposer, EventBus, EventMode
 
@@ -141,7 +141,7 @@ def platform_name() -> str:
     """Return the normalized host platform name used by entry conditions.
 
     One neutral source for loader option conditions; independent of the
-    expression evaluator so it survives removal of the ``!!js`` dialect.
+    independent of any expression evaluator.
     """
     if sys.platform == "win32":
         return "win32"
@@ -153,15 +153,6 @@ def platform_name() -> str:
 
 
 KNOWN_PLATFORMS = frozenset({"win32", "darwin", "linux"})
-
-
-def is_js_expr(value: Any) -> TypeGuard[dict[str, Any]]:
-    """Check if a value is a JS expression wrapper."""
-    return (
-        isinstance(value, dict)
-        and "__jsExpr" in value
-        and isinstance(value.get("__jsExpr"), str)
-    )
 
 
 class FiberState(str, Enum):

@@ -18,7 +18,6 @@ from animas.core import (
     Service,
     _current_fiber,
     format_issues,
-    is_js_expr,
     platform_name,
     symbols,
 )
@@ -1439,16 +1438,6 @@ class TestValidationError:
         text = format_issues("invalid entry options", err.issues)
         assert "general error" in text
         assert "at " not in text
-
-
-class TestIsJsExpr:
-    def test_is_js_expr_true(self):
-        assert is_js_expr({"__jsExpr": "1 + 1"}) is True
-
-    def test_is_js_expr_false(self):
-        assert is_js_expr("hello") is False
-        assert is_js_expr({"foo": "bar"}) is False
-        assert is_js_expr(None) is False
 
 
 class TestFiberEffect:

@@ -513,57 +513,6 @@ async def test_rc13_bail_rejects_awaitable_without_close() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rc13_commit_uses_raw_config_on_pending_fiber() -> None:
-    """internal/commit fires with the raw input even when not loaded.
-
-    Upstream fiber.ts:536-542; the loader writes that raw value back to the
-    entry, preserving expressions for the next activation.
-    """
-    ctx = Context()
-    commits: list[Any] = []
-    ctx.on(
-        "internal/commit",
-        lambda _fiber, config: commits.append(config),
-        mode=EventMode.EMIT,
-    )
-
-    def dependent(_c: Any) -> None:
-        return None
-
-    dependent.inject = ["missing_service"]
-    fiber = ctx.use(dependent)
-    await ctx.flush()
-    assert fiber.state == FiberState.PENDING
-
-    raw = {"v": {"__jsExpr": "process.env.X"}}
-    await fiber.update(raw)
-    assert commits == [raw]
-
-
-@pytest.mark.asyncio
-async def test_rc13_commit_does_not_receive_resolved_config() -> None:
-    """A resolved expression/default must not be written back to the profile."""
-    ctx = Context()
-    commits: list[Any] = []
-
-    def component(_c: Any, config: Any = None) -> None:
-        return None
-
-    fiber = ctx.use(component, {"v": 1})
-    await ctx.flush()
-    ctx.on(
-        "internal/commit",
-        lambda _fiber, config: commits.append(config),
-        mode=EventMode.EMIT,
-    )
-
-    raw = {"v": {"__jsExpr": "Number(process.env.X)"}}
-    await fiber.update(raw)
-    assert commits == [raw]
-    assert "v" in commits[0]
-
-
-@pytest.mark.asyncio
 async def test_rc13_entry_name_change_rebuilds_component(monkeypatch: Any) -> None:
     """Changing `name` rebuilds the entry (loader entry.ts:243-248)."""
     calls: list[str] = []
@@ -870,53 +819,6 @@ async def test_rc13_entry_missing_inject_keeps_outer_pending(monkeypatch: Any) -
 
 
 @pytest.mark.asyncio
-async def test_rc13_expression_error_reports_config_path() -> None:
-    """A failed expression reports where it sits in the config."""
-    from animas.jsexpr import JsExprError, interpolate
-
-    ctx = Context()
-    with pytest.raises(JsExprError) as info:
-        interpolate(ctx, {"outer": [{"bad": {"__jsExpr": "no_such_fn()"}}]})
-    error = info.value
-    assert error.path == ("outer", 0, "bad")
-    assert any("outer.0.bad" in note for note in error.__notes__)
-
-
-@pytest.mark.asyncio
-async def test_rc13_loader_expression_error_reports_entry(
-    monkeypatch: Any, tmp_path: Any
-) -> None:
-    """The loader adds the entry id to a failed expression's location."""
-    module = types.ModuleType("rc13_expr_error_mod")
-
-    def comp(_c: Any, config: Any = None) -> None:
-        return None
-
-    module.comp = comp
-    monkeypatch.setitem(sys.modules, "rc13_expr_error_mod", module)
-
-    ctx = Context()
-    loader = LoaderService(ctx)
-    loader.filename = tmp_path / "cfg.yaml"
-    monkeypatch.setattr(loader, "get_location", lambda _id, _path: (4, 12))
-    loader.load(
-        [
-            {
-                "id": "bad_expr",
-                "name": "rc13_expr_error_mod:comp",
-                "config": {"bad": {"__jsExpr": "no_such_fn()"}},
-            }
-        ]
-    )
-    await ctx.flush()
-    fiber = loader.resolve("bad_expr").fiber
-    with pytest.raises(Exception) as info:
-        await fiber.await_settle()
-    assert any("bad_expr" in note for note in info.value.__notes__)
-    assert any("cfg.yaml:4:12" in note for note in info.value.__notes__)
-
-
-@pytest.mark.asyncio
 async def test_rc13_yaml_marks_and_empty_document() -> None:
     """YAML locations are retained per path; an empty document has none."""
     from animas.profile_yaml import load_yaml_with_locations
@@ -949,92 +851,6 @@ async def test_rc13_entry_location_stub(monkeypatch: Any) -> None:
     entry = loader.resolve("e")
     assert entry.get_location(("x",)) is None
     assert loader.get_location("e", ("x",)) is None
-
-
-@pytest.mark.asyncio
-async def test_rc13_loader_expression_error_without_location(
-    monkeypatch: Any,
-) -> None:
-    """A tree without source locations still reports the entry and path."""
-    module = types.ModuleType("rc13_expr_error_mod2")
-
-    def comp(_c: Any, config: Any = None) -> None:
-        return None
-
-    module.comp = comp
-    monkeypatch.setitem(sys.modules, "rc13_expr_error_mod2", module)
-    ctx = Context()
-    loader = LoaderService(ctx)
-    monkeypatch.setattr(loader, "get_location", lambda _id, _path: None)
-    loader.load(
-        [
-            {
-                "id": "bad_expr2",
-                "name": "rc13_expr_error_mod2:comp",
-                "config": {"bad": {"__jsExpr": "no_such_fn()"}},
-            }
-        ]
-    )
-    await ctx.flush()
-    fiber = loader.resolve("bad_expr2").fiber
-    with pytest.raises(Exception) as info:
-        await fiber.await_settle()
-    assert any("bad_expr2" in note for note in info.value.__notes__)
-    assert not any("cfg.yaml" in note for note in info.value.__notes__)
-
-
-@pytest.mark.asyncio
-async def test_rc13_intercept_values_are_interpolated(monkeypatch: Any) -> None:
-    """A ``__jsExpr`` in entry intercept is evaluated before use."""
-    module = types.ModuleType("rc13_intercept_mod")
-    seen: list[Any] = []
-
-    def comp(c: Any, config: Any = None) -> None:
-        seen.append(c.resolve_intercept("svc"))
-
-    module.comp = comp
-    monkeypatch.setitem(sys.modules, "rc13_intercept_mod", module)
-    ctx = Context()
-    loader = LoaderService(ctx)
-    loader.load(
-        [
-            {
-                "id": "e",
-                "name": "rc13_intercept_mod:comp",
-                "intercept": {"svc": {"mode": {"__jsExpr": "'turbo'"}}},
-            }
-        ]
-    )
-    await ctx.flush()
-    assert seen == [{"mode": "turbo"}]
-
-
-@pytest.mark.asyncio
-async def test_rc13_inject_values_are_interpolated(monkeypatch: Any) -> None:
-    """A ``__jsExpr`` in entry inject config is evaluated for the outer fiber."""
-    module = types.ModuleType("rc13_inject_mod")
-
-    def comp(_c: Any, config: Any = None) -> None:
-        return None
-
-    module.comp = comp
-    monkeypatch.setitem(sys.modules, "rc13_inject_mod", module)
-    ctx = Context()
-    ctx.provide("inject_svc", object())
-    loader = LoaderService(ctx)
-    loader.load(
-        [
-            {
-                "id": "e",
-                "name": "rc13_inject_mod:comp",
-                "inject": {"inject_svc": {"level": {"__jsExpr": "'three'"}}},
-            }
-        ]
-    )
-    await ctx.flush()
-    entry = loader.resolve("e")
-    assert entry.outer_fiber is not None
-    assert entry.outer_fiber.inject_config == {"inject_svc": {"level": "three"}}
 
 
 @pytest.mark.asyncio
@@ -1094,20 +910,14 @@ def test_rc13_entry_options_validation(options: Any, expected: str) -> None:
     assert expected in messages
 
 
-def test_rc13_entry_options_validation_accepts_valid_rows() -> None:
+def test_rc13_group_child_validation_propagates_issues() -> None:
     from animas.tree import validate_options
 
-    options: dict[str, Any] = {
-        "name": "m:c",
-        "disabled": {"__jsExpr": "false"},
-        "inject": {"svc": {"level": 1}},
-        "isolate": {"svc": True},
-        "intercept": {"svc": {"mode": "x"}},
-    }
-    assert validate_options(options) == []
-    nested = {"name": "group", "group": True, "config": [{"id": "bad"}]}
-    issues = validate_options(nested, deep=True)
-    assert issues[0]["path"] == ["config", 0, "name"]
+    issues = validate_options(
+        {"name": "g", "group": True, "config": [{"name": "child", "id": "a:b"}]},
+        deep=True,
+    )
+    assert any(issue["path"] == ["config", 0, "id"] for issue in issues)
 
 
 @pytest.mark.asyncio

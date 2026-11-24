@@ -13,7 +13,7 @@ It is a library kernel: hosts build their own CLI, server and agent surfaces on 
 
 ## Status
 
-`1.0.2` — stable public API under a
+`2.0.0` — stable public API under a
 [SemVer compatibility policy](docs/COMPATIBILITY.md): additions and fixes in
 `1.x`, breaking changes only in `2.0.0` with deprecation where feasible.
 
@@ -76,8 +76,10 @@ Unlike `emit` (observation-only), it has a return path.
 ```python
 from animas import EventMode
 
+
 async def add_prefix(value, next_fn):
     return await next_fn(f"prefix_{value}")
+
 
 ctx.on("format", add_prefix, mode=EventMode.WATERFALL)
 result = await ctx.waterfall("format", "val")  # "prefix_val"
@@ -98,6 +100,9 @@ components:
     config:
       mode: turbo
 ```
+
+Use `disabled_on: [win32]` or `enabled_on: [linux, darwin]` to gate an entry by
+host platform; unknown platform names fail at load time.
 
 Load with `load_profile(ctx, "animas.yaml")`. Environment variables interpolate
 as `${VAR}`, `${env.VAR}` or `${VAR:default}`; a full-match interpolation coerces

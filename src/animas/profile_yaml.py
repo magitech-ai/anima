@@ -1,12 +1,8 @@
-"""YAML load/dump for Animas profiles with the ``!!js`` expression dialect.
+"""YAML load/dump for Animas profiles.
 
-PyYAML is the parser; this module owns the small dialect layered on it:
-``!!js`` scalars become ``{"__jsExpr": ...}`` nodes on load and round-trip
-back to ``!!js`` scalars on dump. It also exposes PyYAML node start marks as
-config-path line/column locations for error reporting.
-
-Expression *evaluation* lives in :mod:`animas.jsexpr`; this module does not
-depend on it, so the profile format stays independent of the evaluator.
+PyYAML is the parser; this module provides the profile entry-list dialect
+plus node start marks mapped to config-path line/column locations for error
+reporting.
 """
 
 from __future__ import annotations
@@ -17,40 +13,10 @@ import yaml
 
 __all__ = ["dump_yaml", "load_yaml", "load_yaml_with_locations"]
 
-JSEXPR_TAG = "tag:yaml.org,2002:js"
-
-
-def _construct_js_expr(
-    loader: yaml.SafeLoader, node: yaml.ScalarNode
-) -> dict[str, str]:
-    return {"__jsExpr": loader.construct_scalar(node)}
-
-
-class _JsExprLoader(yaml.SafeLoader):
-    """YAML loader for the entry-list dialect: ``!!js`` scalars become expression nodes."""
-
-
-_JsExprLoader.add_constructor(JSEXPR_TAG, _construct_js_expr)
-
-
-def _represent_dict(dumper: yaml.SafeDumper, data: dict[str, Any]) -> yaml.Node:
-    if len(data) == 1 and isinstance(data.get("__jsExpr"), str):
-        return dumper.represent_scalar(JSEXPR_TAG, data["__jsExpr"])
-    return dumper.represent_mapping(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, data
-    )
-
-
-class _JsExprDumper(yaml.SafeDumper):
-    """YAML dumper for the entry-list dialect: expression nodes become ``!!js`` scalars."""
-
-
-_JsExprDumper.add_representer(dict, _represent_dict)
-
 
 def load_yaml(stream: Any) -> Any:
-    """Load YAML in the entry-list dialect (``!!js`` tags become expression nodes)."""
-    return yaml.load(stream, Loader=_JsExprLoader)
+    """Load a profile YAML document."""
+    return yaml.safe_load(stream)
 
 
 def load_yaml_with_locations(
@@ -62,7 +28,7 @@ def load_yaml_with_locations(
     marks so the loader can report where an expression sits in the config
     file (upstream loader/config/tree.ts:254-260 and Include's override).
     """
-    loader = _JsExprLoader(stream)
+    loader = yaml.SafeLoader(stream)
     try:
         node = loader.get_single_node()
         data = loader.construct_document(node) if node is not None else None
@@ -90,5 +56,5 @@ def load_yaml_with_locations(
 
 
 def dump_yaml(data: Any, stream: Any) -> None:
-    """Dump YAML in the entry-list dialect (expression nodes become ``!!js`` scalars)."""
-    yaml.dump(data, stream, Dumper=_JsExprDumper, sort_keys=False)
+    """Dump a profile YAML document."""
+    yaml.safe_dump(data, stream, sort_keys=False)
