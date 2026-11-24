@@ -280,8 +280,10 @@ def test_strict_equality_bool_before_number() -> None:
     assert evaluate(ctx, "1 === 1") is True
     assert evaluate(ctx, "'a' === 'a'") is True
     assert evaluate(ctx, "'a' !== 'b'") is True
-    assert evaluate(ctx, "null === undefined") is True
+    # JavaScript: null and undefined are different types under ===.
+    assert evaluate(ctx, "null === undefined") is False
     assert evaluate(ctx, "null === null") is True
+    assert evaluate(ctx, "undefined === undefined") is True
     assert evaluate(ctx, "ctx === ctx") is True
     assert evaluate(ctx, "ctx !== process") is True
 
@@ -418,7 +420,7 @@ def test_string_coercion() -> None:
     assert evaluate(ctx, "String(3.5)") == "3.5"
     assert evaluate(ctx, "String(true)") == "true"
     assert evaluate(ctx, "String(false)") == "false"
-    assert evaluate(ctx, "String(null)") == "undefined"
+    assert evaluate(ctx, "String(null)") == "null"
     assert evaluate(ctx, "String(undefined)") == "undefined"
     assert evaluate(ctx, "String(1e21)") == "1e+21"
     assert evaluate(ctx, "String(1e-7)") == "1e-7"
