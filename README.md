@@ -1,4 +1,4 @@
-# Anima
+# Animas
 
 The standalone, lightweight composable micro-kernel powering **Magitech**.
 
@@ -13,13 +13,13 @@ Documentation: [AGENTS.md](AGENTS.md) · [CONTEXT.md](CONTEXT.md) · [docs/adr/]
 
 ## Status
 
-Anima is at `1.0.0`. **The public API is now covered by a compatibility policy:** additions and fixes may arrive in `1.x`, but breaking changes require `2.0.0` and a deprecation period where feasible. See [COMPATIBILITY.md](docs/COMPATIBILITY.md). Anima is an independent project; the research paper remains its design invariant and the Cordis conformance work is a completed historical milestone recorded in [PARITY.md](PARITY.md) and [ADR 0017](docs/adr/0017-independence-and-stability.md).
+Animas is at `1.0.0`. **The public API is now covered by a compatibility policy:** additions and fixes may arrive in `1.x`, but breaking changes require `2.0.0` and a deprecation period where feasible. See [COMPATIBILITY.md](docs/COMPATIBILITY.md). Animas is an independent project; the research paper remains its design invariant and the Cordis conformance work is a completed historical milestone recorded in [PARITY.md](PARITY.md) and [ADR 0017](docs/adr/0017-independence-and-stability.md).
 
 ---
 
 ## Lineage
 
-Anima is the Python implementation of the kernel paradigm formalized in
+Animas is the Python implementation of the kernel paradigm formalized in
 Cordis — *"A Programming Paradigm for Spatiotemporal Composability"*
 ([arXiv:2608.25512](https://arxiv.org/abs/2608.25512)) — as realized by
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), the
@@ -32,8 +32,8 @@ verdicts are historical and are recorded in the
 [magitech-harness parity map](https://github.com/magitech-ai/magitech-harness/blob/main/PARITY.md).
 The conformance milestone was completed against canonical Cordis `v4.0.0-rc.13`
 (commit `bc9fae7`), then the parity verdicts in [PARITY.md](PARITY.md) and
-[ADRs 0013–0016](docs/adr/). Anima is now independent: future changes are
-judged against the paper's invariants and Anima's own compatibility policy, not
+[ADRs 0013–0016](docs/adr/). Animas is now independent: future changes are
+judged against the paper's invariants and Animas's own compatibility policy, not
 against upstream Cordis releases. The asyncio runtime, component surface and
 product built on top are ours; the theory and reference kernel are credited in
 [NOTICE](NOTICE). Provenance is recorded, not erased.
@@ -42,11 +42,11 @@ product built on top are ours; the theory and reference kernel are credited in
 
 ## Install
 
-Anima is not published to PyPI at this time (1.0.0 is the release candidate for a publisher to be added by the maintainer). Install from a repository checkout:
+Animas is not published to PyPI at this time (1.0.0 is the release candidate for a publisher to be added by the maintainer). Install from a repository checkout:
 
 ```sh
-git clone https://github.com/magitech-ai/anima.git
-cd anima
+git clone https://github.com/magitech-ai/animas.git
+cd animas
 uv sync
 ```
 
@@ -54,7 +54,7 @@ Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
 
 ## Profiles
 
-Load a declarative profile from Python with `load_profile(ctx, path)`. Anima is a library kernel: it does not ship a CLI, HTTP server, or scaffolding command. Host applications build those surfaces on top.
+Load a declarative profile from Python with `load_profile(ctx, path)`. Animas is a library kernel: it does not ship a CLI, HTTP server, or scaffolding command. Host applications build those surfaces on top.
 
 ---
 
@@ -63,7 +63,7 @@ Load a declarative profile from Python with `load_profile(ctx, path)`. Anima is 
 ```python
 import asyncio
 
-from anima import Context, Service
+from animas import Context, Service
 
 
 class GreeterService(Service):
@@ -99,7 +99,7 @@ components:
       mode: turbo
 ```
 
-Load a profile with `load_profile(ctx, "anima.yaml")`. Environment variables interpolate as `${VAR}`, `${env.VAR}`, or `${VAR:default}`; a full-match interpolation coerces `"true"` / `"false"` (any case) / numbers to `bool` / `int` / `float`. See `src/anima/loader.py`.
+Load a profile with `load_profile(ctx, "animas.yaml")`. Environment variables interpolate as `${VAR}`, `${env.VAR}`, or `${VAR:default}`; a full-match interpolation coerces `"true"` / `"false"` (any case) / numbers to `bool` / `int` / `float`. See `src/animas/loader.py`.
 
 ---
 
@@ -130,7 +130,7 @@ Load a profile with `load_profile(ctx, "anima.yaml")`. Environment variables int
 
 ## Subsystems
 
-Every capability is a service mounted on a `Context`. The kernel ships these modules under `src/anima/`:
+Every capability is a service mounted on a `Context`. The kernel ships these modules under `src/animas/`:
 
 | Area | Modules | What they do |
 | --- | --- | --- |
@@ -142,7 +142,7 @@ Every capability is a service mounted on a `Context`. The kernel ships these mod
 
 ## Development
 
-`anima` enforces **100% statement and 100% branch test coverage** (`--cov-fail-under=100` in `pyproject.toml`):
+`animas` enforces **100% statement and 100% branch test coverage** (`--cov-fail-under=100` in `pyproject.toml`):
 
 ```bash
 uv run pytest
@@ -151,7 +151,7 @@ uv run ruff format --check src tests
 uv run mypy src
 ```
 
-* `tests/unit/anima/`: Mirrors `src/` 1:1 — core, events, loader, timer, fs, and every other module.
+* `tests/unit/animas/`: Mirrors `src/` 1:1 — core, events, loader, timer, fs, and every other module.
 * `tests/integration/`: End-to-end multi-component pipeline, cascade disposal, and subagent isolation.
 
 See [AGENTS.md](AGENTS.md) for the full engineering standards.
@@ -174,7 +174,7 @@ Follow [AGENTS.md](AGENTS.md): strict TDD, 100% coverage floor, `ruff`, strict `
 
 ## Community
 
-Report bugs and request features via [GitHub Issues](https://github.com/magitech-ai/anima/issues).
+Report bugs and request features via [GitHub Issues](https://github.com/magitech-ai/animas/issues).
 
 ---
 

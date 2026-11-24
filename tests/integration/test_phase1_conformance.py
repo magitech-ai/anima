@@ -4,8 +4,8 @@ Recording basis: the upstream source cannot be executed here — a bare
 Node runtime cannot import the vendored TypeScript oracle, so no live
 side-by-side run is possible (the P1-0 verdict). Each expectation below
 is recorded as data, with a comment citing the oracle file:line it
-comes from. The test asserts anima produces exactly that recorded
-trace. Where anima's own surface differs from the oracle's, the
+comes from. The test asserts animas produces exactly that recorded
+trace. Where animas's own surface differs from the oracle's, the
 difference is pinned as a deliberate, ADR-recorded divergence and
 called out in the comment instead of being silently asserted as
 equivalent.
@@ -19,7 +19,7 @@ Two corrections to the P1-10 conformance audit are pinned here:
   Wrong — the 242-line journal oracle lives at
   phase1/p17-oracle/cordiverse-journal.ts and the L10 probes verify
   the port against it function by function.
-- F1: anima's FiberState declaration order differs from the oracle's
+- F1: animas's FiberState declaration order differs from the oracle's
   const-enum order (UNLOADING/DISPOSED/FAILED swapped). The name set
   and the wire values match; comparison is name-based (ADR 0009), so
   the order is meaningless and is pinned as-is.
@@ -59,15 +59,15 @@ from typing import Any, ClassVar
 import pytest
 import yaml
 
-import anima
-from anima import (
+import animas
+from animas import (
     Context,
     FiberState,
     Service,
     core,
     utils,
 )
-from anima.core import (
+from animas.core import (
     FIBER_STATE_WIRE_VALUES,
     AnimaError,
     AnimaErrorCode,
@@ -78,8 +78,8 @@ from anima.core import (
     is_js_expr,
     symbols,
 )
-from anima.hmr import HmrService, handle_error
-from anima.include import (
+from animas.hmr import HmrService, handle_error
+from animas.include import (
     _PARENT_UNSET,
     Conflict,
     EntryChange,
@@ -99,27 +99,27 @@ from anima.include import (
     reconcile,
     record,
 )
-from anima.jsexpr import (
+from animas.jsexpr import (
     JsExprError,
     dump_yaml,
     evaluate,
     interpolate,
     load_yaml,
 )
-from anima.loader import LoaderService, load_profile
-from anima.registry import RegistryService
-from anima.schema import (
+from animas.loader import LoaderService, load_profile
+from animas.registry import RegistryService
+from animas.schema import (
     Schema,
     SchemaError,
     ValidationError,
 )
-from anima.tree import (
+from animas.tree import (
     EntryGroup,
     EntryTree,
     Group,
     unwrap_exports,
 )
-from anima.utils import (
+from animas.utils import (
     Binary,
     Dict,
     Promisify,
@@ -151,7 +151,7 @@ def _watch_reloads(hmr: Any) -> list[dict[Any, Any]]:
 
 
 def _anima_sources() -> list[Path]:
-    return sorted(_repo_root().joinpath("src", "anima").rglob("*.py"))
+    return sorted(_repo_root().joinpath("src", "animas").rglob("*.py"))
 
 
 class _OtherService(Service):
@@ -167,13 +167,13 @@ def test_conformance_f1_fiber_state_names_and_wire_values() -> None:
     The oracle declares the states as a const enum in PENDING, LOADING,
     ACTIVE, FAILED, DISPOSED, UNLOADING order (oracle fiber.ts:147-153),
     so the wire numbers are 0–5 in that order. Deliberate divergence,
-    ADR 0009: anima is a string enum — states cross any boundary by
+    ADR 0009: animas is a string enum — states cross any boundary by
     name, never by ordinal — and the numeric values live only in the
     name-based FIBER_STATE_WIRE_VALUES record. No code path compares
     states numerically.
 
     Audit discrepancy, found by this probe: the audit's "same 6 names"
-    holds for the name SET, but anima's declaration order is PENDING,
+    holds for the name SET, but animas's declaration order is PENDING,
     LOADING, ACTIVE, UNLOADING, DISPOSED, FAILED — not the oracle's
     order. That order carries no meaning here (comparison is by name),
     so it is pinned as-is below rather than as oracle order.
@@ -502,7 +502,7 @@ async def test_conformance_f7_unload_vs_dispose() -> None:
 @pytest.mark.asyncio
 async def test_conformance_f8_restart_update_semantics() -> None:
     """restart() unloads and re-mounts; update() validates the new config
-    and restarts. Deliberate divergence, ADR 0001: anima update() is
+    and restarts. Deliberate divergence, ADR 0001: animas update() is
     async — the waterfall is async throughout — while the oracle
     update() is sync (oracle fiber.ts:754-780). The shape otherwise
     matches: assertActive first, deferred resolution while non-ACTIVE,
@@ -583,7 +583,7 @@ async def test_conformance_f10_fiber_thenable() -> None:
     """Awaiting a fiber settles it and returns the fiber itself.
 
     The oracle makes the registry wrapper thenable (oracle
-    registry.ts:331-335); anima chose __await__ on the fiber instead,
+    registry.ts:331-335); animas chose __await__ on the fiber instead,
     so there is no wrapper object and no .then — `await fiber` works
     directly.
     """
@@ -786,7 +786,7 @@ async def test_conformance_f14_resolve_config_waterfall_and_validation() -> None
     The oracle resolves config synchronously through the schema seam
     at activation (oracle fiber.ts:50-66, 667-671). Deliberate
     divergence, ADR 0008: validation stays sync, but the waterfall
-    stays async — anima's waterfall is async throughout.
+    stays async — animas's waterfall is async throughout.
     """
     assert not inspect.iscoroutinefunction(Fiber._validate_config_value)
 
@@ -878,7 +878,7 @@ async def test_conformance_f16_plugin_invocation_shape() -> None:
     The oracle constructs class components with (ctx, config), runs
     init hooks then the symbol-keyed init, and calls function
     components with (ctx, config) (oracle fiber.ts:250-259). Two
-    divergences are pinned here: anima falls back to a plain-named
+    divergences are pinned here: animas falls back to a plain-named
     init when no symbol-keyed init exists (the oracle only consults
     the symbol-keyed one), and the rename (ADR 0004) is stricter than
     the oracle — there is no `plugin` method anywhere; mounting goes
@@ -921,7 +921,7 @@ async def test_conformance_f16_plugin_invocation_shape() -> None:
     assert calls == ["hook", "symbol-init"]
 
     # Plain-named init fallback: with no symbol-keyed init, the plain
-    # init still runs (anima leniency, not in the oracle).
+    # init still runs (animas leniency, not in the oracle).
     calls.clear()
 
     class PlainInit:
@@ -1091,7 +1091,7 @@ async def _mount_consumer(
 
 
 def test_conformance_s1_standard_seam_shape() -> None:
-    """The ~standard seam is {version 1, vendor "anima", validate}.
+    """The ~standard seam is {version 1, vendor "animas", validate}.
 
     The seam reports ``{'value': ...}`` on success and
     ``{'issues': [{message, path}]}`` on failure (oracle fiber.ts:50-64
@@ -1100,7 +1100,7 @@ def test_conformance_s1_standard_seam_shape() -> None:
     """
     seam = getattr(Schema.string(), "~standard")
     assert seam.version == 1
-    assert seam.vendor == "anima"
+    assert seam.vendor == "animas"
     assert seam.validate("x") == {"value": "x"}
     assert seam.validate(7) == {
         "issues": [{"message": "expected string but got 7", "path": []}]
@@ -1605,7 +1605,7 @@ def test_conformance_s14_unported_type_fails_loud() -> None:
 
 
 def _l_repo_root() -> Path:
-    """Return the anima repo root (two levels above this file)."""
+    """Return the animas repo root (two levels above this file)."""
     return Path(__file__).resolve().parents[2]
 
 
@@ -2129,7 +2129,7 @@ async def test_conformance_l4_subtree_entry_id_prefix(
 def test_conformance_l5_is_js_expr_strict_string_check() -> None:
     """is_js_expr: a dict with a string __jsExpr (oracle utils.ts:25-32).
 
-    Deliberate strictness: anima also checks the value is a string,
+    Deliberate strictness: animas also checks the value is a string,
     where the oracle does not. A non-string value is not an
     expression node, so it is never evaluated.
     """
@@ -2156,7 +2156,7 @@ def test_conformance_l6_restricted_evaluator_attested_patterns(
     """The restricted evaluator covers the attested patterns (ADR 0006).
 
     Deliberate divergence: the oracle evaluates with a full JS engine;
-    anima evaluates a restricted set only — environment access,
+    animas evaluates a restricted set only — environment access,
     context access, process accessors, String/Number/JSON.parse,
     literals, comparisons, ternaries, boolean operators, nullish
     coalescing, optional chaining. No JS engine is embedded.
@@ -2869,7 +2869,7 @@ def test_conformance_l10_record_create_update_remove() -> None:
     assert journal == {}
 
     # DIVERGENCE (pinned, not hidden): the oracle's indexOf reports -1
-    # when the options object is absent from the group data; anima's
+    # when the options object is absent from the group data; animas's
     # identity search reports len(data) instead (0 for the empty root).
     journal2: Journal = {}
     ghost = {"id": "ghost", "name": "x"}
@@ -2910,7 +2910,7 @@ def test_conformance_l10_flatten_apply_changes_detach_place() -> None:
         flatten([{"group": True, "config": [{"id": "k", "name": "x"}]}])["k"].parent
         is None
     )
-    # DIVERGENCE (pinned, not hidden): anima fails loud with TypeError
+    # DIVERGENCE (pinned, not hidden): animas fails loud with TypeError
     # on a non-dict row; the oracle reads the property off the value.
     with pytest.raises(TypeError, match="entry must be an object"):
         flatten([{"id": "a"}, "not-a-dict"])  # type: ignore[list-item]
@@ -3306,7 +3306,7 @@ async def test_conformance_l12_group_update_wholesale_per_entry_catch(
     group_entry = loader.resolve("g")
     assert group_entry.subgroup is not None
 
-    with caplog.at_level(logging.ERROR, logger="anima.loader"):
+    with caplog.at_level(logging.ERROR, logger="animas.loader"):
         await group_entry.subgroup.update(
             [
                 _l_row(id="c"),
@@ -3721,7 +3721,7 @@ async def test_conformance_l14_external_hook_and_unwired_default(
     hmr3 = HmrService(ctx3, {"root": tmp_path})
     _l_load("lconf14_ext3", ext3_path)
     try:
-        with caplog.at_level(logging.WARNING, logger="anima.hmr"):
+        with caplog.at_level(logging.WARNING, logger="animas.hmr"):
             await hmr3._on_file_change("change", ext3_path)
         assert "full reload" in caplog.text
     finally:
@@ -3855,7 +3855,7 @@ def test_conformance_l15_error_rendering_code_frame(
     offending source line plus a caret pointer; any other error is a
     plain warning with no frame.
     """
-    with caplog.at_level(logging.WARNING, logger="anima.hmr"):
+    with caplog.at_level(logging.WARNING, logger="animas.hmr"):
         handle_error(RuntimeError("plain boom"))
     assert "plain boom" in caplog.text
     assert "File:" not in caplog.text
@@ -3863,7 +3863,7 @@ def test_conformance_l15_error_rendering_code_frame(
     src = tmp_path / "lconf15_frame.py"
     src.write_text("a = 1\nb = 2\nc = 3\n")
     err = SyntaxError("oops", (str(src), 2, 5, "b = 2\n"))
-    with caplog.at_level(logging.WARNING, logger="anima.hmr"):
+    with caplog.at_level(logging.WARNING, logger="animas.hmr"):
         handle_error(err)
     assert "File:" in caplog.text
     assert "b = 2" in caplog.text
@@ -3874,10 +3874,10 @@ def test_conformance_l15_error_rendering_code_frame(
 async def test_conformance_l15_only_oracle_event_names(tmp_path: Path) -> None:
     """rc.13 removed the legacy HMR events entirely.
 
-    hmr/change, hmr/reload and the old anima-only names are absent from the
+    hmr/change, hmr/reload and the old animas-only names are absent from the
     HMR source and never emitted across a successful reload or a failed one.
     """
-    source = (_l_repo_root() / "src" / "anima" / "hmr.py").read_text(encoding="utf-8")
+    source = (_l_repo_root() / "src" / "animas" / "hmr.py").read_text(encoding="utf-8")
     assert "hmr/change" not in source
     assert "hmr/reload" not in source
     assert "hmr/before-reload" not in source
@@ -3979,7 +3979,7 @@ async def test_conformance_l16_concurrent_reload_deduped(tmp_path: Path) -> None
 def test_conformance_l17_loader_utils_deleted() -> None:
     """loader_utils is deleted: unimportable, zero references in src/ and README.md."""
     with pytest.raises(ImportError):
-        importlib.import_module("anima.loader_utils")
+        importlib.import_module("animas.loader_utils")
 
     root = _l_repo_root()
     hits: list[str] = []
@@ -3994,7 +3994,7 @@ def test_conformance_l17_loader_utils_deleted() -> None:
 
 def test_conformance_l17_unwrap_exports_home() -> None:
     """unwrap_exports lives in tree.py, with the LoaderService alias."""
-    from anima.tree import unwrap_exports as tree_unwrap
+    from animas.tree import unwrap_exports as tree_unwrap
 
     assert unwrap_exports is tree_unwrap
     assert LoaderService.unwrap_exports is tree_unwrap
@@ -4010,13 +4010,13 @@ def test_conformance_l17_unwrap_exports_home() -> None:
     assert unwrap_exports(esm_no_default) is esm_no_default
 
 
-# The original-surface label every anima-original module carries in its
+# The original-surface label every animas-original module carries in its
 # module docstring (audit §3.6).
-_ORIGINAL_LABEL = "Anima-original surface: not part of the ported kernel."
+_ORIGINAL_LABEL = "Animas-original surface: not part of the ported kernel."
 
 
 def _repo_root() -> Path:
-    """Return the anima repo root (two levels above this file)."""
+    """Return the animas repo root (two levels above this file)."""
     return Path(__file__).resolve().parents[2]
 
 
@@ -4037,7 +4037,7 @@ def test_conformance_u_dict_alias() -> None:
     assert Dict[str, int] == dict[str, int]
     assert isinstance({"a": 1}, Dict)
     assert "Dict" in utils.__all__
-    assert "Dict" in anima.__all__
+    assert "Dict" in animas.__all__
 
 
 def test_conformance_u_no_define_property_helper() -> None:
@@ -4297,20 +4297,20 @@ def test_conformance_u_is_plain_object_narrow() -> None:
 
 
 def test_conformance_u_symbols_are_plain_strings() -> None:
-    """Symbols are plain strings under the ``"anima.*"`` prefix.
+    """Symbols are plain strings under the ``"animas.*"`` prefix.
 
     Python has no JS-``Symbol`` equivalent, so the protocol keys are
     ordinary, enumerable, collidable dict keys (oracle utils.ts:50-73
     uses a registry of unique symbols). Every value is a string and
-    carries the anima prefix — no value uses any other prefix.
+    carries the animas prefix — no value uses any other prefix.
     """
     assert core.symbols
     assert all(isinstance(value, str) for value in core.symbols.values())
-    assert all(value.startswith("anima.") for value in core.symbols.values())
+    assert all(value.startswith("animas.") for value in core.symbols.values())
     assert all(key in value for key, value in core.symbols.items())
-    assert core.symbols["init"] == "anima.init"
-    assert core.symbols["effect"] == "anima.effect"
-    assert core.symbols["invoke"] == "anima.invoke"
+    assert core.symbols["init"] == "animas.init"
+    assert core.symbols["effect"] == "animas.effect"
+    assert core.symbols["invoke"] == "animas.invoke"
 
 
 def test_conformance_u_symbols_key_set() -> None:
@@ -4320,25 +4320,25 @@ def test_conformance_u_symbols_key_set() -> None:
     ``Service.__symbols__`` and ``Context.symbols``. The earlier
     ``caller`` / ``decorator`` / ``root`` keys are gone from every
     symbols dict. ``mergeIntercept`` / ``resolveIntercept`` are kept
-    and documented in core.py as anima-only intercept-chain machinery
+    and documented in core.py as animas-only intercept-chain machinery
     with no upstream counterpart.
     """
     for mapping in (core.symbols, Service.__symbols__, Context.symbols):
         assert "config" in mapping
         assert "resolveConfig" in mapping
-        assert mapping["config"] == "anima.config"
-        assert mapping["resolveConfig"] == "anima.resolveConfig"
+        assert mapping["config"] == "animas.config"
+        assert mapping["resolveConfig"] == "animas.resolveConfig"
         assert "caller" not in mapping
         assert "decorator" not in mapping
         assert "root" not in mapping
-        assert mapping["mergeIntercept"] == "anima.mergeIntercept"
-        assert mapping["resolveIntercept"] == "anima.resolveIntercept"
+        assert mapping["mergeIntercept"] == "animas.mergeIntercept"
+        assert mapping["resolveIntercept"] == "animas.resolveIntercept"
 
     assert Service.__symbols__["init"] == core.symbols["init"]
     assert Context.symbols["effect"] == core.symbols["effect"]
 
     source = (Path(core.__file__).parent / "core.py").read_text(encoding="utf-8")
-    assert "anima-only intercept-chain machinery" in source
+    assert "animas-only intercept-chain machinery" in source
 
 
 def test_conformance_u_fiber_state_wire_values() -> None:
@@ -4347,7 +4347,7 @@ def test_conformance_u_fiber_state_wire_values() -> None:
     The oracle declares the states as a const enum in PENDING,
     LOADING, ACTIVE, FAILED, DISPOSED, UNLOADING order (oracle
     fiber.ts:147-153), so the wire numbers are 0–5 in that order.
-    Anima compares states by name (ADR 0009); this mapping is the
+    Animas compares states by name (ADR 0009); this mapping is the
     name-based wire record, and no code compares numerically.
     """
     assert core.FIBER_STATE_WIRE_VALUES == {
@@ -4374,7 +4374,7 @@ def test_conformance_u_loader_utils_deleted() -> None:
     mention it.
     """
     with pytest.raises(ImportError):
-        importlib.import_module("anima.loader_utils")
+        importlib.import_module("animas.loader_utils")
 
     root = _repo_root()
     hits: list[str] = []
@@ -4392,7 +4392,7 @@ async def test_conformance_u_core_service_kept_with_justification() -> None:
     """``CoreService`` is kept, with its justification in its docstring.
 
     The docstring records why it lives in ``src/`` rather than in a
-    test fixture — shared trivial component for anima's own suite and
+    test fixture — shared trivial component for animas's own suite and
     downstream suites — and it still mounts and activates as a live
     component.
     """
@@ -4435,7 +4435,7 @@ async def test_conformance_u_is_js_expr_wired(
 
     root = _repo_root()
     for name in ("tree.py", "jsexpr.py", "include.py"):
-        source = (root / "src" / "anima" / name).read_text(encoding="utf-8")
+        source = (root / "src" / "animas" / name).read_text(encoding="utf-8")
         assert "is_js_expr" in source, name
 
     ctx2 = Context()

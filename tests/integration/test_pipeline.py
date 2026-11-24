@@ -4,9 +4,9 @@ from typing import Any
 import pytest
 import yaml
 
-from anima.core import Context, EventMode, FiberState, Service
-from anima.loader import load_profile
-from anima.logger import Exporter, Logger, Message
+from animas.core import Context, EventMode, FiberState, Service
+from animas.loader import load_profile
+from animas.logger import Exporter, Logger, Message
 
 
 class MockModelProvider(Service):
@@ -58,7 +58,7 @@ async def test_end_to_end_agent_pipeline():
     ctx = Context()
 
     # 1. Mount provider and tool registry
-    _provider_fib = ctx.use(MockModelProvider, model_name="anima-core-v1")
+    _provider_fib = ctx.use(MockModelProvider, model_name="animas-core-v1")
     _tools_fib = ctx.use(MockToolRegistry)
     agent_fib = ctx.use(MockAgent)
 
@@ -87,10 +87,10 @@ async def test_end_to_end_agent_pipeline():
     ctx.on("agent/response", response_tagger, mode=EventMode.WATERFALL)
 
     # 3. Execute agent
-    reply = await ctx.agent.run("  hello anima!  ")
+    reply = await ctx.agent.run("  hello animas!  ")
     assert (
         reply
-        == "[anima-core-v1] response to: <system>Safe</system> hello anima! [verified]"
+        == "[animas-core-v1] response to: <system>Safe</system> hello animas! [verified]"
     )
     assert ctx.provider.generation_count == 1
     assert len(ctx.agent.history) == 1
@@ -116,13 +116,13 @@ async def test_agent_cascade_disposal_and_recovery():
     assert agent_fib.state == FiberState.PENDING
 
     # Re-mount a new provider instance -> the original agent recovers
-    _new_provider_fib = ctx.use(MockModelProvider, model_name="anima-v2")
+    _new_provider_fib = ctx.use(MockModelProvider, model_name="animas-v2")
     await ctx.flush()
     await agent_fib.await_settle()
 
     assert ctx.has("provider")
     assert agent_fib.state == FiberState.ACTIVE
-    assert ctx.provider.model_name == "anima-v2"
+    assert ctx.provider.model_name == "animas-v2"
 
 
 @pytest.mark.asyncio

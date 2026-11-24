@@ -5,7 +5,7 @@ Status: accepted (user decision)
 
 ## Context
 
-ADR 0014 recorded that Anima shipped surfaces not present in the ratified
+ADR 0014 recorded that Animas shipped surfaces not present in the ratified
 target, canonical Cordis v4.0.0-rc.13: the volatile config mechanism (from the
 older DeepSeek Harness fork), the legacy polling `WatcherService`, the
 `uv`-based `PkgService`, and `loader.builtins` / `loader.exit()`.
@@ -17,7 +17,7 @@ hook in a coordinated change.
 
 ## Decision
 
-- `src/anima/volatile.py`, `src/anima/watcher.py`, and `src/anima/pkg.py` are
+- `src/animas/volatile.py`, `src/animas/watcher.py`, and `src/animas/pkg.py` are
   deleted, together with their exports and tests.
 - `Schema.volatile()`, `equal_except_volatile()`, `loader/volatile-update`,
   `loader.builtins`, and `loader.exit()` are removed.
@@ -32,7 +32,7 @@ hook in a coordinated change.
 
 ## Consequences
 
-- Anima's public surface is the rc.13 port plus the `†` Magitech additions;
+- Animas's public surface is the rc.13 port plus the `†` Magitech additions;
   no DSH-fork-only config semantics remain.
 - Downstream consumers of the volatile event must use rc.13 config lifecycle
   hooks (`internal/update` / `internal/commit`) instead.

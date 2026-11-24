@@ -2,7 +2,7 @@
 
 ## Completed conformance milestone (historical record)
 
-Anima completed its conformance milestone against canonical Cordis
+Animas completed its conformance milestone against canonical Cordis
 `v4.0.0-rc.13` (`cordiverse/cordis`, commit `bc9fae7`, published 2026-11-12),
 with the paper ["A Programming Paradigm for Spatiotemporal Composability"](https://arxiv.org/abs/2608.25512)
 as the theory reference. The decision and its ratification are recorded in
@@ -10,7 +10,7 @@ as the theory reference. The decision and its ratification are recorded in
 [ADR 0015](docs/adr/0015-rc13-target-ratification.md). DeepSeek Harness at
 `fcc0ad46` (`dsh v0.2.2-rc.1`) remains historical provenance.
 
-Anima is now an independent project (ADR 0017). This map is evidence of a
+Animas is now an independent project (ADR 0017). This map is evidence of a
 completed milestone, not a forward-looking pin or roadmap: no future Cordis
 release is a target.
 
@@ -22,23 +22,23 @@ release is a target.
 - `filterwarnings = ["error", "ignore::ResourceWarning"]` is configured, so
   unawaited coroutines and other unexpected warnings fail the suite.
 - 67 executable rc.13 core conformance probes live in
-  `tests/unit/anima/test_rc13_core_conformance.py`. Each cites the upstream
+  `tests/unit/animas/test_rc13_core_conformance.py`. Each cites the upstream
   `file:line` it validates.
 
 Items proven against rc.13:
 
 | Item | Verdict | Evidence |
 |---|---|---|
-| Effect shapes: disposer, iterable, awaitable, async iterable | DONE | `src/anima/core.py` `Context.effect`/`Fiber._collect_effect`; probes in `test_rc13_core_conformance.py` (upstream `core/src/fiber.ts:60-76,240-289`) |
+| Effect shapes: disposer, iterable, awaitable, async iterable | DONE | `src/animas/core.py` `Context.effect`/`Fiber._collect_effect`; probes in `test_rc13_core_conformance.py` (upstream `core/src/fiber.ts:60-76,240-289`) |
 | Async-generator effect closed on epoch change | DONE | `Fiber._collect_effect` `finally: aclose()`; probe `test_rc13_async_generator_effect_is_closed_on_epoch_change` (upstream `#268`, `fiber.ts:267-285`) |
 | Per-step epoch guard for effect iterators | DONE | same code and probes (paper Algorithm 1) |
-| `parallel` aggregates every failure (one → `ExceptionGroup` of one) | DONE | `src/anima/events.py` (upstream `core/src/events.ts:110-119`); rc.13 probe |
-| `waterfall` rejects a second `next()` call | DONE | `src/anima/events.py` (upstream `events.ts:155-157`); rc.13 probe |
-| `registry.delete()` removed | DONE | deleted from `src/anima/registry.py`; disposal is the public path (upstream `registry.ts` has no `delete`) |
+| `parallel` aggregates every failure (one → `ExceptionGroup` of one) | DONE | `src/animas/events.py` (upstream `core/src/events.ts:110-119`); rc.13 probe |
+| `waterfall` rejects a second `next()` call | DONE | `src/animas/events.py` (upstream `events.ts:155-157`); rc.13 probe |
+| `registry.delete()` removed | DONE | deleted from `src/animas/registry.py`; disposal is the public path (upstream `registry.ts` has no `delete`) |
 | FAILED fiber recovers only via `update()` | DONE | `Fiber._setEpoch` error guard; rc.13 probe (upstream `fiber.ts:435-436`) |
 | `notify` respects isolation realms | DONE | `ReflectService.notify` default filter; rc.13 probe (upstream `reflect.ts:251-254`) |
 | `set` rejects an unprovided name | DONE | `Context.set` delegates to `ReflectService.set`; rc.13 probe (upstream `reflect.ts:200-211`) |
-| `bail` rejects async listeners inside a running loop | DONE (Python adaptation) | `src/anima/events.py`; rc.13 probe. JS returns a Promise; Python closes the coroutine and fails loud rather than leaking it |
+| `bail` rejects async listeners inside a running loop | DONE (Python adaptation) | `src/animas/events.py`; rc.13 probe. JS returns a Promise; Python closes the coroutine and fails loud rather than leaking it |
 | `internal/commit` receives raw config, including on non-ACTIVE fibers | DONE | `Fiber.update`; rc.13 probes (upstream `fiber.ts:536-542`) |
 | Entry rebuild on `name` / `inject` change | DONE | `Entry.update`; rc.13 probe (upstream `loader/src/config/entry.ts:243-248`) |
 
@@ -52,11 +52,11 @@ not substitutes for that evidence.
 
 | Item | Status | Upstream evidence |
 |---|---|---|
-| Programmatic `ctx.hmr.reconcile()` returning `{settled, aborted, skipped}` | DONE | `src/anima/hmr.py`; 9 probes in `test_rc13_hmr_reconcile.py` (upstream `hmr/src/index.ts:286-301,525-753,785-836`) |
+| Programmatic `ctx.hmr.reconcile()` returning `{settled, aborted, skipped}` | DONE | `src/animas/hmr.py`; 9 probes in `test_rc13_hmr_reconcile.py` (upstream `hmr/src/index.ts:286-301,525-753,785-836`) |
 | Per-unit commit/abort isolation in HMR | DONE | stale modules are independent units; aborted units restore their module cache and do not block commits (upstream `index.ts:674-721`) |
 | Host-module / native-addon skip reasons | DONE | `SkipReason` enum and `_is_host_module`; probes in `test_rc13_hmr_reconcile.py` (upstream `index.ts:546-553,819-836`) |
 | Fiber-scoped `internal/update` listeners | DONE | `EventBus` owner filtering with explicit target fiber; rc.13 probe (upstream `events.ts:54-79`) |
-| `fs` service with mountable providers and `ctx.fs.watch()` | DONE | `src/anima/fs.py`; 14 probes in `test_fs.py` (upstream `packages/fs/src/index.ts:39-148`, `watcher.ts:35-111`, `packages/fs-node/src/index.ts:23-29`) |
+| `fs` service with mountable providers and `ctx.fs.watch()` | DONE | `src/animas/fs.py`; 14 probes in `test_fs.py` (upstream `packages/fs/src/index.ts:39-148`, `watcher.ts:35-111`, `packages/fs-node/src/index.ts:23-29`) |
 | Global isolate realms: a string label shares bindings across entries | DONE | `Context._shared_isolated` root table and cross-context wake-up; rc.13 probe (paper §5.2.1 / Algorithm 7) |
 | Loader explicit injection scopes: entry inject runs in an outer fiber, component in an inner fiber | DONE | `Entry._init` outer fiber with entry inject; inner component fiber on the entry registry; probes in `test_rc13_core_conformance.py` (upstream `loader/src/config/entry.ts:35-46,353-372`) |
 | Config-path error locations for failed expressions | DONE | `JsExprError.path`, `interpolate()` path annotation, loader entry-id note; probes in `test_rc13_core_conformance.py` (upstream `loader/config/utils.ts:64-96`) |
@@ -69,14 +69,14 @@ not substitutes for that evidence.
 | Entry-options validation | DONE | `validate_options()` / `EntryValidationError` on create paths; probes (upstream `loader/config/utils.ts:163-209`) |
 | `emit()` propagates listener exceptions | DONE | `EventBus.emit` no longer swallows sync errors; probes (upstream `core/src/events.ts:121-126`) |
 | DSH-fork extension set removed (volatile, legacy watcher, pkg, loader.builtins/exit) | DONE | User decision ADR 0016; modules/tests deleted, `fs` watch is the only watch surface |
-| Include journal / patch reconciliation | DONE | Canonical rc.13 ships `packages/include/src/journal.ts` and `patch.ts`; Anima ports them in `src/anima/include.py` |
+| Include journal / patch reconciliation | DONE | Canonical rc.13 ships `packages/include/src/journal.ts` and `patch.ts`; Animas ports them in `src/animas/include.py` |
 | Timer async-iterator interval, aliases and context mixin | DONE | `TimerService.interval(delay)` async iterator, `setTimeout`/`setInterval`, `ctx.mixin("timer", ...)`; probes (upstream `packages/timer/src/index.ts:4-25,54-104`) |
 | Registry replace: runtime move + `internal/replace` | DONE | `Fiber.replace` moves the fiber into the new runtime, emits `internal/replace` and re-checks deps (upstream `core/src/fiber.ts:401-416`, `events.ts:214`) |
 
 The DSH-fork extension set was deleted by user decision (ADR 0016). The
 Magitech-original CLI/server/HTTP surfaces were removed before 1.0.0 by user
 decision (ADR 0018); they were never Cordis parity items. The rc.13 target and
-divergence policy were ratified in ADR 0015; Anima's independence and 1.0
+divergence policy were ratified in ADR 0015; Animas's independence and 1.0
 contract are recorded in ADR 0017. This map is a completed historical
 conformance record, not a forward-looking roadmap.
 

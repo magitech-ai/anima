@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from anima.events import DisposableList
+from animas.events import DisposableList
 
 
 def test_empty() -> None:

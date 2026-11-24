@@ -1,7 +1,7 @@
 [project]
-name = "anima"
+name = "animas"
 version = "1.0.0"
-description = "Anima: The Composable Micro-Kernel by Magitech"
+description = "Animas: The Composable Micro-Kernel by Magitech"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
@@ -28,7 +28,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "--cov=anima --cov-branch --cov-report=term-missing --cov-fail-under=100"
+addopts = "--cov=animas --cov-branch --cov-report=term-missing --cov-fail-under=100"
 # Magitech coding standard: unexpected warnings are defects. ResourceWarning is
 # ignored because asyncio transports legitimately emit it during interpreter
 # shutdown; every other warning fails the suite (including unawaited coroutines).

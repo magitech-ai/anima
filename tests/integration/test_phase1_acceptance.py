@@ -11,8 +11,8 @@ Recording basis: the upstream source cannot be executed here — a bare
 Node runtime cannot import the vendored TypeScript oracle, so no live
 side-by-side run is possible (the P1-0 verdict). Each expectation below
 is therefore recorded as data, with a comment citing the oracle
-file:line it comes from. The test asserts anima produces exactly that
-recorded trace. Where anima's own surface differs from the oracle's,
+file:line it comes from. The test asserts animas produces exactly that
+recorded trace. Where animas's own surface differs from the oracle's,
 the difference is pinned as count-only and called out in the comment
 instead of being silently asserted as equivalent.
 """
@@ -24,8 +24,8 @@ from typing import Any, ClassVar
 
 import pytest
 
-from anima.core import Context, EventMode, FiberState, Service
-from anima.schema import Schema, ValidationError
+from animas.core import Context, EventMode, FiberState, Service
+from animas.schema import Schema, ValidationError
 
 # ---------------------------------------------------------------------------
 # Shared fixture: one plugin, written once, reused by every test.

@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-Anima's `FiberState` is a string enum with values `"PENDING"`,
+Animas's `FiberState` is a string enum with values `"PENDING"`,
 `"LOADING"`, `"ACTIVE"`, `"UNLOADING"`, `"DISPOSED"`, `"FAILED"`, in
 that order. Upstream's is a numeric const enum: PENDING = 0, LOADING = 1,
 ACTIVE = 2, FAILED = 3, DISPOSED = 4, UNLOADING = 5. The names match;
@@ -17,7 +17,7 @@ therefore diverges.
 
 Name-based wire mapping. State crosses any boundary — logs, serialized
 sessions, cross-runtime comparison — by name, never by ordinal or
-numeric value. Anima keeps its string enum; the mapping is:
+numeric value. Animas keeps its string enum; the mapping is:
 
 | Name | Upstream numeric value |
 | --- | --- |

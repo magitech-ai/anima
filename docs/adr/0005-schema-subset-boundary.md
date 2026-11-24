@@ -19,7 +19,7 @@ The Config surface actually used, ranked by frequency: `object`, `number`,
 `string`, `.default`, `.min` / `.max`, `.step`, `natural`, `.required`,
 `.volatile`, `union`, `boolean`, `array`, `const`, `dict`, `.pattern`,
 `.role`, `transform`, `never`, `.loose`, `.extra`, and `toJSON` round-trip.
-The real gaps against anima's `Schema` are: no `~standard` seam, no
+The real gaps against animas's `Schema` are: no `~standard` seam, no
 `Volatile`, no `natural` / `step`, no `pattern` / `role`, and object/union
 error semantics that silently differ.
 

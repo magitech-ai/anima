@@ -1,6 +1,6 @@
 # Testing contract
 
-Anima's test suite is the executable evidence for conformance with the port
+Animas's test suite is the executable evidence for conformance with the port
 target recorded in [PARITY.md](PARITY.md) (canonical Cordis `v4.0.0-rc.13`).
 
 ## Commands
@@ -18,11 +18,11 @@ shared pre-commit hook additionally runs the cross-repo `check_all.py --fast`.
 
 ## Structure
 
-- `tests/unit/anima/` mirrors `src/anima/` module by module.
+- `tests/unit/animas/` mirrors `src/animas/` module by module.
 - `tests/integration/` covers end-to-end component pipelines and the earlier
   rc.1 acceptance/conformance suites (historical target).
-- `tests/unit/anima/test_rc13_core_conformance.py` and
-  `tests/unit/anima/test_rc13_hmr_reconcile.py` are the rc.13 conformance
+- `tests/unit/animas/test_rc13_core_conformance.py` and
+  `tests/unit/animas/test_rc13_hmr_reconcile.py` are the rc.13 conformance
   probes. Each cites the upstream `file:line` or paper algorithm it checks.
 
 ## Rules

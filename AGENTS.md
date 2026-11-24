@@ -1,8 +1,8 @@
 # Agent Guidelines
 
-## Anima Architecture & Invariants
+## Animas Architecture & Invariants
 
-- **Repository Role**: `anima` is the foundational asynchronous micro-kernel and event pipeline engine. It provides:
+- **Repository Role**: `animas` is the foundational asynchronous micro-kernel and event pipeline engine. It provides:
   - Asynchronous event waterfalls (`ctx.waterfall()`) with middleware delegation.
   - Hierarchical execution contexts with dependency injection.
   - Dynamic component and lifecycle management.
@@ -18,10 +18,10 @@ Shared standards, workflow and quality gates:
 Run `python3 ../agents-home/scripts/check_all.py --fast` before committing;
 CI runs the full gate.
 
-## Anima-Specific References
+## Animas-Specific References
 
 ### Issue tracker
-GitHub Issues via `gh` CLI (`anima` organization). See `docs/agents/issue-tracker.md`.
+GitHub Issues via `gh` CLI (`animas` organization). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 Canonical five-role triage vocabulary. See `docs/agents/triage-labels.md`.

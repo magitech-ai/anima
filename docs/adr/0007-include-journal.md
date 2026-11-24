@@ -21,7 +21,7 @@ The upstream surface is: `JournalRecord` (Remove | Upsert, with `created`,
 mutations into the journal, reconciles them against file changes, and
 drains the journal on write.
 
-Anima's `Journal` is a partial re-invention of that surface: it has the
+Animas's `Journal` is a partial re-invention of that surface: it has the
 `upsert` / `remove` kinds and the `created` flag with shallow coalescing,
 but is missing `parent` / `position` / `changes`, the deep-equal diff,
 `mergeRecords`, `detach` / `place`, `flatten`, `reconcile`, and the
@@ -30,10 +30,10 @@ read by any production code.
 
 ## Decision
 
-Re-derive anima's journal from the upstream journal module in chunk P1-7
+Re-derive animas's journal from the upstream journal module in chunk P1-7
 (port, not delete). Deletion is rejected: the feature exists upstream and
 is the mechanism that reconciles file edits with runtime edits, so
-dropping it would leave include without write-back. Anima's
+dropping it would leave include without write-back. Animas's
 `Journal` / `JournalRecord` / `diff_entries` are replaced by the ported
 surface; the loader's `internal/update` write-back and `Include.write()`
 drain the journal as upstream does.
@@ -42,7 +42,7 @@ drain the journal as upstream does.
 
 - Chunk P1-7 carries the journal port alongside the include replacement;
   the journal is not a separate chunk.
-- Until P1-7 lands, anima's journal stays dead code — it is not wired up
+- Until P1-7 lands, animas's journal stays dead code — it is not wired up
   in P1-0 and must not be presented as working.
 - The workspace plan's §2.2 "no oracle" claim is corrected by errata; the
   correction, not a silent re-scope, is the record.

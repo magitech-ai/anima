@@ -5,7 +5,7 @@ Status: accepted
 
 ## Context
 
-Anima has no async-dispose protocol on `Fiber` — no `__aenter__` /
+Animas has no async-dispose protocol on `Fiber` — no `__aenter__` /
 `__aexit__`, no async-dispose symbol; disposal is `await
 fiber.dispose()`. Upstream has no async-dispose symbol anywhere in its
 core either: `Fiber.dispose` is a plain async dispose returning a
