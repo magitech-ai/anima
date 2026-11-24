@@ -1,6 +1,6 @@
 [project]
 name = "animas"
-version = "1.0.1"
+version = "1.0.2"
 description = "Animas: The Composable Micro-Kernel by Magitech"
 readme = "README.md"
 license = "MIT"
