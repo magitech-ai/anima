@@ -101,7 +101,11 @@ class _Token:
 _NUMBER_RE = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 _IDENT_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 _DECIMAL_RE = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
-_HEX_RE = re.compile(r"^[+-]?0[xX][0-9a-fA-F]+$")
+# ES2023 7.1.4.1: a sign is only allowed on a decimal literal, never on a
+# hex/binary/octal one, so Number('-0x10') is NaN in JavaScript.
+_HEX_RE = re.compile(r"^0[xX][0-9a-fA-F]+$")
+_BIN_RE = re.compile(r"^0[bB][01]+$")
+_OCT_RE = re.compile(r"^0[oO][0-7]+$")
 _STRING_ESCAPES = {
     "n": "\n",
     "r": "\r",
@@ -455,6 +459,10 @@ def _js_number(value: Any) -> Any:
         if _HEX_RE.match(text):
             # The regex already guarantees a valid hex literal.
             return int(text, 16)
+        if _BIN_RE.match(text):
+            return int(text, 2)
+        if _OCT_RE.match(text):
+            return int(text, 8)
         if _DECIMAL_RE.match(text):
             num = float(text)
             if math.isnan(num) or math.isinf(num):
