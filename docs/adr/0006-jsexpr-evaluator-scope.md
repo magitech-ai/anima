@@ -1,7 +1,9 @@
 # 0006. Expression evaluation scope for configuration values
 
 Date: 2026-11-11
-Status: accepted
+Status: accepted — superseded by [ADR 0022](0022-remove-expression-dialect.md)
+(2026-11-24): the restricted expression dialect was removed in 2.0.0. This
+record is kept for historical context.
 
 ## Context
 

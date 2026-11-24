@@ -101,8 +101,19 @@ components:
       mode: turbo
 ```
 
-Use `disabled_on: [win32]` or `enabled_on: [linux, darwin]` to gate an entry by
-host platform; unknown platform names fail at load time.
+Use `disabled_on` / `enabled_on` to gate an entry by host platform:
+
+```yaml
+components:
+  - id: bash-local
+    name: my_app:LocalBashExecutor
+    disabled_on: [win32]
+  - id: pwsh-local
+    name: my_app:LocalPwshExecutor
+    enabled_on: [win32]
+```
+
+Unknown platform names fail at load time.
 
 Load with `load_profile(ctx, "animas.yaml")`. Environment variables interpolate
 as `${VAR}`, `${env.VAR}` or `${VAR:default}`; a full-match interpolation coerces
