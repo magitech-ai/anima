@@ -20,7 +20,14 @@ from collections.abc import Awaitable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 
-from animas.core import Context, Fiber, FiberState, is_js_expr
+from animas.core import (
+    KNOWN_PLATFORMS,
+    Context,
+    Fiber,
+    FiberState,
+    is_js_expr,
+    platform_name,
+)
 from animas.events import EventMode
 from animas.jsexpr import evaluate as evaluate_js_expr
 from animas.jsexpr import interpolate as interpolate_js_expr
@@ -205,6 +212,29 @@ def validate_options(
         "a boolean",
         lambda v: isinstance(v, bool) or is_js_expr(v),
     )
+
+    def check_platforms(key: str) -> None:
+        value = options.get(key)
+        if value is None:
+            return
+        if not isinstance(value, list):
+            issues.append(
+                {"message": f"{key} must be a list of platform names", "path": [key]}
+            )
+            return
+        for index, item in enumerate(value):
+            if not isinstance(item, str) or (
+                item not in KNOWN_PLATFORMS and item != platform_name()
+            ):
+                issues.append(
+                    {
+                        "message": f"{key}[{index}] must be a known platform name",
+                        "path": [key, index],
+                    }
+                )
+
+    check_platforms("disabled_on")
+    check_platforms("enabled_on")
     if options.get("group") is True:
         check("config", "an array", lambda v: isinstance(v, list), required=True)
     check(
@@ -274,6 +304,8 @@ class EntryOptions(TypedDict, total=False):
     config: Any
     group: bool | None
     disabled: bool | None
+    disabled_on: list[str] | None
+    enabled_on: list[str] | None
     inject: dict[str, Any] | list[str] | None
     intercept: dict[str, dict[str, Any]] | None
     isolate: dict[str, bool | str] | None
@@ -611,7 +643,15 @@ class Entry:
         raw = options.get("disabled")
         if is_js_expr(raw):
             return bool(self.evaluate(raw["__jsExpr"]))
-        return bool(raw)
+        if bool(raw):
+            return True
+        enabled_on = options.get("enabled_on")
+        if enabled_on is not None:
+            return platform_name() not in enabled_on
+        disabled_on = options.get("disabled_on")
+        if disabled_on is not None:
+            return platform_name() in disabled_on
+        return False
 
     def evaluate(self, expr: str) -> Any:
         """Evaluate a JS expression against this entry's context."""
