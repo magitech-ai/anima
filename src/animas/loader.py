@@ -16,7 +16,8 @@ from typing import Any
 
 from animas.core import Context, Fiber, FiberState, Service, _current_fiber
 from animas.events import Disposer, EventMode
-from animas.jsexpr import JsExprError, dump_yaml, interpolate, load_yaml
+from animas.jsexpr import JsExprError, interpolate
+from animas.profile_yaml import dump_yaml, load_yaml
 from animas.tree import (
     _UNSET,
     Entry,

@@ -1412,7 +1412,7 @@ async def test_internal_config_group_keeps_child_rows_literal(
 async def test_js_expr_yaml_round_trip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from animas.jsexpr import load_yaml
+    from animas.profile_yaml import load_yaml
 
     _install_jsexpr_mod(monkeypatch)
     profile = tmp_path / "profile.yaml"
