@@ -384,3 +384,74 @@ async def test_reroute_awaits_async_disposer(tmp_path: Path) -> None:
     ctx.fs.mount(tmp_path, AsyncProvider())
     await asyncio.sleep(0.01)
     assert first.disposed == 1
+
+
+@pytest.mark.asyncio
+async def test_local_fs_watch_scans_symlinked_directories(tmp_path: Path) -> None:
+    """Files reachable only through a symlinked directory are watched."""
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "deep.txt"
+    target.write_text("one")
+    # The only path from the watched root to the file is through this link.
+    (watched / "link").symlink_to(outside, target_is_directory=True)
+    # A self-referential link must not make the scan loop forever.
+    (outside / "loop").symlink_to(watched, target_is_directory=True)
+
+    ctx = Context()
+    ctx.use(FsService)
+    ctx.use(LocalFs)
+    await ctx.flush()
+    watcher = ctx.fs.watch(watched)
+    changed: list[str] = []
+    watcher.on("change", changed.append)
+    await asyncio.sleep(0.1)
+    target.write_text("two")
+    await asyncio.sleep(0.15)
+    assert any(url.endswith("deep.txt") for url in changed)
+    await watcher.dispose()
+
+
+def test_walk_tree_skips_vanished_directories(tmp_path: Path, monkeypatch: Any) -> None:
+    """A directory that vanishes between listing and stat is skipped."""
+    from anima.fs import _walk_tree
+
+    (tmp_path / "keep.txt").write_text("x")
+    real_stat = Path.stat
+    real_is_dir = Path.is_dir
+
+    def failing_stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self.name == "keep.txt":
+            raise OSError("vanished")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+    monkeypatch.setattr(
+        Path,
+        "is_dir",
+        lambda self: True if self.name == "keep.txt" else real_is_dir(self),
+    )
+    assert [p.name for p in _walk_tree(tmp_path)] == ["keep.txt"]
+
+
+def test_walk_tree_skips_unreadable_directories(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A directory whose scandir fails is skipped without aborting the walk."""
+    import os
+
+    from anima.fs import _walk_tree
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "keep.txt").write_text("x")
+    real_scandir = os.scandir
+
+    def failing_scandir(path: Any) -> Any:
+        if Path(path).name == "sub":
+            raise OSError("denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr("anima.fs.os.scandir", failing_scandir)
+    assert [p.name for p in _walk_tree(tmp_path)] == ["sub"]

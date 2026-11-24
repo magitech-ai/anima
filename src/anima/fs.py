@@ -11,10 +11,11 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import os
 import re
 import urllib.parse
 import urllib.request
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, runtime_checkable
@@ -22,6 +23,41 @@ from typing import Any, ClassVar, Protocol, runtime_checkable
 from anima.core import Context, Service
 
 logger = logging.getLogger("anima.fs")
+
+
+def _walk_tree(base: Path) -> Iterator[Path]:
+    """Yield descendants of base, following symlinked directories.
+
+    ``Path.rglob`` does not descend into symlinked directories on Python
+    3.12, which makes files behind a link invisible to the watcher. Track
+    directory identities so a link cycle terminates.
+    """
+    visited: set[tuple[int, int]] = set()
+
+    def descend(directory: Path) -> Iterator[Path]:
+        try:
+            stat = directory.stat()
+        except OSError:
+            return
+        identity = (stat.st_dev, stat.st_ino)
+        if identity in visited:
+            return
+        visited.add(identity)
+        try:
+            with os.scandir(directory) as entries:
+                children = [Path(entry.path) for entry in entries]
+        except OSError:
+            return
+        for path in children:
+            yield path
+            try:
+                if path.is_dir():
+                    yield from descend(path)
+            except OSError:  # pragma: no cover - broken link/vanished path
+                continue
+
+    yield from descend(base)
+
 
 _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z\d+.-]*:$")
 _DRIVE = re.compile(r"^[a-zA-Z]:")
@@ -323,7 +359,7 @@ class LocalFs(BaseFs):
             result: dict[Path, tuple[float, int]] = {}
             if not root.exists():
                 return result
-            paths = [root] if root.is_file() else [p for p in root.rglob("*")]
+            paths = [root] if root.is_file() else list(_walk_tree(root))
             for path in paths:
                 if not included(path):
                     continue
