@@ -16,7 +16,7 @@ release is a target.
 
 ## Verified baseline at 1.0.0 (2026-11-24)
 
-- `uv run pytest`: 1148 passed, 100% statement and branch coverage.
+- `uv run pytest`: 1151 passed, 100% statement and branch coverage.
 - `uv run ruff check src tests`, `uv run ruff format --check src tests`,
   `uv run python -m mypy src`: green.
 - `filterwarnings = ["error", "ignore::ResourceWarning"]` is configured, so
