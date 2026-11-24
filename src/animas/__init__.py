@@ -2,7 +2,7 @@
 Animas: The Composable Micro-Kernel by Magitech.
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 from animas.core import Context, Fiber, FiberState, Service, inject
 from animas.events import DisposableList, Disposer, EventBus, EventMode, is_bailed

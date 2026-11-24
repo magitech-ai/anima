@@ -13,17 +13,17 @@ It is a library kernel: hosts build their own CLI, server and agent surfaces on 
 
 ## Status
 
-`1.0.1` — stable public API under a
+`1.0.2` — stable public API under a
 [SemVer compatibility policy](docs/COMPATIBILITY.md): additions and fixes in
 `1.x`, breaking changes only in `2.0.0` with deprecation where feasible.
 
 ## Install
 
 ```sh
-pip install animas
+uv add animas
 ```
 
-In a uv-managed project: `uv add animas`. Requires Python 3.12+.
+Requires Python 3.12+.
 
 ## Quickstart
 
