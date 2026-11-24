@@ -362,6 +362,76 @@ async def test_loader_persistence_no_auto_save(tmp_path: Path):
     assert re_read[0]["config"] == {"opt": 999}
 
 
+@pytest.mark.asyncio
+async def test_failed_update_does_not_write_back_to_the_entry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A restart that rejects the new config does not reach the entry.
+
+    ``internal/commit`` runs the loader's write-back: the entry options get the
+    new config in memory, and a file-backed tree rewrites its file. Emitting it
+    before the update waterfall settled meant a rejected config was recorded
+    for an entry whose fiber never loaded it.
+    """
+    ctx = Context()
+    profile = tmp_path / "profile.yaml"
+
+    dummy_mod = types.ModuleType("reject_mod")
+
+    class Reject:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            if dict(config or {}).get("reject"):
+                raise RuntimeError("refuses this config")
+
+    dummy_mod.Reject = Reject
+    monkeypatch.setitem(sys.modules, "reject_mod", dummy_mod)
+
+    loader = LoaderService(ctx, {"filename": profile})
+    loader.load([{"id": "r", "name": "reject_mod:Reject", "config": {"v": 1}}])
+    await ctx.flush()
+
+    fiber = loader.resolve("r").fiber
+    assert fiber is not None
+    with pytest.raises(RuntimeError, match="refuses this config"):
+        await fiber.update({"reject": True})
+
+    assert loader.resolve("r").options["config"] == {"v": 1}
+    assert fiber.config == {"v": 1}
+
+
+@pytest.mark.asyncio
+async def test_failed_update_does_not_leave_a_config_key_behind(
+    monkeypatch,
+) -> None:
+    """Rolling back an entry that never had a config drops the added key."""
+    ctx = Context()
+
+    dummy_mod = types.ModuleType("reject_nokey_mod")
+    reject_cfg: dict[str, Any] = {"reject": True}
+
+    class Reject:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            if config and config.get("reject"):
+                raise RuntimeError("refuses this config")
+
+    dummy_mod.Reject = Reject
+    monkeypatch.setitem(sys.modules, "reject_nokey_mod", dummy_mod)
+
+    loader = LoaderService(ctx)
+    loader.load([{"id": "n", "name": "reject_nokey_mod:Reject"}])
+    await ctx.flush()
+    entry = loader.resolve("n")
+    assert "config" not in entry.options
+
+    fiber = entry.fiber
+    assert fiber is not None
+    with pytest.raises(RuntimeError, match="refuses this config"):
+        await fiber.update(reject_cfg)
+
+    assert "config" not in entry.options
+    assert fiber.config == {}
+
+
 def test_load_profile_error_handling(tmp_path: Path):
     ctx = Context()
 
@@ -1512,3 +1582,191 @@ class TestAtomicProfileSave:
         assert [p.name for p in tmp_path.iterdir()] == ["profile.yaml"]
         assert os.replace is replace_then_drop  # sanity: the patch was live
         monkeypatch.setattr("anima.loader.os.replace", real_replace)
+
+
+@pytest.mark.asyncio
+async def test_renaming_an_entry_rebinds_its_fiber(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry whose row names another component swaps the mounted component.
+
+    A rename is not a config change: the fiber restarts on the new component
+    and the registry record follows it, because the registry is keyed by the
+    component and ``Fiber.replace()`` does not re-key it.
+    """
+    ctx = Context()
+    loader = LoaderService(ctx)
+    loads: list[str] = []
+    mod = types.ModuleType("rebind_mod")
+
+    class First:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            loads.append("first")
+
+    class Second:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            loads.append("second")
+
+    mod.First = First
+    mod.Second = Second
+    monkeypatch.setitem(sys.modules, "rebind_mod", mod)
+
+    loader.load([{"id": "r", "name": "rebind_mod:First"}])
+    await ctx.flush()
+    entry = loader.resolve("r")
+    fiber = entry.fiber
+    assert fiber is not None and fiber.target is First
+
+    await loader.update("r", {"name": "rebind_mod:Second", "config": {"v": 1}})
+    await loader.await_all()
+    await ctx.flush()
+
+    assert loads == ["first", "second"]
+    # rc.13 rebuilds the entry fiber on a name change (entry.ts:243), so the
+    # mounted fiber is the new one, not the previously captured object.
+    fiber = entry.fiber
+    assert fiber is not None
+    assert fiber.target is Second
+    assert fiber.state == FiberState.ACTIVE
+    assert entry.options["name"] == "rebind_mod:Second"
+    # The runtime record moved with the fiber: no stale entry under the old
+    # component, and the new one owns exactly the mounted fiber.
+    runtimes = dict(entry.ctx.registry.entries())
+    assert First not in runtimes
+    assert runtimes[Second].fibers == [fiber]
+
+
+@pytest.mark.asyncio
+async def test_rename_whose_import_fails_restores_the_row_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rename that cannot be imported leaves the row naming the old component."""
+    ctx = Context()
+    loader = LoaderService(ctx)
+    mod = types.ModuleType("rebind_fail_mod")
+    loads: list[str] = []
+
+    class First:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            loads.append("first")
+
+    mod.First = First
+    monkeypatch.setitem(sys.modules, "rebind_fail_mod", mod)
+
+    loader.load([{"id": "f", "name": "rebind_fail_mod:First"}])
+    await ctx.flush()
+    entry = loader.resolve("f")
+    fiber = entry.fiber
+    assert fiber is not None
+
+    with pytest.raises(AttributeError):
+        await loader.update("f", {"name": "rebind_fail_mod:Absent"})
+    await loader.await_all()
+    await ctx.flush()
+
+    assert entry.options["name"] == "rebind_fail_mod:First"
+    assert fiber.target is First
+    assert fiber.state == FiberState.ACTIVE
+    assert loads == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_rename_rebinds_when_the_old_runtime_is_already_gone() -> None:
+    """A fiber whose old component has no runtime record still gets a record."""
+    ctx = Context()
+    fiber = ctx.use(lambda c: None)
+    await ctx.flush()
+    registry = ctx.registry
+    assert fiber.target is not None
+    old_runtime = registry.get(fiber.target)
+    assert old_runtime is not None
+    registry._unregister(old_runtime)
+
+    def replacement(c: Context) -> None:
+        return None
+
+    registry.rekey(fiber.target, replacement, fiber)
+
+    record = registry.get(replacement)
+    assert record is not None
+    assert record.fibers == [fiber]
+
+
+@pytest.mark.asyncio
+async def test_rekey_rejects_a_target_with_no_callback() -> None:
+    """A component the registry cannot resolve raises instead of half-registering."""
+    ctx = Context()
+    fiber = ctx.use(lambda c: None)
+    await ctx.flush()
+
+    with pytest.raises(ValueError, match="invalid component"):
+        ctx.registry.rekey(fiber.target, object(), fiber)
+
+
+@pytest.mark.asyncio
+async def test_rekey_adopts_a_mounted_fiber_the_runtime_does_not_track() -> None:
+    """A runtime that exists but lost the fiber record gets the fiber back."""
+    ctx = Context()
+    fiber = ctx.use(lambda c: None)
+    await ctx.flush()
+    registry = ctx.registry
+    assert fiber.target is not None
+    record = registry.get(fiber.target)
+    assert record is not None
+    record.fibers.clear()
+
+    def replacement(c: Context) -> None:
+        return None
+
+    registry.rekey(fiber.target, replacement, fiber)
+
+    moved = registry.get(replacement)
+    assert moved is not None
+    assert moved.fibers == [fiber]
+
+
+@pytest.mark.asyncio
+async def test_rename_whose_restart_fails_keeps_the_row_renamed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rename that fails while loading keeps the name and fails the fiber.
+
+    ``Fiber.replace()`` sets the target before it restarts, so at that point the
+    fiber is already the new component; undoing the row would name a component
+    that is not what the fiber is bound to.
+    """
+    ctx = Context()
+    loader = LoaderService(ctx)
+    mod = types.ModuleType("rebind_boom_mod")
+
+    class First:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            pass
+
+    class Boom:
+        def __init__(self, c: Context, config: Any = None) -> None:
+            raise RuntimeError("cannot build")
+
+    mod.First = First
+    mod.Boom = Boom
+    monkeypatch.setitem(sys.modules, "rebind_boom_mod", mod)
+
+    loader.load([{"id": "b", "name": "rebind_boom_mod:First"}])
+    await ctx.flush()
+    entry = loader.resolve("b")
+    fiber = entry.fiber
+    assert fiber is not None
+
+    with pytest.raises(RuntimeError, match="cannot build"):
+        await loader.update("b", {"name": "rebind_boom_mod:Boom"})
+    await loader.await_all()
+    await ctx.flush()
+
+    assert entry.options["name"] == "rebind_boom_mod:Boom"
+    fiber = entry.fiber
+    assert fiber is not None
+    assert fiber.target is Boom
+    assert fiber.state == FiberState.FAILED
+    record = entry.ctx.registry.get(Boom)
+    assert record is not None
+    assert record.fibers == [fiber]

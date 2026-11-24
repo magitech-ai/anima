@@ -153,6 +153,25 @@ class RegistryService:
         """Unregister a runtime by its callback."""
         self._internal.pop(runtime.callback, None)
 
+    def rekey(self, old_component: Any, new_component: Any, fiber: Fiber) -> None:
+        """Move a mounted fiber's runtime record to the component it now is."""
+        old_key = self.resolve(old_component)
+        new_key = self.resolve(new_component)
+        if new_key is None:
+            raise ValueError(
+                "invalid component, expect function or object with an "
+                f"'apply' method, received {type(new_component)}"
+            )
+        runtime = self._internal.pop(old_key, None) if old_key is not None else None
+        if runtime is None:
+            runtime = self._create(new_key, new_component)
+            runtime.fibers.append(fiber)
+        else:
+            runtime.callback = new_key
+            runtime.name = getattr(new_component, "name", None)
+            runtime.fibers = list(dict.fromkeys([*runtime.fibers, fiber]))
+        self._internal[new_key] = runtime
+
     def replace(self, old_component: Any, new_component: Any) -> list[Fiber]:
         """Replace a component's runtime, reloading all dependent fibers."""
         source = self._forward(old_component)

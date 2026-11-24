@@ -556,6 +556,86 @@ async def test_update_no_save_skips_commit():
 
 
 @pytest.mark.asyncio
+async def test_vetoed_update_keeps_the_previous_config():
+    """A waterfall listener that refuses the update rolls the fiber back."""
+    from anima.events import EventMode
+
+    ctx = Context()
+
+    class P:
+        def __init__(self, c, config=None):
+            self.config = dict(config or {})
+
+    fib = ctx.use(P, val=1)
+    await ctx.flush()
+
+    async def veto(cfg, next_fn):
+        raise ValueError("refused by policy")
+
+    ctx.on("internal/update", veto, mode=EventMode.WATERFALL, global_=True)
+    with pytest.raises(ValueError, match="refused by policy"):
+        await fib.update({"val": 2})
+
+    assert fib.config == {"val": 1}
+    assert fib.raw_config == {"val": 2}
+    assert fib.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_update_whose_restart_fails_keeps_the_previous_config():
+    """A config the new component instance rejects leaves the old one running."""
+    ctx = Context()
+    loads = []
+
+    class P:
+        def __init__(self, c, config=None):
+            cfg = dict(config or {})
+            loads.append(cfg)
+            if cfg.get("boom"):
+                raise RuntimeError("cannot build with this config")
+
+    fib = ctx.use(P, ok=1)
+    await ctx.flush()
+    assert fib.state == FiberState.ACTIVE
+
+    with pytest.raises(RuntimeError, match="cannot build with this config"):
+        await fib.update({"boom": True})
+
+    assert fib.state == FiberState.FAILED
+    assert fib.config == {"ok": 1}
+    assert loads == [{"ok": 1}, {"boom": True}]
+
+
+@pytest.mark.asyncio
+async def test_update_that_failed_after_a_successful_restart_keeps_its_config():
+    """A listener raising after ``next_fn`` did its work is not a rollback."""
+    from anima.events import EventMode
+
+    ctx = Context()
+
+    class P:
+        def __init__(self, c, config=None):
+            self.config = dict(config or {})
+
+    fib = ctx.use(P, val=1)
+    await ctx.flush()
+
+    async def raise_after(cfg, next_fn):
+        await next_fn(cfg)
+        raise ValueError("audit hook blew up")
+
+    ctx.on("internal/update", raise_after, mode=EventMode.WATERFALL, global_=True)
+    with pytest.raises(ValueError, match="audit hook blew up"):
+        await fib.update({"val": 2})
+
+    # The restart already applied the new config, so the fiber must keep it:
+    # rolling back here would leave the running instance on a config the
+    # fiber no longer reports.
+    assert fib.config == {"val": 2}
+    assert fib.state == FiberState.ACTIVE
+
+
+@pytest.mark.asyncio
 async def test_validate_config_non_dict():
     """A callable Config receives a non-dict resolved config directly."""
     ctx = Context()

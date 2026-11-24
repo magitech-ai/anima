@@ -124,6 +124,8 @@ Load a profile with `load_profile(ctx, "anima.yaml")`. Environment variables int
 
 * **`Fiber`**: Runtime state machine (`PENDING` ➔ `LOADING` ➔ `ACTIVE` ➔ `UNLOADING` ➔ `DISPOSED`; `FAILED` on error). Handles deferred loading via `inject = [...]`.
 
+  `flush()` drains scheduled tasks and returns, so a component whose injected service never appears simply stays `PENDING`. Call `ctx.check_pending_cycles()` after a boot drain to raise instead, with the services each stuck component waits for and, when the components declare what they serve (`provide` / `provides` / `services`), the closed loop by name: `circular dependency between components: a -> b -> a`.
+
 * **Reversible Effects (`ctx.effect`)**: Any registration, tool addition, or watcher returns a disposer. When a component unloads, all effects unwind cleanly in reverse order (LIFO).
 
 * **The 5 Event Modes**:
