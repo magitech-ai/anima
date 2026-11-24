@@ -18,7 +18,7 @@ release is a target.
 
 - `uv run pytest`: 1151 passed, 100% statement and branch coverage.
 - `uv run ruff check src tests`, `uv run ruff format --check src tests`,
-  `uv run python -m mypy src`: green.
+  `uv run mypy src`: green.
 - `filterwarnings = ["error", "ignore::ResourceWarning"]` is configured, so
   unawaited coroutines and other unexpected warnings fail the suite.
 - 67 executable rc.13 core conformance probes live in
