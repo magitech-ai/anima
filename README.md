@@ -13,30 +13,31 @@ Documentation: [AGENTS.md](AGENTS.md) · [CONTEXT.md](CONTEXT.md) · [docs/adr/]
 
 ## Status
 
-Animas is at `1.0.0`. **The public API is now covered by a compatibility policy:** additions and fixes may arrive in `1.x`, but breaking changes require `2.0.0` and a deprecation period where feasible. See [COMPATIBILITY.md](docs/COMPATIBILITY.md). Animas is an independent project; the research paper remains its design invariant and the Cordis conformance work is a completed historical milestone recorded in [PARITY.md](PARITY.md) and [ADR 0017](docs/adr/0017-independence-and-stability.md).
+Animas is at `1.0.0`. **The public API is now covered by a compatibility policy:** additions and fixes may arrive in `1.x`, but breaking changes require `2.0.0` and a deprecation period where feasible. See [COMPATIBILITY.md](docs/COMPATIBILITY.md). Animas is an independent project; the research paper is its design invariant and the Cordis conformance work is a completed historical milestone (see [Lineage](#lineage)).
 
 ---
 
 ## Lineage
 
-Animas is the Python implementation of the kernel paradigm formalized in
-Cordis — *"A Programming Paradigm for Spatiotemporal Composability"*
-([arXiv:2608.25512](https://arxiv.org/abs/2608.25512)) — as realized by
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), the
-Cordis-powered harness whose plugin kernel is built on reversible effects,
-reactive coeffects and a shared context.
+Animas implements the paradigm formalized in
+*"A Programming Paradigm for Spatiotemporal Composability"*
+([arXiv:2608.25512](https://arxiv.org/abs/2608.25512)). The paper is the design
+invariant; the asyncio runtime, component surface and product built on top are
+ours. Animas is an independent project — see
+[ADR 0017](docs/adr/0017-independence-and-stability.md).
 
-The 0.3.0 kernel was originally built and conformance-checked against DeepSeek
-Harness at pin `fcc0ad46` (`dsh v0.2.2-rc.1`); that pin and its DONE/PARTIAL
-verdicts are historical and are recorded in the
+During 2026-11 the kernel was conformance-checked against canonical Cordis
+`v4.0.0-rc.13` (commit `bc9fae7`), with
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) at pin
+`fcc0ad46` (`dsh v0.2.2-rc.1`) as the earlier conformance reference, retained as
+historical provenance and a secondary conformance source. That milestone is
+complete and recorded in [PARITY.md](PARITY.md),
+[ADRs 0013–0016](docs/adr/) and the
 [magitech-harness parity map](https://github.com/magitech-ai/magitech-harness/blob/main/PARITY.md).
-The conformance milestone was completed against canonical Cordis `v4.0.0-rc.13`
-(commit `bc9fae7`), then the parity verdicts in [PARITY.md](PARITY.md) and
-[ADRs 0013–0016](docs/adr/). Animas is now independent: future changes are
-judged against the paper's invariants and Animas's own compatibility policy, not
-against upstream Cordis releases. The asyncio runtime, component surface and
-product built on top are ours; the theory and reference kernel are credited in
-[NOTICE](NOTICE). Provenance is recorded, not erased.
+No upstream release is a forward target.
+
+Upstream projects are MIT-licensed; their copyright and permission notices are
+reproduced verbatim in [NOTICE](NOTICE). Provenance is recorded, not erased.
 
 ---
 
@@ -163,7 +164,7 @@ See [AGENTS.md](AGENTS.md) for the full engineering standards.
 * [AGENTS.md](AGENTS.md) — agent guidelines and engineering standards.
 * [CONTEXT.md](CONTEXT.md) — canonical vocabulary: context, service, component entrypoint, waterfall, disposer.
 * [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — 1.0 public API and versioning policy.
-* [docs/adr/](docs/adr/) — architecture decision records (waterfall pipeline, disposer callables, hierarchical contexts, independence).
+* [docs/adr/](docs/adr/) — architecture decision records (waterfall pipeline, disposer callables, hierarchical contexts, independence, citation and attribution policy).
 * [docs/agents/](docs/agents/) — domain docs, issue tracker, and triage labels.
 * [NOTICE](NOTICE) — upstream MIT attributions and lineage.
 * [PARITY.md](PARITY.md) — completed rc.13 conformance milestone and verdicts (historical record).

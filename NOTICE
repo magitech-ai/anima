@@ -1,19 +1,21 @@
 Animas — Python kernel for Magitech
 ==================================
 
-Animas is a Python reimplementation of the kernel paradigm formalized in
+Animas is a Python implementation of the paradigm formalized in
 "A Programming Paradigm for Spatiotemporal Composability" (arXiv:2608.25512,
-https://arxiv.org/abs/2608.25512) and realized in the Cordis framework
-(https://github.com/cordiverse/cordis). The port target since 2026-11-23 is
-canonical Cordis v4.0.0-rc.13 (commit bc9fae7); the earlier conformance
-reference was DeepSeek Harness (https://github.com/deepseek-ai/deepseek-harness)
-at pin fcc0ad46 (release dsh-v0.2.2-rc.1), retained here as historical
-provenance. Animas's schema and utility surfaces also derive from the MIT-licensed
-schemastery and cosmokit libraries, whose notices are reproduced below.
+https://arxiv.org/abs/2608.25512). The paper is Animas's design invariant; no
+upstream framework is a forward target.
+
+The historical conformance milestone was completed against canonical Cordis
+v4.0.0-rc.13 (commit bc9fae7). The earlier conformance reference was DeepSeek
+Harness (https://github.com/deepseek-ai/deepseek-harness) at pin fcc0ad46
+(dsh v0.2.2-rc.1), retained as historical provenance and a secondary
+conformance source. Animas's schema and utility surfaces also derive from the
+MIT-licensed schemastery and cosmokit libraries.
 
 Animas is licensed under the MIT License by Magitech (see LICENSE). The
 upstream projects are also MIT-licensed; their copyright and permission
-notices are reproduced below as required by those licenses.
+notices are reproduced below verbatim as required by those licenses.
 
 --------------------------------------------------------------------------
 Cordis — https://github.com/cordiverse/cordis
