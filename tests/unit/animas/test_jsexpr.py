@@ -280,8 +280,10 @@ def test_strict_equality_bool_before_number() -> None:
     assert evaluate(ctx, "1 === 1") is True
     assert evaluate(ctx, "'a' === 'a'") is True
     assert evaluate(ctx, "'a' !== 'b'") is True
-    assert evaluate(ctx, "null === undefined") is True
+    # JavaScript: null and undefined are different types under ===.
+    assert evaluate(ctx, "null === undefined") is False
     assert evaluate(ctx, "null === null") is True
+    assert evaluate(ctx, "undefined === undefined") is True
     assert evaluate(ctx, "ctx === ctx") is True
     assert evaluate(ctx, "ctx !== process") is True
 
@@ -399,7 +401,11 @@ def test_number_coercion(monkeypatch: pytest.MonkeyPatch) -> None:
     assert evaluate(ctx, "Number('')") == 0
     assert evaluate(ctx, "Number('  12  ')") == 12
     assert evaluate(ctx, "Number('0x10')") == 16
-    assert evaluate(ctx, "Number('-0x10')") == -16
+    # ES2023 7.1.4.1: signs are decimal-only, and binary/octal literals convert.
+    assert math.isnan(evaluate(ctx, "Number('-0x10')"))
+    assert evaluate(ctx, "Number('0b11')") == 3
+    assert evaluate(ctx, "Number('0o17')") == 15
+    assert math.isnan(evaluate(ctx, "Number('+0b11')"))
     assert evaluate(ctx, "Number('Infinity')") == math.inf
     assert evaluate(ctx, "Number('-Infinity')") == -math.inf
     assert math.isnan(evaluate(ctx, "Number('nope')"))
@@ -418,7 +424,7 @@ def test_string_coercion() -> None:
     assert evaluate(ctx, "String(3.5)") == "3.5"
     assert evaluate(ctx, "String(true)") == "true"
     assert evaluate(ctx, "String(false)") == "false"
-    assert evaluate(ctx, "String(null)") == "undefined"
+    assert evaluate(ctx, "String(null)") == "null"
     assert evaluate(ctx, "String(undefined)") == "undefined"
     assert evaluate(ctx, "String(1e21)") == "1e+21"
     assert evaluate(ctx, "String(1e-7)") == "1e-7"
@@ -706,7 +712,7 @@ def test_js_number_and_string_helpers() -> None:
     assert _js_number(math.inf) == math.inf
     assert math.isnan(_js_number("0x"))
     assert _js_number("  ") == 0
-    assert _js_number("+0x1F") == 31
+    assert _js_number("+0x1F") != _js_number("+0x1F")  # NaN: signs are decimal-only
     assert math.isnan(_js_number([]))
     assert _js_string(0) == "0"
     assert _js_string(-1.5) == "-1.5"

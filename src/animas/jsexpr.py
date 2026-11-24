@@ -42,6 +42,12 @@ _NAN = float("nan")
 # the chain is skipped. Normalised to None at expression boundaries.
 _SHORT_CIRCUIT: Any = object()
 
+# Internal sentinel for the JavaScript null literal. ``undefined`` maps to
+# Python None, so null needs its own value: String(null) is "null" (not
+# "undefined"), Number(null) is 0 (not NaN), and null === undefined is false.
+# Normalised to None at expression boundaries so callers still see one shape.
+_NULL: Any = object()
+
 # AST node: (kind, ...) with kinds lit, name, not, cond, bin, attr, call.
 _Node = tuple[Any, ...]
 
@@ -95,7 +101,11 @@ class _Token:
 _NUMBER_RE = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 _IDENT_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 _DECIMAL_RE = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
-_HEX_RE = re.compile(r"^[+-]?0[xX][0-9a-fA-F]+$")
+# ES2023 7.1.4.1: a sign is only allowed on a decimal literal, never on a
+# hex/binary/octal one, so Number('-0x10') is NaN in JavaScript.
+_HEX_RE = re.compile(r"^0[xX][0-9a-fA-F]+$")
+_BIN_RE = re.compile(r"^0[bB][01]+$")
+_OCT_RE = re.compile(r"^0[oO][0-7]+$")
 _STRING_ESCAPES = {
     "n": "\n",
     "r": "\r",
@@ -347,7 +357,9 @@ class _Parser:
                 return ("lit", True)
             if tok.value == "false":
                 return ("lit", False)
-            if tok.value in ("null", "undefined"):
+            if tok.value == "null":
+                return ("lit", _NULL)
+            if tok.value == "undefined":
                 return ("lit", None)
             return ("name", tok.value)
         if tok.kind == "op" and tok.value == "(":
@@ -366,9 +378,14 @@ def _is_nan(value: Any) -> bool:
     return isinstance(value, float) and math.isnan(value)
 
 
+def _is_nullish(value: Any) -> bool:
+    """JavaScript nullish: null or undefined (None carries undefined here)."""
+    return value is None or value is _NULL
+
+
 def _js_truthy(value: Any) -> bool:
     """JavaScript truthiness: false, 0, "", null/undefined and NaN are falsy."""
-    if value is None:
+    if _is_nullish(value):
         return False
     if isinstance(value, bool):
         return value
@@ -397,7 +414,9 @@ def _js_number_string(value: float) -> str:
 
 
 def _js_string(value: Any) -> str:
-    """JavaScript String() coercion (undefined becomes "undefined")."""
+    """JavaScript String() coercion (null becomes "null", undefined "undefined")."""
+    if value is _NULL:
+        return "null"
     if value is None:
         return "undefined"
     if isinstance(value, bool):
@@ -407,7 +426,7 @@ def _js_string(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, (list, tuple)):
-        return ",".join("" if item is None else _js_string(item) for item in value)
+        return ",".join("" if _is_nullish(item) else _js_string(item) for item in value)
     if isinstance(value, dict):
         return "[object Object]"
     return str(value)
@@ -415,6 +434,8 @@ def _js_string(value: Any) -> str:
 
 def _js_number(value: Any) -> Any:
     """JavaScript Number() coercion; unparseable input becomes NaN."""
+    if value is _NULL:
+        return 0
     if value is None:
         return _NAN
     if isinstance(value, bool):
@@ -438,6 +459,10 @@ def _js_number(value: Any) -> Any:
         if _HEX_RE.match(text):
             # The regex already guarantees a valid hex literal.
             return int(text, 16)
+        if _BIN_RE.match(text):
+            return int(text, 2)
+        if _OCT_RE.match(text):
+            return int(text, 8)
         if _DECIMAL_RE.match(text):
             num = float(text)
             if math.isnan(num) or math.isinf(num):
@@ -455,17 +480,20 @@ def _js_json_parse(value: Any, expr: str) -> Any:
     """JavaScript JSON.parse(); a parse failure fails loud."""
     text = value if isinstance(value, str) else _js_string(value)
     try:
-        return json.loads(text, parse_constant=_reject_json_constant)
+        parsed = json.loads(text, parse_constant=_reject_json_constant)
     except ValueError as exc:
         raise JsExprError(f"JSON.parse failed in expression {expr!r}: {exc}") from exc
+    # A JSON document has no undefined: its null is the null literal.
+    return _NULL if parsed is None else parsed
 
 
 def _js_strict_equal(left: Any, right: Any) -> bool:
     """JavaScript ===: bool is never equal to a number; NaN is never equal."""
     if isinstance(left, bool) or isinstance(right, bool):
         return isinstance(left, bool) and isinstance(right, bool) and left == right
-    if left is None or right is None:
-        return left is None and right is None
+    if _is_nullish(left) or _is_nullish(right):
+        # null === null and undefined === undefined, but null !== undefined.
+        return left is right
     if isinstance(left, (int, float)) and isinstance(right, (int, float)):
         if _is_nan(left) or _is_nan(right):
             return False
@@ -477,8 +505,9 @@ def _js_strict_equal(left: Any, right: Any) -> bool:
 
 def _js_loose_equal(left: Any, right: Any) -> bool:
     """JavaScript == over the primitive shapes the evaluator produces."""
-    if left is None or right is None:
-        return left is None and right is None
+    if _is_nullish(left) or _is_nullish(right):
+        # null == undefined is true; neither equals 0, "" or false.
+        return _is_nullish(left) and _is_nullish(right)
     if isinstance(left, bool) or isinstance(right, bool):
         return _js_loose_equal(
             _js_number(left) if isinstance(left, bool) else left,
@@ -574,7 +603,7 @@ def _eval_bin(node: _Node, ctx: Context, expr: str) -> Any:
         return _eval_norm(node[3], ctx, expr)
     if op == "??":
         left = _eval_norm(node[2], ctx, expr)
-        if left is not None:
+        if not _is_nullish(left):
             return left
         return _eval_norm(node[3], ctx, expr)
     left = _eval_norm(node[2], ctx, expr)
@@ -600,12 +629,12 @@ def _eval_call(node: _Node, ctx: Context, expr: str) -> Any:
     if func[0] == "attr" and func[3]:
         # Optional member callee: a nullish base short-circuits the call.
         base = _eval(func[1], ctx, expr)
-        if base is _SHORT_CIRCUIT or base is None:
+        if base is _SHORT_CIRCUIT or _is_nullish(base):
             return _SHORT_CIRCUIT
     if node[3]:
         # Optional call "?.(...)": only a nullish callee short-circuits.
         func_value = _eval(func, ctx, expr)
-        if func_value is _SHORT_CIRCUIT or func_value is None:
+        if func_value is _SHORT_CIRCUIT or _is_nullish(func_value):
             return _SHORT_CIRCUIT
         raise JsExprError(f"unsupported optional call in expression {expr!r}")
     args = [_eval_norm(arg, ctx, expr) for arg in node[2]]
@@ -669,11 +698,12 @@ def _eval(node: _Node, ctx: Context, expr: str) -> Any:
         base = _eval(node[1], ctx, expr)
         if base is _SHORT_CIRCUIT:
             return _SHORT_CIRCUIT
-        if base is None:
+        if _is_nullish(base):
             if node[3]:
                 return _SHORT_CIRCUIT
+            label = "null" if base is _NULL else "undefined"
             raise JsExprError(
-                f"cannot read property {node[2]!r} of undefined in expression {expr!r}"
+                f"cannot read property {node[2]!r} of {label} in expression {expr!r}"
             )
         return _get_attr(base, node[2], expr)
     if kind == "call":
@@ -691,7 +721,7 @@ def evaluate(ctx: Context, expr: str) -> Any:
         raise JsExprError(f"expression must be a string, got {type(expr).__name__}")
     node = _Parser(_tokenize(expr), expr).parse()
     result = _eval(node, ctx, expr)
-    return None if result is _SHORT_CIRCUIT else result
+    return None if result is _SHORT_CIRCUIT or result is _NULL else result
 
 
 def interpolate(ctx: Context, value: Any, path: tuple[Any, ...] = ()) -> Any:
