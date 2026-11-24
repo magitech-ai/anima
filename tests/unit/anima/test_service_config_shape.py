@@ -11,58 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from anima.cli import CliService
 from anima.core import Context
-from anima.http import HttpService
 from anima.include import Include, IncludeError
 from anima.loader import LoaderService
 from anima.logger import LoggerService
-from anima.server import ServerService
-
-
-@pytest.mark.asyncio
-async def test_cli_service_mounts_via_component_with_default_name():
-    ctx = Context()
-    await ctx.use(CliService)
-    await ctx.flush()
-
-    svc = ctx.get("cli")
-    assert isinstance(svc, CliService)
-    assert svc.name == "cli"
-    assert svc.commands
-
-
-@pytest.mark.asyncio
-async def test_cli_service_mounts_via_component_with_config_name():
-    ctx = Context()
-    await ctx.use(CliService, {"name": "custom_cli"})
-    await ctx.flush()
-
-    svc = ctx.get("custom_cli")
-    assert isinstance(svc, CliService)
-    assert svc.name == "custom_cli"
-
-
-@pytest.mark.asyncio
-async def test_http_service_mounts_via_component():
-    ctx = Context()
-    await ctx.use(HttpService)
-    await ctx.flush()
-
-    svc = ctx.get("http")
-    assert isinstance(svc, HttpService)
-    assert svc.name == "http"
-
-
-@pytest.mark.asyncio
-async def test_server_service_mounts_via_component():
-    ctx = Context()
-    await ctx.use(ServerService)
-    await ctx.flush()
-
-    svc = ctx.get("server")
-    assert isinstance(svc, ServerService)
-    assert svc.name == "server"
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ Documentation: [AGENTS.md](AGENTS.md) · [CONTEXT.md](CONTEXT.md) · [docs/adr/]
 
 ## Status
 
-Anima is at `0.3.0` and under active development. **The API is not yet stable and may change without notice.** The port target is canonical Cordis `v4.0.0-rc.13`; see [PARITY.md](PARITY.md) for what is proven and what remains open against that target. The former rc.1 "1.0 gate" is historical context, not a claim of rc.13 parity (ADR 0013).
+Anima is at `1.0.0`. **The public API is now covered by a compatibility policy:** additions and fixes may arrive in `1.x`, but breaking changes require `2.0.0` and a deprecation period where feasible. See [COMPATIBILITY.md](docs/COMPATIBILITY.md). Anima is an independent project; the research paper remains its design invariant and the Cordis conformance work is a completed historical milestone recorded in [PARITY.md](PARITY.md) and [ADR 0017](docs/adr/0017-independence-and-stability.md).
 
 ---
 
@@ -30,18 +30,19 @@ The 0.3.0 kernel was originally built and conformance-checked against DeepSeek
 Harness at pin `fcc0ad46` (`dsh v0.2.2-rc.1`); that pin and its DONE/PARTIAL
 verdicts are historical and are recorded in the
 [magitech-harness parity map](https://github.com/magitech-ai/magitech-harness/blob/main/PARITY.md).
-On 2026-11-23 the port target was moved to canonical Cordis `v4.0.0-rc.13`
-(commit `bc9fae7`), the latest published `cordis` release; the current verdicts
-and open gaps are in [PARITY.md](PARITY.md) and the decision in
-[ADR 0013](docs/adr/0013-rc13-port-target.md). Anima is Magitech's Python
-kernel: the asyncio runtime, component surface and product built on top are
-ours; the theory and reference kernel are credited in [NOTICE](NOTICE).
+The conformance milestone was completed against canonical Cordis `v4.0.0-rc.13`
+(commit `bc9fae7`), then the parity verdicts in [PARITY.md](PARITY.md) and
+[ADRs 0013–0016](docs/adr/). Anima is now independent: future changes are
+judged against the paper's invariants and Anima's own compatibility policy, not
+against upstream Cordis releases. The asyncio runtime, component surface and
+product built on top are ours; the theory and reference kernel are credited in
+[NOTICE](NOTICE). Provenance is recorded, not erased.
 
 ---
 
 ## Install
 
-Anima is not published to PyPI. Install from a repository checkout:
+Anima is not published to PyPI at this time (1.0.0 is the release candidate for a publisher to be added by the maintainer). Install from a repository checkout:
 
 ```sh
 git clone https://github.com/magitech-ai/anima.git
@@ -51,23 +52,9 @@ uv sync
 
 Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
 
-## Run
+## Profiles
 
-Run a declarative profile (default `anima.yaml`):
-
-```sh
-anima run
-anima run my-profile.yaml
-```
-
-From a repository checkout:
-
-```sh
-uv run anima run
-uv run anima run my-profile.yaml
-```
-
-The profile file must exist: if it does not, the command exits with code 0 and loads nothing.
+Load a declarative profile from Python with `load_profile(ctx, path)`. Anima is a library kernel: it does not ship a CLI, HTTP server, or scaffolding command. Host applications build those surfaces on top.
 
 ---
 
@@ -148,12 +135,8 @@ Every capability is a service mounted on a `Context`. The kernel ships these mod
 | Area | Modules | What they do |
 | --- | --- | --- |
 | Core | `core`, `events`, `tree`, `registry`, `reflect` | Context and service registry, the 5 event modes, loader entry tree and composite component groups, component runtime registry, service introspection |
-| Loading & config | `loader`, `include`, `schema`, `cli_env`†, `utils` | YAML profile loading, module resolution, multi-file includes with journaling and patches, declarative schema validation, cascading environment variables, shared utility helpers (plain-object checks, time, binary) |
-| Server & network | `server`†, `server_acl`†, `server_echo`†, `server_proxy`†, `server_static`†, `http`†, `http_socks`† | Async HTTP and WebSocket server, host/loopback access control, echo, reverse proxy, and static file routes; async HTTP client with SOCKS4/5 support |
-| Runtime services | `timer`, `logger`, `hmr`, `fs` | Reversible timers (timeouts, intervals, debounce, throttle), structured namespaced logging, hot module replacement, and the rc.13 filesystem service with mountable providers and routed watches |
-| Interface | `cli`†, `cli_create`† | Command router and profile execution substrate; interactive project scaffolding via the `create` subcommand (`anima create <name>`, default `my-app`) or the `Scaffold` library API (`from anima.cli_create import Scaffold`; `Scaffold.start()` runs the flow; template fetched from the npm registry) |
-
-† Anima-original surface: not part of the ported kernel.
+| Loading & config | `loader`, `include`, `schema`, `utils` | YAML profile loading, module resolution, multi-file includes with journaling and patches, declarative schema validation, shared utility helpers (plain-object checks, time, binary) |
+| Runtime services | `timer`, `logger`, `hmr`, `fs` | Reversible timers (timeouts, intervals, debounce, throttle), structured namespaced logging, hot module replacement, and the filesystem service with mountable providers and routed watches |
 
 ---
 
@@ -168,8 +151,8 @@ uv run ruff format --check src tests
 uv run mypy src
 ```
 
-* `tests/unit/anima/`: Mirrors `src/` 1:1 — core, events, loader, CLI, server, HTTP, timer, fs, and every other module.
-* `tests/integration/`: End-to-end multi-component agent pipeline, cascade disposal, subagent isolation, and extension seams.
+* `tests/unit/anima/`: Mirrors `src/` 1:1 — core, events, loader, timer, fs, and every other module.
+* `tests/integration/`: End-to-end multi-component pipeline, cascade disposal, and subagent isolation.
 
 See [AGENTS.md](AGENTS.md) for the full engineering standards.
 
@@ -179,10 +162,11 @@ See [AGENTS.md](AGENTS.md) for the full engineering standards.
 
 * [AGENTS.md](AGENTS.md) — agent guidelines and engineering standards.
 * [CONTEXT.md](CONTEXT.md) — canonical vocabulary: context, service, component entrypoint, waterfall, disposer.
-* [docs/adr/](docs/adr/) — architecture decision records (waterfall pipeline, disposer callables, hierarchical contexts).
+* [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — 1.0 public API and versioning policy.
+* [docs/adr/](docs/adr/) — architecture decision records (waterfall pipeline, disposer callables, hierarchical contexts, independence).
 * [docs/agents/](docs/agents/) — domain docs, issue tracker, and triage labels.
 * [NOTICE](NOTICE) — upstream MIT attributions and lineage.
-* [PARITY.md](PARITY.md) — conformance target and verdicts.
+* [PARITY.md](PARITY.md) — completed rc.13 conformance milestone and verdicts (historical record).
 
 ## Contributing
 

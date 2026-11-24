@@ -48,4 +48,5 @@ citations for each behavior.
 By user decision the DSH-fork-only surfaces were deleted: `volatile.py`,
 `watcher.py`, `pkg.py`, `Schema.volatile()`, `loader/volatile-update`,
 `loader.builtins` and `loader.exit()`. HMR's legacy watch path now uses
-`ctx.fs.watch()`. Magitech-original `†` modules are unchanged.
+`ctx.fs.watch()`. The Magitech-original `†` modules were later removed before
+1.0.0 by user decision (ADR 0018); they were never part of the port.

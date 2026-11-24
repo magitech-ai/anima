@@ -1,13 +1,11 @@
 import asyncio
 import logging
-import os
 from typing import Any, ClassVar
 
 import pytest
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
-from anima.cli_env import CliEnv, load_env_cascade
 from anima.core import (
     FIBER_STATE_WIRE_VALUES,
     AnimaError,
@@ -2385,37 +2383,6 @@ class TestContextGetSet:
         ctx.reflect.provide("renamed_svc", None)
         ctx.set("renamed_svc", svc)
         assert ctx.get("renamed_svc") is svc
-
-
-class TestCliEnvComponent:
-    def test_cli_env_load_cascade(self):
-        """Test cli_env.load_env_cascade function."""
-        import os
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            env_file = os.path.join(tmpdir, ".env")
-            with open(env_file, "w") as f:
-                f.write("HELLO=world\nFOO=bar\n")
-
-            merged = load_env_cascade(base_dir=tmpdir)
-            assert merged["HELLO"] == "world"
-            assert merged["FOO"] == "bar"
-
-    def test_cli_env_component_mount(self):
-        """Test CliEnv component mounting."""
-
-        ctx = Context()
-        fiber = ctx.use(CliEnv)
-        assert fiber.state == FiberState.ACTIVE
-        assert ctx.env is not None
-        assert ctx.env == os.environ
-
-    def test_context_is_static(self):
-        """Test Context.is_ static method."""
-        ctx = Context()
-        assert Context.is_(ctx) is True
-        assert Context.is_("not a context") is False
 
 
 class TestReflectService:

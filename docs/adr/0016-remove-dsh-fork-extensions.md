@@ -25,7 +25,8 @@ hook in a coordinated change.
   rc.13-native.
 - Magitech-original modules marked `†` in the README (`server*`, `http*`,
   `cli*`, `cli_env`) are **not** part of this removal: they were never claimed
-  as Cordis parity.
+  as Cordis parity. They were later removed before 1.0.0 by ADR 0018, which
+  supersedes this scope statement.
 - ADR 0014 is superseded as policy; it remains as the historical record of why
   these surfaces were once excluded from parity.
 

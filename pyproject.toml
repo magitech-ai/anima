@@ -1,6 +1,6 @@
 [project]
 name = "anima"
-version = "0.3.0"
+version = "1.0.0"
 description = "Anima: The Composable Micro-Kernel by Magitech"
 readme = "README.md"
 license = "MIT"
@@ -10,9 +10,6 @@ dependencies = [
     "pydantic>=2.14.3",
     "pyyaml>=6.0.3",
 ]
-
-[project.scripts]
-anima = "anima.cli:console_main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]
