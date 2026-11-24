@@ -544,8 +544,10 @@ class HmrService(Service):
             # falling through with no reload. By-path externals are
             # already handled above via _is_external_path, and the
             # path is under root here, so relative_to cannot fail.
-            candidate = ".".join(res_path.relative_to(self.root).with_suffix("").parts)
-            if candidate in self._externals_names:
+            module_candidate = ".".join(
+                res_path.relative_to(self.root).with_suffix("").parts
+            )
+            if module_candidate in self._externals_names:
                 await self._on_external(url)
                 return
             return
