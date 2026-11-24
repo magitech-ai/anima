@@ -9,7 +9,7 @@ target recorded in [PARITY.md](PARITY.md) (canonical Cordis `v4.0.0-rc.13`).
 uv run pytest          # 1347 tests, 100% statement + branch coverage gate
 uv run ruff check src tests
 uv run ruff format --check src tests
-uv run python -m mypy src
+uv run mypy src
 ```
 
 `pyproject.toml` sets `filterwarnings = ["error", "ignore::ResourceWarning"]`,
