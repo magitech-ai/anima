@@ -1277,3 +1277,55 @@ async def test_group_update_duplicate_rows_raise_before_mutating(mod: Any) -> No
         await loader.root.update([_row(id="twice"), _row(id="twice")])
     assert loader.root.data is old_rows
     assert "twice" not in loader.store
+
+
+class TestPlatformConditions:
+    @pytest.mark.parametrize(
+        ("platform", "options", "expected"),
+        [
+            ("win32", {"disabled_on": ["win32"]}, True),
+            ("linux", {"disabled_on": ["win32"]}, False),
+            ("darwin", {"disabled_on": ["darwin", "linux"]}, True),
+            ("win32", {"enabled_on": ["win32"]}, False),
+            ("linux", {"enabled_on": ["win32"]}, True),
+            ("linux", {"enabled_on": ["win32"], "disabled_on": ["linux"]}, True),
+            ("win32", {"enabled_on": ["win32"], "disabled_on": ["win32"]}, False),
+            ("linux", {"disabled_on": []}, False),
+            ("linux", {"enabled_on": []}, True),
+            ("linux", {"disabled": False, "disabled_on": ["linux"]}, True),
+            ("linux", {"disabled": True, "enabled_on": ["linux"]}, True),
+            ("linux", {}, False),
+        ],
+    )
+    def test_disabled_of(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        platform: str,
+        options: dict[str, Any],
+        expected: bool,
+    ) -> None:
+        from animas import tree
+
+        monkeypatch.setattr(tree, "platform_name", lambda: platform)
+        loader = LoaderService(Context())
+        loader.load([{"id": "e", "name": "mod:Comp", **options}])
+        entry = loader.resolve("e")
+        assert entry is not None
+        assert entry._disabled_of(options) is expected
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            {"disabled_on": "win32"},
+            {"disabled_on": [7]},
+            {"enabled_on": ["nonsense"]},
+        ],
+    )
+    def test_invalid_platform_options_fail_loud(self, options: dict[str, Any]) -> None:
+        from animas.tree import validate_options
+
+        issues = validate_options({"id": "e", "name": "mod:Comp", **options})
+        assert any(
+            issue["message"].startswith(("disabled_on", "enabled_on"))
+            for issue in issues
+        )

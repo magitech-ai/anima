@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import sys
 from abc import ABCMeta
 from collections.abc import (
     AsyncIterable,
@@ -134,6 +135,24 @@ def format_issues(title: str, issues: list[dict[str, Any]]) -> str:
         where_str = f" (at {where})" if where else ""
         lines.append(f"  - {issue.get('message', '')}{where_str}")
     return f"{title}:\n" + "\n".join(lines)
+
+
+def platform_name() -> str:
+    """Return the normalized host platform name used by entry conditions.
+
+    One neutral source for loader option conditions; independent of the
+    expression evaluator so it survives removal of the ``!!js`` dialect.
+    """
+    if sys.platform == "win32":
+        return "win32"
+    if sys.platform == "darwin":
+        return "darwin"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return sys.platform
+
+
+KNOWN_PLATFORMS = frozenset({"win32", "darwin", "linux"})
 
 
 def is_js_expr(value: Any) -> TypeGuard[dict[str, Any]]:

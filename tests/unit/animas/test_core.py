@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from typing import Any, ClassVar
 
 import pytest
@@ -18,6 +19,7 @@ from animas.core import (
     _current_fiber,
     format_issues,
     is_js_expr,
+    platform_name,
     symbols,
 )
 from animas.core import ValidationError as AnimaValidationError
@@ -3194,3 +3196,20 @@ async def test_update_from_a_background_task_started_by_a_listener_never_hangs()
     await asyncio.wait_for(asyncio.gather(*scheduled), timeout=5)
 
     assert outcome in (["applied"], ["inactive"]), outcome
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("win32", "win32"),
+        ("darwin", "darwin"),
+        ("linux", "linux"),
+        ("linux2", "linux"),
+        ("freebsd", "freebsd"),
+    ],
+)
+def test_platform_name(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", value)
+    assert platform_name() == expected
