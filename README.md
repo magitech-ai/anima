@@ -15,7 +15,7 @@ It is a library kernel: hosts build their own CLI, server and agent surfaces on 
 
 `2.0.0` — stable public API under a
 [SemVer compatibility policy](docs/COMPATIBILITY.md): additions and fixes in
-`1.x`, breaking changes only in `2.0.0` with deprecation where feasible.
+`2.x`, breaking changes only in `3.0.0` with deprecation where feasible.
 
 ## Install
 
