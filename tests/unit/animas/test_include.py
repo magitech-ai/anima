@@ -48,8 +48,8 @@ from animas.include import (
     record,
     route_journal,
 )
-from animas.jsexpr import load_yaml
 from animas.loader import LoaderService
+from animas.profile_yaml import load_yaml
 
 
 @pytest.fixture

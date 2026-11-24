@@ -919,7 +919,7 @@ async def test_rc13_loader_expression_error_reports_entry(
 @pytest.mark.asyncio
 async def test_rc13_yaml_marks_and_empty_document() -> None:
     """YAML locations are retained per path; an empty document has none."""
-    from animas.jsexpr import load_yaml_with_locations
+    from animas.profile_yaml import load_yaml_with_locations
 
     empty, marks = load_yaml_with_locations("")
     assert empty is None and marks == {}

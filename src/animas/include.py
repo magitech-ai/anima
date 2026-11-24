@@ -31,7 +31,7 @@ from typing import Any, cast
 
 from animas.core import Context, Service, is_js_expr
 from animas.events import EventMode
-from animas.jsexpr import dump_yaml, load_yaml_with_locations
+from animas.profile_yaml import dump_yaml, load_yaml_with_locations
 from animas.schema import deep_equal
 from animas.tree import (
     EntryChange,

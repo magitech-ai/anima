@@ -15,11 +15,10 @@ from animas.jsexpr import (
     _js_number,
     _js_number_string,
     _js_string,
-    dump_yaml,
     evaluate,
     interpolate,
-    load_yaml,
 )
+from animas.profile_yaml import dump_yaml, load_yaml
 
 
 def _ctx() -> Context:

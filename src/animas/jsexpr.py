@@ -14,9 +14,8 @@ and optional chaining. Anything outside that set fails loud with
 silently skipped. No JavaScript engine is embedded and no new
 dependency is introduced.
 
-This module also owns the ``!!js`` YAML dialect (one place): ``load_yaml``
-and ``dump_yaml`` are the load/dump paths every profile file goes
-through, so expression nodes round-trip as ``!!js`` scalars.
+The ``!!js`` YAML dialect and the profile load/dump paths live in
+:mod:`animas.profile_yaml`, independent of evaluation.
 """
 
 from __future__ import annotations
@@ -29,13 +28,9 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-import yaml
-
 from animas.core import Context, Fiber, is_js_expr
 
-__all__ = ["JsExprError", "dump_yaml", "evaluate", "interpolate", "load_yaml"]
-
-JSEXPR_TAG = "tag:yaml.org,2002:js"
+__all__ = ["JsExprError", "evaluate", "interpolate"]
 
 _NAN = float("nan")
 # Internal sentinel: an optional chain hit a nullish base, so the rest of
@@ -750,80 +745,3 @@ def interpolate(ctx: Context, value: Any, path: tuple[Any, ...] = ()) -> Any:
             interpolate(ctx, item, path + (index,)) for index, item in enumerate(value)
         ]
     return value
-
-
-# --- !!js YAML dialect ---
-
-
-def _construct_js_expr(
-    loader: yaml.SafeLoader, node: yaml.ScalarNode
-) -> dict[str, str]:
-    return {"__jsExpr": loader.construct_scalar(node)}
-
-
-class _JsExprLoader(yaml.SafeLoader):
-    """YAML loader for the entry-list dialect: ``!!js`` scalars become expression nodes."""
-
-
-_JsExprLoader.add_constructor(JSEXPR_TAG, _construct_js_expr)
-
-
-def _represent_dict(dumper: yaml.SafeDumper, data: dict[str, Any]) -> yaml.Node:
-    if len(data) == 1 and isinstance(data.get("__jsExpr"), str):
-        return dumper.represent_scalar(JSEXPR_TAG, data["__jsExpr"])
-    return dumper.represent_mapping(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, data
-    )
-
-
-class _JsExprDumper(yaml.SafeDumper):
-    """YAML dumper for the entry-list dialect: expression nodes become ``!!js`` scalars."""
-
-
-_JsExprDumper.add_representer(dict, _represent_dict)
-
-
-def load_yaml(stream: Any) -> Any:
-    """Load YAML in the entry-list dialect (``!!js`` tags become expression nodes)."""
-    return yaml.load(stream, Loader=_JsExprLoader)
-
-
-def load_yaml_with_locations(
-    stream: Any,
-) -> tuple[Any, dict[tuple[Any, ...], tuple[int, int]]]:
-    """Load YAML and map value paths to their 1-based line and column.
-
-    PyYAML keeps ``start_mark`` on every composed node; this exposes those
-    marks so the loader can report where an expression sits in the config
-    file (upstream loader/config/tree.ts:254-260 and Include's override).
-    """
-    loader = _JsExprLoader(stream)
-    try:
-        node = loader.get_single_node()
-        data = loader.construct_document(node) if node is not None else None
-    finally:
-        loader.dispose()
-    locations: dict[tuple[Any, ...], tuple[int, int]] = {}
-
-    def walk(current: Any, path: tuple[Any, ...]) -> None:
-        if isinstance(current, yaml.MappingNode):
-            for key_node, value_node in current.value:
-                key = loader.construct_object(key_node)
-                walk(value_node, path + (key,))
-        elif isinstance(current, yaml.SequenceNode):
-            for index, child in enumerate(current.value):
-                walk(child, path + (index,))
-        else:
-            locations[path] = (
-                current.start_mark.line + 1,
-                current.start_mark.column + 1,
-            )
-
-    if node is not None:
-        walk(node, ())
-    return data, locations
-
-
-def dump_yaml(data: Any, stream: Any) -> None:
-    """Dump YAML in the entry-list dialect (expression nodes become ``!!js`` scalars)."""
-    yaml.dump(data, stream, Dumper=_JsExprDumper, sort_keys=False)
