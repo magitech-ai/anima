@@ -27,17 +27,13 @@ ours. Animas is an independent project — see
 [ADR 0017](docs/adr/0017-independence-and-stability.md).
 
 During 2026-11 the kernel was conformance-checked against canonical Cordis
-`v4.0.0-rc.13` (commit `bc9fae7`), with
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) at pin
-`fcc0ad46` (`dsh v0.2.2-rc.1`) as the earlier conformance reference, retained as
-historical provenance and a secondary conformance source. That milestone is
-complete and recorded in [PARITY.md](PARITY.md),
-[ADRs 0013–0016](docs/adr/) and the
-[magitech-harness parity map](https://github.com/magitech-ai/magitech-harness/blob/main/PARITY.md).
-No upstream release is a forward target.
+`v4.0.0-rc.13` (commit `bc9fae7`). That milestone is complete and recorded in
+[PARITY.md](PARITY.md) and [ADRs 0013–0016](docs/adr/). No upstream release is a
+forward target.
 
+Earlier provenance is retained in [NOTICE](NOTICE) and the historical ADRs.
 Upstream projects are MIT-licensed; their copyright and permission notices are
-reproduced verbatim in [NOTICE](NOTICE). Provenance is recorded, not erased.
+reproduced verbatim in NOTICE. Provenance is recorded, not erased.
 
 ---
 
