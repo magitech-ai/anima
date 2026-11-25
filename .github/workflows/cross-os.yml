@@ -1,0 +1,15 @@
+# Weekly cross-platform validation. Windows bills at 2x and macOS at 10x, so the full os matrix runs on a schedule instead of every push/PR (see magitech-ai/.github#12).
+name: Cross-OS CI
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test & Lint (cross-OS)
+    uses: magitech-ai/.github/.github/workflows/python-ci.yml@main
+    with:
+      python-version: "3.12"
+      os-matrix-json: '["ubuntu-latest", "windows-latest", "macos-latest"]'
