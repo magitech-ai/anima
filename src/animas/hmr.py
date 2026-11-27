@@ -241,6 +241,7 @@ class HmrService(Service):
         # Parse cache: source path -> (stat, imported in-root modules).
         self._graph_cache: dict[Path, tuple[_Stat, frozenset[str]]] = {}
         self._reconcile_lock = asyncio.Lock()
+        self._exclusive_lock = asyncio.Lock()
         self._last_reload: dict[Any, Reload] = {}
         self.ctx.effect(lambda: self.stop)
 
@@ -361,6 +362,11 @@ class HmrService(Service):
         self._fs_watches = []
         self._fs_watch = None
         self._active = False
+
+    async def run_exclusive(self, job: Any) -> Any:
+        """Serialize *job* against other ``run_exclusive`` callers."""
+        async with self._exclusive_lock:
+            return await job()
 
     # -- dependency graph (L13) ------------------------------------------------
 

@@ -185,3 +185,24 @@ def test_resolve_errors_are_contained(
 
     monkeypatch.setattr(Path, "resolve", second_fails)
     assert service._is_ignored(tmp_path / "x.py") is False
+
+
+@pytest.mark.asyncio
+async def test_run_exclusive_serializes_jobs(tmp_path: Any) -> None:
+    ctx = Context()
+    service = HmrService(ctx, {"root": str(tmp_path)})
+    active = 0
+    overlaps: list[int] = []
+
+    async def job() -> None:
+        nonlocal active
+        active += 1
+        await asyncio.sleep(0)
+        overlaps.append(active)
+        active -= 1
+
+    await asyncio.gather(
+        service.run_exclusive(job),
+        service.run_exclusive(job),
+    )
+    assert overlaps == [1, 1]
