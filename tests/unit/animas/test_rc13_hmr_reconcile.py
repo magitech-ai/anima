@@ -308,7 +308,7 @@ async def test_watch_enabled_uses_fs_service_and_reconciles(
     assert seen == [{target, tmp_path / "other.py"}]
 
     pending = asyncio.ensure_future(asyncio.sleep(10))
-    result = hmr._stop_fs_watch(hmr._fs_watch, pending)
+    result = hmr._stop_fs_watch(hmr._fs_watches, pending)
     if result is not None and inspect.isawaitable(result):
         await result
     assert hmr._active is False
@@ -317,12 +317,12 @@ async def test_watch_enabled_uses_fs_service_and_reconciles(
         def dispose(self) -> None:
             return None
 
-    hmr._fs_watch = SyncWatch()
+    hmr._fs_watches = [SyncWatch()]
     hmr.stop()
     assert hmr._active is False
 
     # No pending task and an awaitable disposer are both accepted paths.
-    hmr._stop_fs_watch(SyncWatch(), None)
+    hmr._stop_fs_watch([SyncWatch()], None)
 
     class AsyncWatch:
         def dispose(self) -> Any:
@@ -332,7 +332,7 @@ async def test_watch_enabled_uses_fs_service_and_reconciles(
             return done()
 
     hmr._active = True
-    hmr._fs_watch = AsyncWatch()
+    hmr._fs_watches = [AsyncWatch()]
     hmr.stop()
     await asyncio.sleep(0)
     assert hmr._active is False

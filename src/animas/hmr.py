@@ -13,13 +13,14 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import fnmatch
 import importlib
 import importlib.util
 import inspect
 import logging
 import os
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
@@ -153,6 +154,13 @@ class HmrService(Service):
         if not isinstance(externals, (list, tuple)):
             raise TypeError(f"externals must be a list, got {externals!r}")
         root = cfg.get("root")
+        roots = cfg.get("roots")
+        if roots is not None and (
+            not isinstance(roots, (list, tuple))
+            or not roots
+            or not all(isinstance(item, (str, os.PathLike)) for item in roots)
+        ):
+            raise TypeError("roots must be a non-empty list of paths")
         ignored = cfg.get("ignored")
         interval = cfg.get("interval", 0.5)
         # rc.13 uses an opt-in `watch` block served by ctx.fs.watch();
@@ -186,6 +194,14 @@ class HmrService(Service):
             }
         super().__init__(ctx, "hmr")
         self.root = Path(root).resolve() if root else Path.cwd().resolve()
+        chosen_roots = (
+            [Path(item) for item in roots] if roots is not None else [self.root]
+        )
+        self.roots = tuple(
+            item.resolve() if item.is_absolute() else (self.root / item).resolve()
+            for item in chosen_roots
+        )
+        self.root = self.roots[0]
         external_paths: set[Path] = set()
         external_names: set[str] = set()
         for entry in externals:
@@ -212,7 +228,9 @@ class HmrService(Service):
         self._externals_paths = external_paths
         self._externals_names = external_names
         self._disposer: Disposer | None = None
+        self._disposers: list[Disposer] = []
         self._fs_watch: Any = None
+        self._fs_watches: list[Any] = []
         self._active = False
         # Pending changes: module name -> file stat at stash time.
         self._stashed: dict[str, _Stat] = {}
@@ -245,24 +263,31 @@ class HmrService(Service):
 
         watch_cfg = self._watch_config
         assert watch_cfg is not None
-        watch = self.ctx.fs.watch(self.root, WatchOptions(filter=watch_cfg["files"]))
         stashed: set[Path] = set()
         task: asyncio.Task[None] | None = None
+        watches: list[Any] = []
 
         def on_change(url: str) -> None:
             from urllib.parse import urlsplit
             from urllib.request import url2pathname
 
-            stashed.add(Path(url2pathname(urlsplit(url).path)))
+            path = Path(url2pathname(urlsplit(url).path))
+            if self._is_ignored(path):
+                return
+            stashed.add(path)
             nonlocal task
             if task is not None and not task.done():
                 task.cancel()
             task = asyncio.get_running_loop().create_task(self._flush_fs_watch(stashed))
 
-        watch.on("change", on_change)
-        self._fs_watch = watch
+        for root in self.roots:
+            watch = self.ctx.fs.watch(root, WatchOptions(filter=watch_cfg["files"]))
+            watch.on("change", on_change)
+            watches.append(watch)
+        self._fs_watches = watches
+        self._fs_watch = watches[0]  # legacy single-watch surface
         self._active = True
-        self.ctx.effect(lambda: lambda: self._stop_fs_watch(watch, task))
+        self.ctx.effect(lambda: lambda: self._stop_fs_watch(watches, task))
 
     async def _flush_fs_watch(self, stashed: set[Path]) -> None:
         await asyncio.sleep(self._watch_config["debounce"] / 1000)  # type: ignore[index]
@@ -271,13 +296,17 @@ class HmrService(Service):
         await self.reconcile(lambda: roots)
 
     def _stop_fs_watch(
-        self, watch: Any, task: asyncio.Task[None] | None
-    ) -> Awaitable[None] | None:
+        self, watches: list[Any], task: asyncio.Task[None] | None
+    ) -> None:
         if task is not None and not task.done():
             task.cancel()
         self._active = False
-        result: Awaitable[None] | None = watch.dispose()
-        return result
+        for watch in watches:
+            result = watch.dispose()
+            if result is not None and inspect.isawaitable(result):
+                asyncio.ensure_future(result)
+        self._fs_watches = []
+        self._fs_watch = None
 
     def start(self) -> None:
         """Start watching the root through the rc.13 fs service."""
@@ -290,22 +319,29 @@ class HmrService(Service):
         from animas.fs import WatchOptions
 
         files = self._watch_config["files"] if self._watch_config is not None else None
-        watch = self.ctx.fs.watch(self.root, WatchOptions(filter=files))
 
         def on_change(url: str) -> None:
             path = Path(url2pathname(urlsplit(url).path))
+            if self._is_ignored(path):
+                return
             result = self._on_file_change("change", path)
             if inspect.isawaitable(result):
                 asyncio.ensure_future(result)
 
-        watch.on("change", on_change)
+        disposers: list[Disposer] = []
+        for root in self.roots:
+            watch = self.ctx.fs.watch(root, WatchOptions(filter=files))
+            watch.on("change", on_change)
 
-        def dispose() -> None:
-            result = watch.dispose()
-            if result is not None and inspect.isawaitable(result):
-                asyncio.ensure_future(result)
+            def dispose(watch: Any = watch) -> None:
+                result = watch.dispose()
+                if result is not None and inspect.isawaitable(result):
+                    asyncio.ensure_future(result)
 
-        self._disposer = dispose
+            disposers.append(dispose)
+
+        self._disposers = disposers
+        self._disposer = disposers[0]  # legacy single-watch surface
         self._active = True
 
     def stop(self) -> None:
@@ -314,14 +350,16 @@ class HmrService(Service):
         self._debounce_task = None
         if task is not None:
             task.cancel()
-        if self._disposer is not None:
-            self._disposer()
-            self._disposer = None
-        if self._fs_watch is not None:
-            result = self._fs_watch.dispose()
+        for disposer in self._disposers:
+            disposer()
+        self._disposers = []
+        self._disposer = None
+        for watch in self._fs_watches:
+            result = watch.dispose()
             if result is not None and inspect.isawaitable(result):
                 asyncio.ensure_future(result)
-            self._fs_watch = None
+        self._fs_watches = []
+        self._fs_watch = None
         self._active = False
 
     # -- dependency graph (L13) ------------------------------------------------
@@ -347,7 +385,7 @@ class HmrService(Service):
                 stat = path.stat()
             except (ValueError, OSError):
                 continue
-            if not resolved.is_relative_to(self.root):
+            if self._root_for(resolved) is None:
                 continue
             nodes[name] = (resolved, (stat.st_mtime, stat.st_size))
         node_paths = {name: path for name, (path, _stat) in nodes.items()}
@@ -480,15 +518,51 @@ class HmrService(Service):
 
     # -- change intake (L14) ----------------------------------------------------
 
+    def _root_for(self, path: Path) -> Path | None:
+        """Return the watched root containing *path*, if any."""
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return None
+        for root in self.roots:
+            try:
+                resolved.relative_to(root)
+                return root
+            except ValueError:
+                continue
+        return None
+
+    def _is_ignored(self, path: Path) -> bool:
+        """Match dsh-style ignore patterns against a changed path."""
+        root = self._root_for(path)
+        if root is None:
+            return False
+        try:
+            relative = path.resolve().relative_to(root)
+        except OSError:
+            return False
+        parts = relative.parts
+        for raw in self.ignored:
+            pattern = raw.removeprefix("**/")
+            if fnmatch.fnmatch(path.name, pattern):
+                return True
+            if any(fnmatch.fnmatch(part, pattern) for part in parts):
+                return True
+            if fnmatch.fnmatch(relative.as_posix(), pattern):
+                return True
+        return False
+
     def _is_external_path(self, res_path: Path) -> bool:
-        """Check whether a resolved path is an external (framework) file."""
+        """Check whether a resolved path is outside every watched root."""
         if res_path in self._externals_paths:
             return True
-        try:
-            res_path.relative_to(self.root)
-        except ValueError:
-            return True
-        return False
+        for root in self.roots:
+            try:
+                res_path.relative_to(root)
+                return False
+            except ValueError:
+                continue
+        return True
 
     async def _on_external(self, url: str) -> None:
         """Handle a change to an external file via the full-reload hook."""
@@ -539,13 +613,13 @@ class HmrService(Service):
         match = self._find_module_by_path(res_path)
         if match is None:
             # Unloaded module declared external by name: derive the
-            # candidate name from the path (same derivation as the
-            # fallback in _find_module_by_path) and check it before
-            # falling through with no reload. By-path externals are
-            # already handled above via _is_external_path, and the
-            # path is under root here, so relative_to cannot fail.
-            module_candidate = ".".join(
-                res_path.relative_to(self.root).with_suffix("").parts
+            # candidate name from the containing watched root so a
+            # secondary root behaves like the primary one.
+            root = self._root_for(res_path)
+            module_candidate = (
+                ".".join(res_path.relative_to(root).with_suffix("").parts)
+                if root is not None
+                else ""
             )
             if module_candidate in self._externals_names:
                 await self._on_external(url)
